@@ -1,8 +1,7 @@
 use logos::Logos;
-use chumsky::prelude::*;
 
 
-#[derive(Logos, Debug, PartialEq)]
+#[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
 #[regex(r"//[^\n]*", logos::skip)]
 pub enum Token {
@@ -39,11 +38,8 @@ pub enum Token {
     #[token("fn")]
     Function,
 
-    #[regex("[a-zA-Z_][a-zA-Z0-9_]*")]
+    #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
-
-    #[regex("[0-9]+", |lex| lex.slice().parse::<i64>())]
-    Int(i64),
 
     #[token("let")]
     Let,
@@ -57,6 +53,9 @@ pub enum Token {
     #[token("null")]
     Null,
 
+    #[regex("[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?", |lex| lex.slice().parse::<f64>().ok())]
+    Num(f64),
+
     #[token("(")]
     ParensOpen,
 
@@ -66,6 +65,9 @@ pub enum Token {
     #[token(";")]
     Semi,
 
+    #[token(">>")]
+    ShiftRight,
+
     #[token("-")]
     Sub,
 
@@ -74,9 +76,9 @@ pub enum Token {
 
 pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
 
-    fn can_end(t: Token) -> bool {
+    fn can_end(t: &Token) -> bool {
         matches!(t,
-            Token::Ident(_) | Token::Int(_) |
+            Token::Ident(_) | Token::Num(_) |
             Token::BraceClose | Token::ParensClose
         )
     }
@@ -92,8 +94,8 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
 
     fn convert(t: Token) -> Token {
         match t {
-            Token::NewLine => unreachable!("new line handled separately")
-            _ => t
+            Token::NewLine => unreachable!("new line handled separately"),
+            _ => t,
         }
     }
 
@@ -103,7 +105,7 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
     let mut depth: i32 = 0;
     let mut i = 0;
 
-    while i < *raw.len() {
+    while i < raw.len() {
         let tok = &raw[i];
         match tok {
             Token::ParensOpen => depth += 1,
@@ -113,13 +115,13 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
 
         if *tok == Token::NewLine {
             i += 1;
-            if *depth > 0 { continue; }
+            if depth > 0 { continue; }
 
             let ends = prev.as_ref().map_or(false, can_end);
             if !ends { continue; }
 
             let mut j = i;
-            while j < *raw.len() && raw[j] == Token::NewLine { j += 1; }
+            while j < raw.len() && raw[j] == Token::NewLine { j += 1; }
 
             if let Some(nxt) = raw.get(j) {
                 if cont_next(nxt) { continue; }

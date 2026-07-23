@@ -1,2 +1,2 @@
 pub mod lex;
-mod parser;
+pub mod parser;

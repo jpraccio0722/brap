@@ -1,6 +1,8 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 mod parser;
+mod brap_graph;
+mod lowerer;
 
 /// Backend hook for the editor's "play" button.
 ///
