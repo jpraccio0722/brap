@@ -1,7 +1,6 @@
 use crate::{brap_graph::{environment::Value, ugen_nodes::NodeKind}, lowerer::lower::Lowerer, parser::parser::{Expr, Ident}};
 
 
-
 impl Lowerer {
     pub fn call(&mut self, func: &Ident, args: &[Expr]) -> Result<Value, String> {
         self.call_with(func, args, None)

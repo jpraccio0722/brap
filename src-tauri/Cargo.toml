@@ -13,6 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+cpal = "0.18.1"
 chumsky = "0.13.0"
 fundsp = "0.23.0"
 logos = "0.16.1"

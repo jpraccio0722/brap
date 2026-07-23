@@ -103,6 +103,10 @@ function App() {
     await invoke("run_code", { code: activeTab.content });
   }, [activeTab.content]);
 
+  const stop = useCallback(async () => {
+    await invoke("stop_audio");
+  }, []);
+
   const saveTab = useCallback(async () => {
     const tab = activeTab;
     let path = tab.path;
@@ -129,6 +133,9 @@ function App() {
       if (mod && e.key === "Enter") {
         e.preventDefault();
         void play();
+      } else if (mod && e.key === ".") {
+        e.preventDefault();
+        void stop();
       } else if (mod && e.key.toLowerCase() === "s") {
         e.preventDefault();
         void saveTab();
@@ -139,7 +146,7 @@ function App() {
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [play, saveTab, openTab]);
+  }, [play, stop, saveTab, openTab]);
 
   return (
     <div className="flex h-screen flex-col bg-neutral-900 text-neutral-100">
@@ -178,6 +185,17 @@ function App() {
             </svg>
             Play
             <span className="text-xs text-emerald-200/80">⌘↵</span>
+          </button>
+          <button
+            onClick={() => void stop()}
+            title="Stop (⌘.)"
+            className="inline-flex items-center gap-2 rounded-md bg-red-700 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-600 active:bg-red-800"
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
+              <path d="M6 6h12v12H6z" />
+            </svg>
+            Stop
+            <span className="text-xs text-red-200/80">⌘.</span>
           </button>
         </div>
       </header>

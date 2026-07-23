@@ -57,6 +57,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
 }
 
 pub fn parse(code: String) -> Result<Vec<BrapItem>, String> {
+    
     let raw_tokens: Vec<Token> = Token::lexer(&code)
         .collect::<Result<_, _>>()
         .map_err(|_| "lexing error".to_string())?;

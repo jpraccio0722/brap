@@ -10,7 +10,7 @@ pub struct Lowerer {
     pub depth: usize,
 }
 
-pub fn lower(items: &[BrapItem]) -> Result<BrapGraph, String> {
+pub fn lower(items: &Vec<BrapItem>) -> Result<BrapGraph, String> {
     let mut lw = Lowerer { env: Env::new(), graph: BrapGraph::default(), depth: 0 };
 
     for item in items {
