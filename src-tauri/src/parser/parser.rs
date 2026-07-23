@@ -107,8 +107,11 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
             .map(|(stmts, tail)| Expr::Block { stmts, tail: Box::new(tail) });
 
+        // `call` must be tried before `var`: both start with an Ident, and
+        // choice commits to the first success — var-first would leave `(...)`
+        // unconsumed and split `sin(440)` into two items.
         let atom = choice((
-            int, block, var, paren, call
+            int, block, call, var, paren,
         ));
 
         let unary = just(Token::Sub)
