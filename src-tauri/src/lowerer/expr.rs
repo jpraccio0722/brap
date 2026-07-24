@@ -6,7 +6,7 @@ use crate::parser::parser::Expr;
 impl Lowerer {
     pub fn expr(&mut self, e: &Expr) -> Result<Value, String> {
         match e {
-            Expr::Ad { lhs, rhs } =>
+            Expr::Add { lhs, rhs } =>
                 self.binop(NodeKind::Add, |a, b| a + b, lhs, rhs),
             
             Expr::Block { stmts , tail } => Ok(Value::Number(0.0)), // TODO not implemented

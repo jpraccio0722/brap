@@ -19,7 +19,7 @@ pub enum BrapItem {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
-    Ad   { lhs: Box<Expr>, rhs: Box<Expr> },
+    Add   { lhs: Box<Expr>, rhs: Box<Expr> },
     Block { stmts: Vec<Statement>, tail: Box<Expr> },
     Call  { func: Ident, args: Vec<Expr> },
     Chain { lhs: Box<Expr>, rhs: Box<Expr> },
@@ -141,7 +141,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .then(product)
             .repeated(),
             |lhs, (op, rhs)| match op {
-                BinOp::Add => Expr::Ad { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                BinOp::Add => Expr::Add { lhs: Box::new(lhs), rhs: Box::new(rhs) },
                 BinOp::Sub => Expr::Sub { lhs: Box::new(lhs), rhs: Box::new(rhs) },
                 _ => unreachable!(),
             },
@@ -221,7 +221,7 @@ mod tests {
                 Param { name: Ident("a".to_string()), default: None },
                 Param { name: Ident("b".to_string()), default: None },
             ],
-            body: Expr::Ad { lhs: var("a"), rhs: var("b") },
+            body: Expr::Add { lhs: var("a"), rhs: var("b") },
         }];
 
         assert_eq!(ast, expected);

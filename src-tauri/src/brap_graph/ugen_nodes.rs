@@ -6,9 +6,20 @@ pub struct NodeId(pub usize);
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum NodeKind {
-    Add, Chain, Div,
-    Mul, Neg, Sin,
-    Saw, Sub,
+    Add, ADSR, Afollow, Allpass, Allpole,
+    Bandpass, Bandrez, Bell, Biquad, Brown, Butterpass,
+    Chorus, Clip, ClipTo,
+    Dcblock, Declick, Delay, Div, DsfSaw, DsfSquare,
+    Fir3, Follow,
+    Hammond, Highpass, Highpole, Highshelf, Hold, Impulse,
+    Limiter, Lorenz, Lowpass, Lowpole, Lowrez, Lowshelf,
+    Mls, MlsBits, Moog, Morph, Mul, Neg,
+    Noise, Notch,
+    Organ,
+    Peak, Pink, Pinkpass, Pluck, PolyPulse, PolySaw, PolySquare, Pulse,
+    Ramp, Resonator, Rossler,
+    Saw, Sin, SoftSaw, Square, Sub,
+    Tap, Tick, Triangle,
 }
 
 #[derive(Clone, Debug, PartialEq)]

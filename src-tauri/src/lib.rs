@@ -19,7 +19,7 @@ mod lowerer;
 fn run_code(code: String, engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), String> {
     let ast = parse(code)?;
     let graph_ir = lower(&ast)?;
-    let audio_graph = realize(&graph_ir);
+    let audio_graph = realize(&graph_ir)?;
 
     let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     swap_program(&mut eng, audio_graph);
