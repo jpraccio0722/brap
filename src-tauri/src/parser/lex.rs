@@ -35,11 +35,17 @@ pub enum Token {
     #[token("..=")]
     DotDotEq,
 
+    #[token("for")]
+    For,
+
     #[token("fn")]
     Function,
 
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
+
+    #[token("in")]
+    In,
 
     #[token("let")]
     Let,
@@ -53,7 +59,7 @@ pub enum Token {
     #[token("null")]
     Null,
 
-    #[regex("[+-]?(\\d+\\.?\\d*|\\.\\d+)([eE][+-]?\\d+)?", |lex| lex.slice().parse::<f64>().ok())]
+    #[regex(r"(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?", |lex| lex.slice().parse::<f64>().ok())]
     Num(f64),
 
     #[token("(")]

@@ -24,6 +24,7 @@ pub enum Expr {
     Call  { func: Ident, args: Vec<Expr> },
     Chain { lhs: Box<Expr>, rhs: Box<Expr> },
     Div   { lhs: Box<Expr>, rhs: Box<Expr> },
+    For { var: Ident, range: Range, body: Box<Expr> },
     Num(f64),
     Let { name: Ident, value: Box<Expr>, body: Box<Expr> },
     Mul   { lhs: Box<Expr>, rhs: Box<Expr> },
@@ -39,15 +40,15 @@ pub enum Statement {
 }
 
 #[allow(dead_code)]
-enum Pattern {
+pub enum Pattern {
     Ident(Ident)
 }
 
-#[allow(dead_code)]
-enum Range { Const(i64, i64) }
+#[derive(Clone, Debug, PartialEq)]
+pub enum Range { Const(i64, i64) }
 
 #[derive(Clone, Debug)]
-enum BinOp {
+pub enum BinOp {
     Mul, Div, Add, Sub
 }
 
@@ -100,19 +101,42 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             expr.clone().map(Statement::Expr),
         ));
 
+        // Parsed as one separated list rather than `stmts.then(tail)`: the
+        // lexer inserts a Term after the tail expression when `}` sits on its
+        // own line, and a greedy `repeated()` would swallow the tail as a
+        // statement and then find no tail left. Splitting the last element off
+        // afterwards sidesteps that entirely.
         let block = stmt.clone()
-            .then_ignore(sep.clone())
-            .repeated()
+            .separated_by(sep.clone())
+            .allow_leading()
+            .allow_trailing()
             .collect::<Vec<_>>()
-            .then(expr.clone())
             .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
-            .map(|(stmts, tail)| Expr::Block { stmts, tail: Box::new(tail) });
+            .try_map(|mut stmts, span| match stmts.pop() {
+                Some(Statement::Expr(tail)) =>
+                    Ok(Expr::Block { stmts, tail: Box::new(tail) }),
+                _ => Err(Rich::custom(span, "a block must end in an expression")),
+            });
 
+        let range = select! { Token::Num(n) => n }
+            .then_ignore(just(Token::DotDotEq))
+            .then(select! { Token::Num(n) => n })
+            .map(|(lo, hi)| Range::Const(lo as i64, hi as i64));
+
+        let for_expr = just(Token::For)
+            .ignore_then(ident())
+            .then_ignore(just(Token::In))
+            .then(range)
+            .then(block.clone())
+            .map(|((var, range), body)| Expr::For {
+                var, range, body: Box::new(body)
+            });
+        
         // `call` must be tried before `var`: both start with an Ident, and
         // choice commits to the first success — var-first would leave `(...)`
         // unconsumed and split `sin(440)` into two items.
         let atom = choice((
-            int, block, call, var, paren,
+            int, for_expr, block, call, var, paren,
         ));
 
         let unary = just(Token::Sub)

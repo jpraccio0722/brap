@@ -185,6 +185,24 @@ mod tests {
         assert!(peak <= 2.0, "two unit sines can't exceed 2.0, got {peak}");
     }
 
+    /// A `for` loop unrolls to an ordinary graph, so it realizes and renders
+    /// like any hand-written sum. Four harmonics of 110 Hz.
+    #[test]
+    fn for_loop_produces_audio() {
+        let items = parse("for i in 1..=4 { sin(i * 110) / 4 }\n".to_string()).unwrap();
+        let graph = lower(&items).unwrap();
+        let mut net = realize(&graph).unwrap();
+
+        net.check();
+        net.set_sample_rate(44100.0);
+
+        let samples: Vec<f32> = (0..4410).map(|_| net.get_mono()).collect();
+        assert!(samples.iter().all(|s| s.is_finite()));
+        let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak > 0.3, "expected audible signal, peak was {peak}");
+        assert!(peak <= 1.0, "four quarter-amplitude sines can't exceed 1.0, got {peak}");
+    }
+
     /// A 2 Hz sine gate retriggers the envelope; output must stay in 0..=1
     /// and actually move.
     #[test]
