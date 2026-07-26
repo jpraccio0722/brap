@@ -22,16 +22,27 @@ pub enum Expr {
     Add   { lhs: Box<Expr>, rhs: Box<Expr> },
     Block { stmts: Vec<Statement>, tail: Box<Expr> },
     Call  { func: Ident, args: Vec<Expr> },
+    Cmp { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Chain { lhs: Box<Expr>, rhs: Box<Expr> },
     Div   { lhs: Box<Expr>, rhs: Box<Expr> },
-    For { var: Ident, range: Range, body: Box<Expr> },
-    Num(f64),
+    For { var: Ident, iter: Box<Expr>, body: Box<Expr> },
+    If  { cond: Box<Expr>, then: Box<Expr>, otherwise: Option<Box<Expr>> },
+    Index { base: Box<Expr>, index: Box<Expr> },
     Let { name: Ident, value: Box<Expr>, body: Box<Expr> },
+    List(Vec<Expr>),
     Mul   { lhs: Box<Expr>, rhs: Box<Expr> },
     Neg { expr: Box<Expr> },
+    Num(f64),
+    Range { lo: Box<Expr>, hi: Box<Expr> },
+    Rem { lhs: Box<Expr>, rhs: Box<Expr> },
     Sub   { lhs: Box<Expr>, rhs: Box<Expr> },
     Var(Ident),
 }
+
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CmpOp { Lt, Le, Gt, Ge, Eq, Ne }
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Statement {
@@ -47,9 +58,17 @@ pub enum Pattern {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Range { Const(i64, i64) }
 
+// One enum per precedence tier, so each fold below can match exhaustively.
+// A single shared BinOp would force a catch-all arm in both, which is how
+// `Rem` once slipped through the product fold into `unreachable!()`.
 #[derive(Clone, Debug)]
-pub enum BinOp {
-    Mul, Div, Add, Sub
+pub enum ProductOp {
+    Mul, Div, Rem,
+}
+
+#[derive(Clone, Debug)]
+pub enum SumOp {
+    Add, Sub,
 }
 
 fn ident<'a, I>() -> impl Parser<'a, I, Ident, extra::Err<Rich<'a, Token>>> + Clone
@@ -88,24 +107,26 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .allow_trailing()
             .collect::<Vec<_>>();
 
+        let list = expr.clone()
+            .separated_by(just(Token::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(Token::BracketOpen), just(Token::BracketClose))
+            .map(Expr::List);
+
         let call = ident()
             .then(args.delimited_by(just(Token::ParensOpen), just(Token::ParensClose)))
             .map(|(func, args)| Expr::Call { func, args });
 
         let stmt = choice((
+            expr.clone().map(Statement::Expr),
             just(Token::Let)
                 .ignore_then(ident())
                 .then_ignore(just(Token::Assign))
                 .then(expr.clone())
                 .map(|(name, value)| Statement::Let { name, value: Box::new(value) }),
-            expr.clone().map(Statement::Expr),
         ));
 
-        // Parsed as one separated list rather than `stmts.then(tail)`: the
-        // lexer inserts a Term after the tail expression when `}` sits on its
-        // own line, and a greedy `repeated()` would swallow the tail as a
-        // statement and then find no tail left. Splitting the last element off
-        // afterwards sidesteps that entirely.
         let block = stmt.clone()
             .separated_by(sep.clone())
             .allow_leading()
@@ -118,61 +139,110 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
                 _ => Err(Rich::custom(span, "a block must end in an expression")),
             });
 
-        let range = select! { Token::Num(n) => n }
-            .then_ignore(just(Token::DotDotEq))
-            .then(select! { Token::Num(n) => n })
-            .map(|(lo, hi)| Range::Const(lo as i64, hi as i64));
-
         let for_expr = just(Token::For)
             .ignore_then(ident())
             .then_ignore(just(Token::In))
-            .then(range)
+            .then(expr.clone())
             .then(block.clone())
-            .map(|((var, range), body)| Expr::For {
-                var, range, body: Box::new(body)
+            .map(|((var, iter), body)| Expr::For {
+                var, iter: Box::new(iter), body: Box::new(body)
             });
         
+        let if_expr = recursive(|if_expr| {
+            just(Token::If)
+                .ignore_then(expr.clone())
+                .then(block.clone())
+                .then(
+                    just(Token::Else)
+                        .ignore_then(choice((if_expr.clone(), block.clone())))
+                        .or_not()
+                )
+                .map(|((cond, then), otherwise)| Expr::If {
+                    cond: Box::new(cond),
+                    then: Box::new(then),
+                    otherwise: otherwise.map(Box::new),
+                })
+        });
+
+        let let_expr = just(Token::Let)
+            .ignore_then(ident())
+            .then_ignore(just(Token::Assign))
+            .then(expr.clone())
+            .then_ignore(just(Token::In)) 
+            .then(expr.clone())
+            .map(|((name, value), body)| Expr::Let {
+                name, value: Box::new(value), body: Box::new(body),
+            });
+
         // `call` must be tried before `var`: both start with an Ident, and
         // choice commits to the first success — var-first would leave `(...)`
         // unconsumed and split `sin(440)` into two items.
         let atom = choice((
-            int, for_expr, block, call, var, paren,
+            int, list, for_expr, if_expr, let_expr, block, call, var, paren,
         ));
+
+        let postfix = atom.foldl(
+            expr.clone()
+            .delimited_by(just(Token::BracketOpen), just(Token::BracketClose))
+            .repeated(),
+            |base, index| Expr::Index { base: Box::new(base), index: Box::new(index) },
+        );
 
         let unary = just(Token::Sub)
             .repeated()
-            .foldr(atom, |_, rhs| Expr::Neg { expr: Box::new(rhs) });
+            .foldr(postfix, |_, rhs| Expr::Neg { expr: Box::new(rhs) });
 
         let product = unary.clone().foldl(
             choice((
-                just(Token::Mul).to(BinOp::Mul),
-                just(Token::Div).to(BinOp::Div),
+                just(Token::Mul).to(ProductOp::Mul),
+                just(Token::Div).to(ProductOp::Div),
+                just(Token::Percent).to(ProductOp::Rem),
             ))
             .then(unary)
             .repeated(),
             |lhs, (op, rhs)| match op {
-                BinOp::Mul => Expr::Mul { lhs: Box::new(lhs), rhs: Box::new(rhs) },
-                BinOp::Div => Expr::Div { lhs: Box::new(lhs), rhs: Box::new(rhs) },
-                _ => unreachable!(),
+                ProductOp::Mul => Expr::Mul { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                ProductOp::Div => Expr::Div { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                ProductOp::Rem => Expr::Rem { lhs: Box::new(lhs), rhs: Box::new(rhs) },
             },
         );
 
         let sum = product.clone().foldl(
             choice((
-                just(Token::Ad).to(BinOp::Add),
-                just(Token::Sub).to(BinOp::Sub),
+                just(Token::Ad).to(SumOp::Add),
+                just(Token::Sub).to(SumOp::Sub),
             ))
             .then(product)
             .repeated(),
             |lhs, (op, rhs)| match op {
-                BinOp::Add => Expr::Add { lhs: Box::new(lhs), rhs: Box::new(rhs) },
-                BinOp::Sub => Expr::Sub { lhs: Box::new(lhs), rhs: Box::new(rhs) },
-                _ => unreachable!(),
+                SumOp::Add => Expr::Add { lhs: Box::new(lhs), rhs: Box::new(rhs) },
+                SumOp::Sub => Expr::Sub { lhs: Box::new(lhs), rhs: Box::new(rhs) },
             },
         );
 
-        let chain = sum.clone().foldl(
-            just(Token::ShiftRight).ignore_then(sum.clone()).repeated(),
+        let compare = sum.clone().foldl(
+                choice((
+                    just(Token::Le).to(CmpOp::Le),
+                    just(Token::Lt).to(CmpOp::Lt),
+                    just(Token::Ge).to(CmpOp::Ge),
+                    just(Token::Gt).to(CmpOp::Gt),
+                    just(Token::EqEq).to(CmpOp::Eq),
+                    just(Token::Ne).to(CmpOp::Ne),
+                ))
+                .then(sum.clone())
+                .repeated(),
+                |lhs, (op, rhs)| Expr::Cmp { op, lhs: Box::new(lhs), rhs: Box::new(rhs) },
+        );
+
+        let range = compare.clone()
+            .then(just(Token::DotDotEq).ignore_then(compare.clone()).or_not())
+            .map(|(lo, hi)| match hi {
+                Some(hi) => Expr::Range { lo: Box::new(lo), hi: Box::new(hi) },
+                None => lo,
+        });
+
+        let chain = range.clone().foldl(
+            just(Token::ShiftRight).ignore_then(compare.clone()).repeated(),
             |lhs, rhs| Expr::Chain { lhs: Box::new(lhs), rhs: Box::new(rhs) }
         );
 
@@ -212,12 +282,10 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
 
     let item = choice((
         function,
-        let_item,
         expr().map(BrapItem::Expr),
+        let_item,
     ));
 
-    // A program is a sequence of items, each optionally surrounded by
-    // terminators (statement breaks the lexer inserts for newlines).
     just(Token::Term)
         .repeated()
         .ignore_then(item)

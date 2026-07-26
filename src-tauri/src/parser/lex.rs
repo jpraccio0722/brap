@@ -35,23 +35,47 @@ pub enum Token {
     #[token("..=")]
     DotDotEq,
 
+    #[token("else")]
+    Else,
+
+    #[token("==")]
+    EqEq,
+    
     #[token("for")]
     For,
 
     #[token("fn")]
     Function,
+    
+    #[token(">=")]
+    Ge,
 
+    #[token(">")]
+    Gt,
+    
     #[regex("[a-zA-Z_][a-zA-Z0-9_]*", |lex| lex.slice().to_string())]
     Ident(String),
+
+    #[token("if")]
+    If,
 
     #[token("in")]
     In,
 
+    #[token("<=")]
+    Le,
+    
     #[token("let")]
     Let,
 
+    #[token("<")]
+    Lt,
+
     #[token("*")]
     Mul,
+
+    #[token("!=")]
+    Ne,
 
     #[token("\n")]
     NewLine,
@@ -67,6 +91,9 @@ pub enum Token {
 
     #[token(")")]
     ParensClose,
+
+    #[token("%")]
+    Percent,
 
     #[token(";")]
     Semi,
@@ -94,7 +121,9 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
             Token::Ad | Token::Assign | Token::BraceOpen |
             Token::BracketOpen | Token::Colon |
             Token::Comma | Token::Div | Token::DotDotEq |
-            Token::Mul | Token::Sub
+            Token::Else | Token::EqEq | Token::Ge | Token::Gt |
+            Token::Le | Token::Lt | Token::Mul | Token::Ne |
+            Token::Percent | Token::ShiftRight | Token::Sub
         )
     }
 
@@ -114,8 +143,8 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
     while i < raw.len() {
         let tok = &raw[i];
         match tok {
-            Token::ParensOpen => depth += 1,
-            Token::ParensClose => depth -= 1,
+            Token::ParensOpen | Token::BracketOpen => depth += 1,
+            Token::ParensClose | Token::BracketClose => depth -= 1,
             _ => {}
         }
 

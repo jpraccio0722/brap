@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use crate::{brap_graph::{environment::Value, ugen_nodes::NodeKind}, lowerer::lower::Lowerer, parser::parser::{Expr, Ident}};
 
 
@@ -15,6 +17,10 @@ impl Lowerer {
         
         for arg in args {
             arg_vals.push(self.expr(arg)?);
+        }
+
+        if let Some(v) = self.list_builtin(&func.0, &arg_vals)? {
+            return Ok(v);
         }
 
         if let Some((kind, arity)) = self.builtin(&func.0) {
@@ -58,6 +64,53 @@ impl Lowerer {
         self.depth -= 1;
         result
         
+    }
+
+    /// Compile-time operations on lists. Unlike the ugen builtins below, these
+    /// push no nodes — they consume Values and return one. `Ok(None)` means the
+    /// name isn't a list builtin, so the caller should keep looking.
+    fn list_builtin(&self, func: &str, args: &[Value]) -> Result<Option<Value>, String> {
+        match func {
+            "len" => {
+                if args.len() != 1 {
+                    return Err(format!("len expects 1 argument, got {}", args.len()));
+                }
+                match &args[0] {
+                    Value::List(items) => Ok(Some(Value::Number(items.len() as f64))),
+                    _ => Err("len expects a list".into()),
+                }
+            }
+
+            // `zip(a, b)` pairs elements positionally: [[a0, b0], [a1, b1], ...].
+            // Lengths must match — at lowering time a mismatch is a mistake, not
+            // something to silently truncate.
+            "zip" => {
+                if args.is_empty() {
+                    return Err("zip expects at least one list".into());
+                }
+                let lists = args.iter()
+                    .map(|v| match v {
+                        Value::List(items) => Ok(items.clone()),
+                        _ => Err("zip expects every argument to be a list".to_string()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let len = lists[0].len();
+                if let Some(i) = lists.iter().position(|l| l.len() != len) {
+                    return Err(format!(
+                        "zip: argument {} has length {}, but argument 1 has length {}",
+                        i + 1, lists[i].len(), len));
+                }
+
+                let rows = (0..len)
+                    .map(|i| Value::List(Rc::new(
+                        lists.iter().map(|l| l[i].clone()).collect())))
+                    .collect();
+                Ok(Some(Value::List(Rc::new(rows))))
+            }
+
+            _ => Ok(None),
+        }
     }
 
     fn builtin(&self, func: &str) -> Option<(NodeKind, usize)> {

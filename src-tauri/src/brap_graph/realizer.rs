@@ -13,8 +13,13 @@ fn const_param(n: &UGenNode, idx: usize, name: &str) -> Result<f32, String> {
     }
 }
 
+/// Realize an IR graph into a runnable network.
+///
+/// The result is always 0-in / 2-out. Both consumers require it: the engine's
+/// program slot is stereo (crossfade asserts matching arity) and the sequencer
+/// is stereo (push asserts it). A mono result fans out to both channels.
 pub fn realize(graph: &BrapGraph) -> Result<Net, String> {
-    let mut net = Net::new(0, 1);
+    let mut net = Net::new(0, 2);
     let mut ids: Vec<fundsp::net::NodeId> = Vec::with_capacity(graph.nodes.len());
 
     for n in &graph.nodes {
@@ -154,9 +159,13 @@ pub fn realize(graph: &BrapGraph) -> Result<Net, String> {
         ids.push(fid);
     }
 
-    if let Some(out) = graph.output {
-        net.pipe_output(ids[out.0]);
-    }
+    // A graph with no output is valid — it just makes silence.
+    let out_node = match graph.output {
+        Some(out) => ids[out.0],
+        None => net.push(Box::new(dc(0.0))),
+    };
+    net.connect_output(out_node, 0, 0);
+    net.connect_output(out_node, 0, 1);
 
     Ok(net)
 }

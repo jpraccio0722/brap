@@ -8,6 +8,7 @@ pub enum Value {
     Number(f64),
     Signal(NodeId),
     Function(Rc<FunctionDef>),
+    List(Rc<Vec<Value>>),
 }
 
 pub struct FunctionDef {

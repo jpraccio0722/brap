@@ -1,11 +1,17 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use crate::{brap_graph::realizer::{self, realize}, engine::swap_program, lowerer::lower::lower, parser::parser::parse};
+use crate::{brap_graph::realizer::realize, engine::swap_program, lowerer::lower::lower, parser::parser::parse};
 use crate::engine::AudioEngine;
+use crate::pattern::pattern::Pattern;
+use crate::pattern::patterns::{Binding, Patterns};
+use crate::scheduler::scheduler::SchedulerState;
+use crate::scheduler::voice::Instruments;
 
 use std::sync::Mutex;
 use tauri::Manager;
 
+mod pattern;
+mod scheduler;
 mod engine;
 mod parser;
 mod brap_graph;
@@ -13,13 +19,24 @@ mod lowerer;
 
 /// Backend hook for the editor's "play" button.
 ///
-/// Intentionally empty for now — it just receives the editor contents so the
-/// frontend has something real to call. Wire up actual execution here later.
+/// Produces two artifacts from one program: the persistent graph, which is
+/// crossfaded into the engine's slot, and the instrument definitions, which
+/// the scheduler uses to build voices.
 #[tauri::command]
-fn run_code(code: String, engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), String> {
+fn run_code(
+    code: String,
+    engine: tauri::State<Mutex<AudioEngine>>,
+    sched: tauri::State<SchedulerState>,
+) -> Result<(), String> {
     let ast = parse(code)?;
     let graph_ir = lower(&ast)?;
     let audio_graph = realize(&graph_ir)?;
+
+    // Instruments first: if the graph swap fails we have not half-updated.
+    *sched
+        .instruments
+        .lock()
+        .map_err(|_| "instruments lock poisoned")? = Instruments::from_program(&ast);
 
     let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     swap_program(&mut eng, audio_graph);
@@ -27,12 +44,28 @@ fn run_code(code: String, engine: tauri::State<Mutex<AudioEngine>>) -> Result<()
     Ok(())
 }
 
-/// Backend hook for the editor's "stop" button. Fades the audio engine back
-/// to silence without tearing down the stream.
+/// Temporary bridge until the language grows pattern syntax.
+///
+/// `steps` uses `None` for a rest; each value becomes the argument to the
+/// named instrument `fn`. Replaces the whole pattern set, like an eval will.
 #[tauri::command]
-fn stop_audio(engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), String> {
-    let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
-    engine::stop(&mut eng);
+fn set_pattern(
+    instrument: String,
+    steps: Vec<Option<f64>>,
+    sched: tauri::State<SchedulerState>,
+) -> Result<(), String> {
+    let mut patterns = sched.patterns.lock().map_err(|_| "patterns lock poisoned")?;
+    *patterns = Patterns {
+        bindings: vec![Binding { instrument, pattern: Pattern::Steps(steps) }],
+    };
+    Ok(())
+}
+
+/// Stop all patterns. The clock keeps running.
+#[tauri::command]
+fn clear_patterns(sched: tauri::State<SchedulerState>) -> Result<(), String> {
+    let mut patterns = sched.patterns.lock().map_err(|_| "patterns lock poisoned")?;
+    *patterns = Patterns::default();
     Ok(())
 }
 
@@ -55,9 +88,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        .invoke_handler(tauri::generate_handler![run_code, stop_audio, save_file, read_file])
+        .invoke_handler(tauri::generate_handler![
+            run_code,
+            set_pattern,
+            clear_patterns,
+            save_file,
+            read_file
+        ])
         .setup(|app| {
-            app.manage(Mutex::new(engine::start()?));
+            let (engine, seq) = engine::start()?;
+            let clock = engine.clock.clone();
+            let sched = SchedulerState::new();
+
+            // Free-runs for the life of the app; evals only swap what it reads.
+            scheduler::scheduler::start(seq, clock, sched.clone());
+
+            app.manage(Mutex::new(engine));
+            app.manage(sched);
             Ok(())
         })
         .run(tauri::generate_context!())
