@@ -102,6 +102,9 @@ impl Lowerer {
             "declick" => Some((NodeKind::Declick, 1)),
             "delay" => Some((NodeKind::Delay, 2)),
             "dsf_saw" => Some((NodeKind::DsfSaw, 2)),
+            // Time-based envelopes. `env` needs the note length, which voices
+            // pre-bind as `dur`; `perc` is self-contained.
+            "env" => Some((NodeKind::Env, 5)),
             "dsf_square" => Some((NodeKind::DsfSquare, 2)),
             "fir3" => Some((NodeKind::Fir3, 2)),
             "follow" => Some((NodeKind::Follow, 2)),
@@ -125,6 +128,7 @@ impl Lowerer {
             "notch" => Some((NodeKind::Notch, 3)),
             "organ" => Some((NodeKind::Organ, 1)),
             "peak" => Some((NodeKind::Peak, 3)),
+            "perc" => Some((NodeKind::Perc, 2)),
             "pink" => Some((NodeKind::Pink, 0)),
             "pinkpass" => Some((NodeKind::Pinkpass, 1)),
             "pluck" => Some((NodeKind::Pluck, 4)),

@@ -19,8 +19,8 @@ mod lowerer;
 /// Backend hook for the editor's "play" button.
 ///
 /// Produces two artifacts from one program: the persistent graph, which is
-/// crossfaded into the engine's slot, and the instrument definitions, which
-/// the scheduler uses to build voices.
+/// crossfaded into the engine's slot, and the pattern bindings, which go to
+/// the scheduler along with the instrument definitions it builds voices from.
 #[tauri::command]
 fn run_code(
     code: String,

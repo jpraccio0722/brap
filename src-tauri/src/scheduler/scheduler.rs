@@ -111,7 +111,7 @@ fn schedule_pass(
         let begin_secs = clock.secs_at(bound.event.begin);
         let dur_secs = clock.secs_at(bound.event.end) - begin_secs;
 
-        match build_voice(&instruments, &bound.instrument, bound.event.value) {
+        match build_voice(&instruments, &bound.instrument, bound.event.value, dur_secs) {
             // A bad instrument must not kill the thread: log it and let the
             // rest of the pattern keep playing.
             Err(e) => eprintln!("scheduler: {}: {e}", bound.instrument),

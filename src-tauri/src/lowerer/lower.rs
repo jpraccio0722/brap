@@ -32,6 +32,19 @@ fn seed_from_clock() -> u64 {
 }
 
 pub fn lower(items: &Vec<BrapItem>) -> Result<Lowered, String> {
+    lower_inner(items, None)
+}
+
+/// Lower a single scheduler voice.
+///
+/// `dur` (the note length in seconds) is pre-bound as an ordinary number, so an
+/// instrument can shape itself against the note it is playing — `env(a, d, s,
+/// r, dur)`. Outside a voice the name is simply unbound.
+pub fn lower_voice(items: &Vec<BrapItem>, dur: f64) -> Result<Lowered, String> {
+    lower_inner(items, Some(dur))
+}
+
+fn lower_inner(items: &Vec<BrapItem>, dur: Option<f64>) -> Result<Lowered, String> {
     let mut lw = Lowerer {
         env: Env::new(),
         graph: BrapGraph::default(),
@@ -39,6 +52,10 @@ pub fn lower(items: &Vec<BrapItem>) -> Result<Lowered, String> {
         bindings: Vec::new(),
         rng: seed_from_clock(),
     };
+
+    if let Some(dur) = dur {
+        lw.env.define("dur", Value::Number(dur));
+    }
 
     for item in items {
         lw.item(item)?;
