@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn added_signals_produce_audio() {
         let items = parse("sin(220) + sin(330)\n".to_string()).unwrap();
-        let graph = lower(&items).unwrap();
+        let graph = lower(&items).unwrap().graph;
         let mut net = realize(&graph).unwrap();
 
         net.check(); // validates every port is wired
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn for_loop_produces_audio() {
         let items = parse("for i in 1..=4 { sin(i * 110) / 4 }\n".to_string()).unwrap();
-        let graph = lower(&items).unwrap();
+        let graph = lower(&items).unwrap().graph;
         let mut net = realize(&graph).unwrap();
 
         net.check();

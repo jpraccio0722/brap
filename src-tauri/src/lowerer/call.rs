@@ -9,6 +9,11 @@ impl Lowerer {
     }
 
     pub fn call_with(&mut self, func: &Ident, args: &[Expr], piped: Option<Value>) -> Result<Value, String> {
+        // Before evaluation: play needs the instrument argument syntactically.
+        if Lowerer::is_play(&func.0) {
+            return self.play(args, piped);
+        }
+
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);
 
         if let Some(p) = piped {
@@ -38,12 +43,25 @@ impl Lowerer {
             return Err(format!("{} is not a function", func.0));
         };
 
+        self.apply(&func.0, def, arg_vals)
+    }
+
+    /// Inline a user function against already-evaluated arguments.
+    ///
+    /// Split out of `call_with` so list builtins that take a function — `filter`
+    /// — can invoke one without having the original `Expr`s.
+    pub fn apply(
+        &mut self,
+        name: &str,
+        def: Rc<crate::brap_graph::environment::FunctionDef>,
+        arg_vals: Vec<Value>,
+    ) -> Result<Value, String> {
         if arg_vals.len() > def.params.len() {
             return Err(format!("{} expects at most {} args, got {}",
-                               func.0, def.params.len(), arg_vals.len()));
+                               name, def.params.len(), arg_vals.len()));
         }
         if self.depth >= 64 {
-            return Err(format!("call depth exceeded inlining {} (recursive fn?)", func.0));
+            return Err(format!("call depth exceeded inlining {} (recursive fn?)", name));
         }
 
         self.depth += 1;
@@ -54,7 +72,7 @@ impl Lowerer {
                     (Some(v), _) => v.clone(),
                     (None, Some(d)) => self.expr(d)?,
                     (None, None) => return Err(format!(
-                        "{}: missing argument '{}'", func.0, param.name.0)),
+                        "{}: missing argument '{}'", name, param.name.0)),
                 };
                 self.env.define(&param.name.0, v);
             }
@@ -63,54 +81,6 @@ impl Lowerer {
         self.env.pop_scope();
         self.depth -= 1;
         result
-        
-    }
-
-    /// Compile-time operations on lists. Unlike the ugen builtins below, these
-    /// push no nodes — they consume Values and return one. `Ok(None)` means the
-    /// name isn't a list builtin, so the caller should keep looking.
-    fn list_builtin(&self, func: &str, args: &[Value]) -> Result<Option<Value>, String> {
-        match func {
-            "len" => {
-                if args.len() != 1 {
-                    return Err(format!("len expects 1 argument, got {}", args.len()));
-                }
-                match &args[0] {
-                    Value::List(items) => Ok(Some(Value::Number(items.len() as f64))),
-                    _ => Err("len expects a list".into()),
-                }
-            }
-
-            // `zip(a, b)` pairs elements positionally: [[a0, b0], [a1, b1], ...].
-            // Lengths must match — at lowering time a mismatch is a mistake, not
-            // something to silently truncate.
-            "zip" => {
-                if args.is_empty() {
-                    return Err("zip expects at least one list".into());
-                }
-                let lists = args.iter()
-                    .map(|v| match v {
-                        Value::List(items) => Ok(items.clone()),
-                        _ => Err("zip expects every argument to be a list".to_string()),
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-
-                let len = lists[0].len();
-                if let Some(i) = lists.iter().position(|l| l.len() != len) {
-                    return Err(format!(
-                        "zip: argument {} has length {}, but argument 1 has length {}",
-                        i + 1, lists[i].len(), len));
-                }
-
-                let rows = (0..len)
-                    .map(|i| Value::List(Rc::new(
-                        lists.iter().map(|l| l[i].clone()).collect())))
-                    .collect();
-                Ok(Some(Value::List(Rc::new(rows))))
-            }
-
-            _ => Ok(None),
-        }
     }
 
     fn builtin(&self, func: &str) -> Option<(NodeKind, usize)> {

@@ -56,8 +56,8 @@ pub fn build_voice(
         args: vec![Expr::Num(value)],
     }));
 
-    let graph = lower(&items)?;
-    realize(&graph)
+    let lowered = lower(&items)?;
+    realize(&lowered.graph)
 }
 
 #[cfg(test)]

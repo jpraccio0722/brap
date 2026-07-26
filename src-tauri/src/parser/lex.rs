@@ -92,6 +92,10 @@ pub enum Token {
     #[token(")")]
     ParensClose,
 
+    /// A rest inside a pattern: `[220, `, 330, `]`.
+    #[token("`")]
+    Rest,
+
     #[token("%")]
     Percent,
 
@@ -111,15 +115,18 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
 
     fn can_end(t: &Token) -> bool {
         matches!(t,
-            Token::Ident(_) | Token::Num(_) |
-            Token::BraceClose | Token::ParensClose
+            Token::Ident(_) | Token::Num(_) | Token::Rest |
+            Token::BraceClose | Token::BracketClose | Token::ParensClose
         )
     }
 
     fn cont_next(t: &Token) -> bool {
         matches!(t,
+            // BracketOpen is deliberately absent: a line starting with `[`
+            // begins a new statement (a pattern), it does not index the
+            // previous line's value.
             Token::Ad | Token::Assign | Token::BraceOpen |
-            Token::BracketOpen | Token::Colon |
+            Token::Colon |
             Token::Comma | Token::Div | Token::DotDotEq |
             Token::Else | Token::EqEq | Token::Ge | Token::Gt |
             Token::Le | Token::Lt | Token::Mul | Token::Ne |

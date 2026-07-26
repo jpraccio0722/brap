@@ -9,6 +9,8 @@ pub enum Value {
     Signal(NodeId),
     Function(Rc<FunctionDef>),
     List(Rc<Vec<Value>>),
+    /// A silent step. Only meaningful inside a pattern.
+    Rest,
 }
 
 pub struct FunctionDef {

@@ -144,6 +144,8 @@ impl Lowerer {
             
             Expr::Num(n) => Ok(Value::Number(*n)),
 
+            Expr::Rest => Ok(Value::Rest),
+
             Expr::Range { lo, hi } => {
                 let lo = self.number(lo, "range start")?;
                 let hi = self.number(hi, "range end")?;
@@ -210,6 +212,7 @@ impl Lowerer {
             Value::Signal(id) => Ok(NodeInput::Node(id)),
             Value::Function(_) => Err("cannot use a function as a signal".into()),
             Value::List(_) => Err("cannot use a list as a signal (iterate it with `for`)".into()),
+            Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
         }
     }
 }

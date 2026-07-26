@@ -2,8 +2,7 @@
 
 use crate::{brap_graph::realizer::realize, engine::swap_program, lowerer::lower::lower, parser::parser::parse};
 use crate::engine::AudioEngine;
-use crate::pattern::pattern::Pattern;
-use crate::pattern::patterns::{Binding, Patterns};
+use crate::pattern::patterns::Patterns;
 use crate::scheduler::scheduler::SchedulerState;
 use crate::scheduler::voice::Instruments;
 
@@ -29,43 +28,22 @@ fn run_code(
     sched: tauri::State<SchedulerState>,
 ) -> Result<(), String> {
     let ast = parse(code)?;
-    let graph_ir = lower(&ast)?;
-    let audio_graph = realize(&graph_ir)?;
+    let lowered = lower(&ast)?;
+    let audio_graph = realize(&lowered.graph)?;
 
-    // Instruments first: if the graph swap fails we have not half-updated.
+    // Instruments before patterns: the scheduler must be able to build a voice
+    // for any binding it can see.
     *sched
         .instruments
         .lock()
         .map_err(|_| "instruments lock poisoned")? = Instruments::from_program(&ast);
 
+    *sched.patterns.lock().map_err(|_| "patterns lock poisoned")? =
+        Patterns { bindings: lowered.bindings };
+
     let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     swap_program(&mut eng, audio_graph);
 
-    Ok(())
-}
-
-/// Temporary bridge until the language grows pattern syntax.
-///
-/// `steps` uses `None` for a rest; each value becomes the argument to the
-/// named instrument `fn`. Replaces the whole pattern set, like an eval will.
-#[tauri::command]
-fn set_pattern(
-    instrument: String,
-    steps: Vec<Option<f64>>,
-    sched: tauri::State<SchedulerState>,
-) -> Result<(), String> {
-    let mut patterns = sched.patterns.lock().map_err(|_| "patterns lock poisoned")?;
-    *patterns = Patterns {
-        bindings: vec![Binding { instrument, pattern: Pattern::Steps(steps) }],
-    };
-    Ok(())
-}
-
-/// Stop all patterns. The clock keeps running.
-#[tauri::command]
-fn clear_patterns(sched: tauri::State<SchedulerState>) -> Result<(), String> {
-    let mut patterns = sched.patterns.lock().map_err(|_| "patterns lock poisoned")?;
-    *patterns = Patterns::default();
     Ok(())
 }
 
@@ -90,8 +68,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             run_code,
-            set_pattern,
-            clear_patterns,
             save_file,
             read_file
         ])

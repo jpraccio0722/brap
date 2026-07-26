@@ -157,7 +157,7 @@ mod tests {
 
     fn voice_net() -> fundsp::net::Net {
         let items = parse("sin(220)\n".to_string()).unwrap();
-        realize(&lower(&items).unwrap()).unwrap()
+        realize(&lower(&items).unwrap().graph).unwrap()
     }
 
     #[test]
@@ -243,7 +243,7 @@ mod pass_tests {
         *s.patterns.lock().unwrap() = Patterns {
             bindings: vec![Binding {
                 instrument: "kick".into(),
-                pattern: Pattern::Steps(steps),
+                pattern: Pattern::steps(steps),
             }],
         };
         s
@@ -328,7 +328,7 @@ mod pass_tests {
         *state.patterns.lock().unwrap() = Patterns {
             bindings: vec![Binding {
                 instrument: "ghost".into(),
-                pattern: Pattern::Steps(vec![Some(1.0)]),
+                pattern: Pattern::steps(vec![Some(1.0)]),
             }],
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);

@@ -35,6 +35,8 @@ pub enum Expr {
     Num(f64),
     Range { lo: Box<Expr>, hi: Box<Expr> },
     Rem { lhs: Box<Expr>, rhs: Box<Expr> },
+    /// A silent step in a pattern, written `` ` ``.
+    Rest,
     Sub   { lhs: Box<Expr>, rhs: Box<Expr> },
     Var(Ident),
 }
@@ -177,8 +179,10 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         // `call` must be tried before `var`: both start with an Ident, and
         // choice commits to the first success — var-first would leave `(...)`
         // unconsumed and split `sin(440)` into two items.
+        let rest = just(Token::Rest).to(Expr::Rest);
+
         let atom = choice((
-            int, list, for_expr, if_expr, let_expr, block, call, var, paren,
+            int, rest, list, for_expr, if_expr, let_expr, block, call, var, paren,
         ));
 
         let postfix = atom.foldl(

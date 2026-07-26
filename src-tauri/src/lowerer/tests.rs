@@ -6,7 +6,7 @@ use NodeInput::{Const, Node};
 
 fn lower_src(src: &str) -> Result<BrapGraph, String> {
     let items = parse(src.to_string()).expect("parse failed");
-    lower(&items)
+    lower(&items).map(|l| l.graph)
 }
 
 fn node(kind: NodeKind, inputs: Vec<NodeInput>) -> UGenNode {
@@ -511,4 +511,412 @@ fn len_rejects_non_lists() {
 fn len_rejects_wrong_arity() {
     let err = lower_src("sin(len([1], [2]))\n").unwrap_err();
     assert!(err.contains("1 argument"), "got: {err}");
+}
+/// A rest is a value, so it occupies a slot in a list like any element.
+#[test]
+fn rest_is_an_element_of_a_list() {
+    let g = lower_src("sin(len([220, `, 330, `]))\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(4.0)])]);
+}
+
+/// Rests are only meaningful in patterns; using one as audio is an error.
+#[test]
+fn rest_used_as_a_signal_is_an_error() {
+    let err = lower_src("sin(`)\n").unwrap_err();
+    assert!(err.contains("rest"), "got: {err}");
+}
+
+#[test]
+fn rest_in_arithmetic_is_an_error() {
+    let err = lower_src("sin(220) * `\n").unwrap_err();
+    assert!(err.contains("rest"), "got: {err}");
+}
+
+/// A bare rest contributes nothing, like any non-signal top-level value.
+#[test]
+fn bare_rest_produces_no_output() {
+    let g = lower_src("`\n").unwrap();
+    assert_eq!(g.nodes, vec![]);
+    assert_eq!(g.output, None);
+}
+
+/// Rests must not confuse the newline-to-terminator pass.
+#[test]
+fn rests_survive_a_multiline_list() {
+    let g = lower_src("sin(len([\n  220,\n  `,\n  330\n]))\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(3.0)])]);
+}
+
+/// Indexing reaches a rest, and it still refuses to be audio.
+#[test]
+fn indexing_a_rest_still_errors_as_a_signal() {
+    let err = lower_src("let p = [220, `]\nsin(p[1])\n").unwrap_err();
+    assert!(err.contains("rest"), "got: {err}");
+}
+#[test]
+fn list_binding_then_statement() {
+    let g = lower_src("let s = [220, 330]\nsin(s[0])\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(220.0)])]);
+}
+
+#[test]
+fn pattern_shaped_list_binding() {
+    let g = lower_src("let p = [220, `, 330, `]\nsin(len(p))\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(4.0)])]);
+}
+
+// ---- play / patterns ----
+
+use crate::lowerer::lower::lower as lower_full;
+use crate::pattern::pattern::{Pattern, Step};
+
+fn bindings_of(src: &str) -> Vec<crate::pattern::patterns::Binding> {
+    let items = parse(src.to_string()).expect("parse failed");
+    lower_full(&items).expect("lower failed").bindings
+}
+
+fn play_err(src: &str) -> String {
+    let items = parse(src.to_string()).expect("parse failed");
+    match lower_full(&items) {
+        Err(e) => e,
+        Ok(_) => panic!("expected an error"),
+    }
+}
+
+#[test]
+fn play_binds_a_pattern_to_an_instrument() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, `, 330, `], kick)\n");
+    assert_eq!(bs.len(), 1);
+    assert_eq!(bs[0].instrument, "kick");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(220.0), Step::Rest, Step::Value(330.0), Step::Rest,
+    ]));
+}
+
+/// Rate is a playback property of `play`, not a pattern transformation.
+#[test]
+fn play_rate_wraps_the_pattern() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, 330], kick, 2)\n");
+    assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
+        Box::new(Pattern::Steps(vec![Step::Value(220.0), Step::Value(330.0)]))));
+}
+
+/// A fractional rate slows the pattern down.
+#[test]
+fn play_rate_below_one_slows_down() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, 0.5)\n");
+    assert_eq!(bs[0].pattern, Pattern::Fast(0.5,
+        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+}
+
+/// Rate 1 is the default and adds no wrapper.
+#[test]
+fn omitted_rate_is_one() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(220.0)]));
+}
+
+/// Nested lists subdivide their slot.
+#[test]
+fn nested_list_becomes_a_group() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, [330, 440]], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(220.0),
+        Step::Group(Box::new(Pattern::Steps(vec![
+            Step::Value(330.0), Step::Value(440.0),
+        ]))),
+    ]));
+}
+
+/// Layering is just two bindings — no `stack` needed.
+#[test]
+fn multiple_plays_layer() {
+    let bs = bindings_of(
+        "fn kick(f) = sin(f)\nfn hat(f) = saw(f)\n\
+         play([220, `], kick)\nplay([880, 880, 880], hat)\n");
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[0].instrument, "kick");
+    assert_eq!(bs[1].instrument, "hat");
+}
+
+/// Patterns compose with the rest of the language.
+#[test]
+fn pattern_elements_are_ordinary_expressions() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nlet r = 110\nplay([r, r * 2, `], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(110.0), Step::Value(220.0), Step::Rest,
+    ]));
+}
+
+/// `play` works through the pipe.
+#[test]
+fn play_accepts_a_piped_pattern() {
+    let bs = bindings_of("fn kick(f) = sin(f)\n[220, 330] >> play(kick)\n");
+    assert_eq!(bs[0].instrument, "kick");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(220.0), Step::Value(330.0),
+    ]));
+}
+
+#[test]
+fn play_pipes_with_a_rate() {
+    let bs = bindings_of("fn kick(f) = sin(f)\n[220] >> play(kick, 4)\n");
+    assert_eq!(bs[0].pattern, Pattern::Fast(4.0,
+        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+}
+
+/// Bindings can be generated in a loop.
+#[test]
+fn play_inside_a_for_makes_several_bindings() {
+    let bs = bindings_of(
+        "fn kick(f) = sin(f)\nfor i in 1..=3 { play([110 * i], kick, i) }\n");
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[2].pattern, Pattern::Fast(3.0,
+        Box::new(Pattern::Steps(vec![Step::Value(330.0)]))));
+}
+
+/// A program can have both a persistent graph and patterns.
+#[test]
+fn graph_and_bindings_coexist() {
+    let items = parse("fn kick(f) = sin(f)\nplay([220], kick)\nsin(55) / 8\n".to_string())
+        .unwrap();
+    let out = lower_full(&items).unwrap();
+    assert_eq!(out.bindings.len(), 1);
+    assert!(out.graph.output.is_some(), "the drone should still reach the output");
+}
+
+/// `play` contributes nothing to the audio output itself.
+#[test]
+fn play_alone_produces_no_graph_output() {
+    let items = parse("fn kick(f) = sin(f)\nplay([220], kick)\n".to_string()).unwrap();
+    let out = lower_full(&items).unwrap();
+    assert_eq!(out.graph.output, None);
+}
+
+// ---- play errors ----
+
+#[test]
+fn play_rejects_an_unknown_instrument() {
+    let err = play_err("play([220], ghost)\n");
+    assert!(err.contains("not a function"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_non_identifier_instrument() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([220], kick(1))\n");
+    assert!(err.contains("plain function name"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_signal_in_a_pattern() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([sin(220)], kick)\n");
+    assert!(err.contains("signal"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_non_positive_rate() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([220], kick, 0)\n");
+    assert!(err.contains("positive"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_signal_rate() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([220], kick, sin(2))\n");
+    assert!(err.contains("compile-time number"), "got: {err}");
+}
+
+// ---- list builtins ----
+
+/// Lower `expr` and read back the constant it folded to.
+fn num(src: &str) -> f64 {
+    let g = lower_src(&format!("sin({src})\n")).expect("lower failed");
+    match g.nodes[0].inputs[0] {
+        Const(v) => v,
+        _ => panic!("expected a folded constant"),
+    }
+}
+
+/// Read a whole list back as numbers.
+///
+/// Binds the list once and reads every element out of that single binding —
+/// re-evaluating the source per index would re-roll the random builtins.
+fn nums(src: &str) -> Vec<f64> {
+    let n = num(&format!("len({src})")) as usize;
+    let mut prog = format!("let __l = {src}\n");
+    for i in 0..n {
+        prog.push_str(&format!("sin(__l[{i}])\n"));
+    }
+    let g = lower_src(&prog).expect("lower failed");
+    g.nodes
+        .iter()
+        .filter(|nd| nd.kind == NodeKind::Sin)
+        .map(|nd| match nd.inputs[0] {
+            Const(v) => v,
+            _ => panic!("expected a folded constant"),
+        })
+        .collect()
+}
+
+fn list_err(src: &str) -> String {
+    lower_src(&format!("sin({src})\n")).unwrap_err()
+}
+
+#[test]
+fn rev_reverses() {
+    assert_eq!(nums("rev([1, 2, 3])"), vec![3.0, 2.0, 1.0]);
+    assert_eq!(nums("rev([])"), Vec::<f64>::new());
+}
+
+#[test]
+fn palindrome_mirrors() {
+    assert_eq!(nums("palindrome([1, 2, 3])"), vec![1.0, 2.0, 3.0, 3.0, 2.0, 1.0]);
+}
+
+#[test]
+fn rotate_left_and_right() {
+    assert_eq!(nums("rotl([1, 2, 3, 4])"), vec![2.0, 3.0, 4.0, 1.0]);
+    assert_eq!(nums("rotr([1, 2, 3, 4])"), vec![4.0, 1.0, 2.0, 3.0]);
+    assert_eq!(nums("rotl([1, 2, 3, 4], 2)"), vec![3.0, 4.0, 1.0, 2.0]);
+    assert_eq!(nums("rotr([1, 2, 3, 4], 2)"), vec![3.0, 4.0, 1.0, 2.0]);
+}
+
+/// Rotating by the length is the identity, and negatives go the other way.
+#[test]
+fn rotation_wraps() {
+    assert_eq!(nums("rotl([1, 2, 3], 3)"), vec![1.0, 2.0, 3.0]);
+    assert_eq!(nums("rotl([1, 2, 3], 4)"), nums("rotl([1, 2, 3], 1)"));
+    assert_eq!(nums("rotl([1, 2, 3], -1)"), nums("rotr([1, 2, 3], 1)"));
+    assert_eq!(nums("rotl([], 3)"), Vec::<f64>::new());
+}
+
+#[test]
+fn push_and_pop() {
+    assert_eq!(nums("push([1, 2], 3)"), vec![1.0, 2.0, 3.0]);
+    assert_eq!(nums("pop([1, 2, 3])"), vec![1.0, 2.0]);
+    assert!(list_err("pop([])").contains("empty"));
+}
+
+/// Lists are immutable: push returns a new one.
+#[test]
+fn push_does_not_mutate() {
+    let g = lower_src("let a = [1, 2]\nlet b = push(a, 3)\nsin(len(a) * 10 + len(b))\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(23.0)])]);
+}
+
+#[test]
+fn sort_ascending() {
+    assert_eq!(nums("sort([3, 1, 2])"), vec![1.0, 2.0, 3.0]);
+    assert_eq!(nums("sort([-1.5, 2, 0])"), vec![-1.5, 0.0, 2.0]);
+    assert!(list_err("sort([1, [2]])").contains("number"));
+}
+
+#[test]
+fn sum_folds_numbers() {
+    assert_eq!(num("sum([1, 2, 3])"), 6.0);
+    assert_eq!(num("sum([])"), 0.0);
+}
+
+/// A list of signals sums into the graph, like `for` does.
+#[test]
+fn sum_of_signals_emits_add_nodes() {
+    let g = lower_src("sum([sin(110), sin(220), sin(330)])\n").unwrap();
+    assert_eq!(g.nodes, vec![
+        node(NodeKind::Sin, vec![Const(110.0)]),
+        node(NodeKind::Sin, vec![Const(220.0)]),
+        node(NodeKind::Sin, vec![Const(330.0)]),
+        node(NodeKind::Add, vec![Node(NodeId(0)), Node(NodeId(1))]),
+        node(NodeKind::Add, vec![Node(NodeId(3)), Node(NodeId(2))]),
+    ]);
+    assert_eq!(g.output, Some(NodeId(4)));
+}
+
+#[test]
+fn split_chunks() {
+    assert_eq!(num("len(split([1, 2, 3, 4], 2))"), 2.0);
+    assert_eq!(nums("split([1, 2, 3, 4], 2)[0]"), vec![1.0, 2.0]);
+    assert_eq!(nums("split([1, 2, 3, 4], 2)[1]"), vec![3.0, 4.0]);
+    // A short final chunk is kept.
+    assert_eq!(num("len(split([1, 2, 3], 2))"), 2.0);
+    assert_eq!(nums("split([1, 2, 3], 2)[1]"), vec![3.0]);
+    assert!(list_err("split([1, 2], 0)").contains("at least 1"));
+}
+
+#[test]
+fn filter_keeps_matching_elements() {
+    let src = "fn big(x) = x > 2\n";
+    let g = lower_src(&format!("{src}sin(len(filter([1, 2, 3, 4], big)))\n")).unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(2.0)])]);
+
+    let g = lower_src(&format!("{src}sin(filter([1, 2, 3, 4], big)[0])\n")).unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(3.0)])]);
+}
+
+#[test]
+fn filter_rejects_a_non_function() {
+    let err = lower_src("sin(len(filter([1, 2], 3)))\n").unwrap_err();
+    assert!(err.contains("function"), "got: {err}");
+}
+
+#[test]
+fn filter_rejects_a_signal_predicate_result() {
+    let err = lower_src("fn p(x) = sin(x)\nsin(len(filter([1, 2], p)))\n").unwrap_err();
+    assert!(err.contains("compile-time number"), "got: {err}");
+}
+
+// Random builtins: assert properties, since the seed changes per eval.
+
+#[test]
+fn choice_returns_a_member() {
+    for _ in 0..20 {
+        let v = num("choice([1, 2, 3])");
+        assert!([1.0, 2.0, 3.0].contains(&v), "got {v}");
+    }
+    assert!(list_err("choice([])").contains("empty"));
+}
+
+#[test]
+fn scramble_is_a_permutation() {
+    for _ in 0..20 {
+        let mut got = nums("scramble([1, 2, 3, 4, 5])");
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(got, vec![1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+}
+
+/// A zero weight is never selected.
+#[test]
+fn weighted_choice_respects_zero_weights() {
+    for _ in 0..30 {
+        let v = num("wchoice([1, 2, 3], [0, 1, 0])");
+        assert_eq!(v, 2.0, "only the weighted element should be chosen");
+    }
+}
+
+#[test]
+fn weighted_choice_validates_its_arguments() {
+    assert!(list_err("wchoice([1, 2], [1])").contains("weights"));
+    assert!(list_err("wchoice([1, 2], [0, 0])").contains("zero"));
+    assert!(list_err("wchoice([1, 2], [-1, 1])").contains(">= 0"));
+}
+
+/// Random choices advance the RNG, so repeated calls are independent.
+#[test]
+fn repeated_choices_are_not_all_identical() {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..40 {
+        seen.insert(num("choice([1, 2, 3, 4, 5, 6, 7, 8])").to_bits());
+    }
+    assert!(seen.len() > 1, "choice should vary across evals");
+}
+
+/// The list functions compose with patterns, which is the point of having them.
+#[test]
+fn list_builtins_feed_patterns() {
+    let bs = bindings_of(
+        "fn kick(f) = sin(f)\nplay(rotl(rev([110, 220, `, 330])), kick)\n");
+    assert_eq!(bs.len(), 1);
+    // rev -> [330, `, 220, 110]; rotl 1 -> [`, 220, 110, 330]
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Rest, Step::Value(220.0), Step::Value(110.0), Step::Value(330.0),
+    ]));
 }

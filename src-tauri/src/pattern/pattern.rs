@@ -27,11 +27,22 @@ impl Event {
     }
 }
 
+/// One slot in a sequence.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Step {
+    /// Silence for the slot's duration.
+    Rest,
+    /// Sound, carrying the argument handed to the instrument.
+    Value(f64),
+    /// A whole pattern squeezed into this slot — one cycle of it, compressed.
+    Group(Box<Pattern>),
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
     Silence,
-    /// Steps evenly dividing one cycle. `None` is a rest.
-    Steps(Vec<Option<f64>>),
+    /// Steps evenly dividing one cycle.
+    Steps(Vec<Step>),
     Stack(Vec<Pattern>),
     /// Compress into `1/rate` of the time, repeating to fill the cycle.
     Fast(f64, Box<Pattern>),
@@ -39,8 +50,17 @@ pub enum Pattern {
 
 
 impl Pattern {
+    /// Convenience for a flat sequence with no subdivision.
     pub fn steps(values: impl IntoIterator<Item = Option<f64>>) -> Pattern {
-        Pattern::Steps(values.into_iter().collect())
+        Pattern::Steps(
+            values
+                .into_iter()
+                .map(|v| match v {
+                    Some(x) => Step::Value(x),
+                    None => Step::Rest,
+                })
+                .collect(),
+        )
     }
 
     pub fn fast(rate: f64, p: Pattern) -> Pattern {
@@ -63,10 +83,39 @@ impl Pattern {
                 let mut out = Vec::new();
                 for cycle in span.begin.floor() as i64 ..= span.end.ceil() as i64 {
                     for (i, step) in steps.iter().enumerate() {
-                        let Some(value) = step else { continue };
-                        let begin = cycle as f64 + i as f64 * step_dur;
-                        if begin >= span.begin && begin < span.end {
-                            out.push(Event { begin, end: begin + step_dur, value: *value });
+                        let slot = cycle as f64 + i as f64 * step_dur;
+                        match step {
+                            Step::Rest => {}
+
+                            Step::Value(value) => {
+                                if slot >= span.begin && slot < span.end {
+                                    out.push(Event {
+                                        begin: slot,
+                                        end: slot + step_dur,
+                                        value: *value,
+                                    });
+                                }
+                            }
+
+                            // Exactly one cycle of the inner pattern fills the
+                            // slot. Map the query span into slot-local time,
+                            // clamped to that single cycle, then map back.
+                            Step::Group(inner) => {
+                                let local_begin =
+                                    ((span.begin - slot) / step_dur).max(0.0);
+                                let local_end =
+                                    ((span.end - slot) / step_dur).min(1.0);
+                                if local_end <= local_begin {
+                                    continue;
+                                }
+                                for e in inner.query(Span::new(local_begin, local_end)) {
+                                    out.push(Event {
+                                        begin: slot + e.begin * step_dur,
+                                        end: slot + e.end * step_dur,
+                                        value: e.value,
+                                    });
+                                }
+                            }
                         }
                     }
                 }
