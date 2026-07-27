@@ -4,11 +4,13 @@ use crate::engine::{stop as stop_graph, swap_program};
 use crate::{brap_graph::realizer::realize, lowerer::lower::lower, parser::parser::parse};
 use crate::engine::AudioEngine;
 use crate::pattern::patterns::Patterns;
+use crate::scheduler::clock::{bpm_from_cps, cps_from_bpm};
 use crate::scheduler::scheduler::SchedulerState;
 use crate::scheduler::voice::Instruments;
 
 use std::sync::Mutex;
-use tauri::Manager;
+use tauri::menu::{IsMenuItem, Menu, MenuItem, MenuItemKind, PredefinedMenuItem, Submenu};
+use tauri::{Emitter, Manager};
 
 mod pattern;
 mod scheduler;
@@ -40,6 +42,24 @@ fn run_code(
         .lock()
         .map_err(|_| "instruments lock poisoned")? = Instruments::from_program(&ast);
 
+    let starting_from_silence = sched
+        .patterns
+        .lock()
+        .map_err(|_| "patterns lock poisoned")?
+        .is_empty();
+
+    // Starting from silence should begin a pattern at its first step, but a
+    // re-eval of something already playing must not jolt the groove. The clock
+    // moves *before* the patterns are published, so the scheduler can never
+    // see the new bindings against the old origin.
+    if starting_from_silence && !lowered.bindings.is_empty() {
+        engine
+            .lock()
+            .map_err(|_| "audio engine poisoned")?
+            .clock
+            .reset();
+    }
+
     *sched.patterns.lock().map_err(|_| "patterns lock poisoned")? =
         Patterns { bindings: lowered.bindings };
 
@@ -68,7 +88,63 @@ fn stop_audio(
 
     let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     stop_graph(&mut eng);
+    // The clock keeps counting through the silence, so without this the next
+    // play would rejoin the pattern a little past where it stopped.
+    eng.clock.reset();
 
+    Ok(())
+}
+
+/// The transport panel's controls, as the frontend shows them: tempo in beats
+/// per minute, volume as a linear amplitude between silence and unity.
+#[derive(serde::Serialize)]
+struct Transport {
+    bpm: f64,
+    volume: f64,
+}
+
+/// What the transport is set to right now, so the panel can open showing the
+/// engine's own defaults rather than a guess that drifts away from them.
+#[tauri::command]
+fn transport(engine: tauri::State<Mutex<AudioEngine>>) -> Result<Transport, String> {
+    let eng = engine.lock().map_err(|_| "audio engine poisoned")?;
+    Ok(Transport {
+        bpm: bpm_from_cps(eng.clock.cps()),
+        volume: eng.master.value() as f64,
+    })
+}
+
+/// Set the global tempo.
+///
+/// The clock holds the current beat across the change, so this is safe to call
+/// while something is playing — including on every frame of a drag.
+#[tauri::command]
+fn set_tempo(bpm: f64, engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), String> {
+    if !bpm.is_finite() || bpm <= 0.0 {
+        return Err(format!("tempo must be above zero, got {bpm}"));
+    }
+    engine
+        .lock()
+        .map_err(|_| "audio engine poisoned")?
+        .clock
+        .set_cps(cps_from_bpm(bpm));
+    Ok(())
+}
+
+/// Set the master output volume, as a linear amplitude.
+///
+/// Out-of-range values are clamped rather than refused: a control surface
+/// sending 1.0000001 is not an error worth interrupting a performance for.
+#[tauri::command]
+fn set_master_volume(volume: f64, engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), String> {
+    if !volume.is_finite() {
+        return Err(format!("volume must be a number, got {volume}"));
+    }
+    engine
+        .lock()
+        .map_err(|_| "audio engine poisoned")?
+        .master
+        .set(volume.clamp(0.0, 1.0) as f32);
     Ok(())
 }
 
@@ -96,14 +172,72 @@ fn language_metadata() -> lang::LanguageMetadata {
     lang::metadata()
 }
 
+/// Menu item ids, which are also the events the frontend listens for. One
+/// constant each so the two can't drift apart.
+const MENU_NEW: &str = "file-new";
+const MENU_OPEN: &str = "file-open";
+const MENU_SAVE: &str = "file-save";
+
+/// Every id the File menu can raise. The event handler forwards these and
+/// ignores anything else, so the platform's own items keep working.
+const FILE_ITEMS: [&str; 3] = [MENU_NEW, MENU_OPEN, MENU_SAVE];
+
+/// The platform's default menu with New, Open and Save added to the top of
+/// File. Each one carries the accelerator the toolbar buttons used to advertise.
+///
+/// Editing the default rather than rebuilding it keeps every other item —
+/// Quit, Copy, Minimise, the lot — exactly where the platform puts it.
+fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+
+    let new_item = MenuItem::with_id(app, MENU_NEW, "New", true, Some("CmdOrCtrl+N"))?;
+    let open_item = MenuItem::with_id(app, MENU_OPEN, "Open…", true, Some("CmdOrCtrl+O"))?;
+    let save_item = MenuItem::with_id(app, MENU_SAVE, "Save", true, Some("CmdOrCtrl+S"))?;
+
+    // Saving is a different kind of act from starting or fetching a file, and
+    // the trailing rule keeps all three off whatever the platform put in File.
+    let items: [&dyn IsMenuItem<tauri::Wry>; 5] = [
+        &new_item,
+        &open_item,
+        &PredefinedMenuItem::separator(app)?,
+        &save_item,
+        &PredefinedMenuItem::separator(app)?,
+    ];
+
+    let file = menu.items()?.into_iter().find_map(|item| match item {
+        MenuItemKind::Submenu(s) if s.text().map(|t| t == "File").unwrap_or(false) => Some(s),
+        _ => None,
+    });
+
+    match file {
+        Some(file) => file.insert_items(&items, 0)?,
+        // No File submenu on this platform's default: make one. Nothing to sit
+        // below it, so the trailing separator goes.
+        None => menu.append(&Submenu::with_items(app, "File", true, &items[..4])?)?,
+    }
+
+    Ok(menu)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .menu(build_menu)
+        .on_menu_event(|app, event| {
+            // The work is the frontend's: it owns the tabs, and the dialogs
+            // that pick a path. All this side does is relay the click.
+            if let Some(id) = FILE_ITEMS.iter().find(|id| event.id() == **id) {
+                let _ = app.emit(id, ());
+            }
+        })
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             run_code,
             stop_audio,
+            transport,
+            set_tempo,
+            set_master_volume,
             save_file,
             read_file,
             language_metadata

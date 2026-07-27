@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import CodeMirror from "@uiw/react-codemirror";
 import {
@@ -8,6 +9,7 @@ import {
   loadMetadata,
   type LanguageMetadata,
 } from "./brap";
+import { TransportPanel } from "./TransportPanel";
 
 interface Tab {
   id: string;
@@ -46,9 +48,11 @@ function App() {
   const [tabs, setTabs] = useState<Tab[]>(() => [
     makeTab({ content: STARTER_CONTENT }),
   ]);
-  const [activeId, setActiveId] = useState<string>(() => tabs[0].id);
+  const [activeId, setActiveId] = useState<string | null>(() => tabs[0].id);
+  const [panelOpen, setPanelOpen] = useState(true);
 
-  const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
+  // Null when every tab has been closed, which the editor is built to show.
+  const activeTab = tabs.find((t) => t.id === activeId) ?? null;
 
   // The language's builtins, fetched once. Until it arrives the editor runs on
   // EMPTY_METADATA: syntax highlighting is already correct, only the builtin
@@ -77,23 +81,19 @@ function App() {
 
   const closeTab = useCallback(
     (id: string) => {
-      setTabs((prev) => {
-        const next = prev.filter((t) => t.id !== id);
-        // Never leave the editor with zero tabs.
-        if (next.length === 0) {
-          const fresh = makeTab({ content: STARTER_CONTENT });
-          setActiveId(fresh.id);
-          return [fresh];
-        }
-        // If we closed the active tab, activate a neighbour.
-        if (id === activeId) {
-          const idx = prev.findIndex((t) => t.id === id);
-          setActiveId(next[Math.min(idx, next.length - 1)].id);
-        }
-        return next;
-      });
+      const idx = tabs.findIndex((t) => t.id === id);
+      if (idx === -1) return;
+
+      const next = tabs.filter((t) => t.id !== id);
+      setTabs(next);
+
+      // Closing the active tab hands the editor to a neighbour; closing the
+      // last one leaves nothing to hand it to, and the empty state shows.
+      if (id === activeId) {
+        setActiveId(next.length === 0 ? null : next[Math.min(idx, next.length - 1)].id);
+      }
     },
-    [activeId],
+    [tabs, activeId],
   );
 
   const updateContent = useCallback((id: string, content: string) => {
@@ -123,9 +123,11 @@ function App() {
   }, [tabs]);
 
   const play = useCallback(async () => {
-    // Wired to the (currently empty) Rust backend command.
+    // Nothing open is nothing to run — the transport's buttons stay live for
+    // stop, which is about what the engine is holding, not about a tab.
+    if (!activeTab) return;
     await invoke("run_code", { code: activeTab.content });
-  }, [activeTab.content]);
+  }, [activeTab]);
 
   const stop = useCallback(async () => {
     await invoke("stop_audio");
@@ -133,6 +135,7 @@ function App() {
 
   const saveTab = useCallback(async () => {
     const tab = activeTab;
+    if (!tab) return;
     let path = tab.path;
     if (!path) {
       // First save: ask where to put it, defaulting to a .brap file.
@@ -150,7 +153,26 @@ function App() {
     );
   }, [activeTab]);
 
-  // Global shortcuts: ⌘↵ plays, ⌘S saves.
+  // The File menu's items arrive as events. Their handlers take new identities
+  // on every keystroke, so the listeners reach them through a ref and subscribe
+  // once for the life of the app: re-subscribing is asynchronous, and a menu
+  // click landing mid-swap could be heard by both the old listener and the new.
+  const fileActions = useRef({ newTab, openTab, saveTab });
+  fileActions.current = { newTab, openTab, saveTab };
+
+  useEffect(() => {
+    const subscriptions = [
+      listen("file-new", () => fileActions.current.newTab()),
+      listen("file-open", () => void fileActions.current.openTab()),
+      listen("file-save", () => void fileActions.current.saveTab()),
+    ];
+    return () => {
+      for (const sub of subscriptions) void sub.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  // ⌘↵ plays, ⌘. stops. The file shortcuts aren't here: they hang off their
+  // menu items, whose accelerators fire before the key reaches the webview.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
@@ -160,66 +182,33 @@ function App() {
       } else if (mod && e.key === ".") {
         e.preventDefault();
         void stop();
-      } else if (mod && e.key.toLowerCase() === "s") {
-        e.preventDefault();
-        void saveTab();
-      } else if (mod && e.key.toLowerCase() === "o") {
-        e.preventDefault();
-        void openTab();
       }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [play, stop, saveTab, openTab]);
+  }, [play, stop]);
 
   return (
     <div className="flex h-screen flex-col bg-neutral-900 text-neutral-100">
       <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-wide text-neutral-300">brap</h1>
+        <h1 className="text-sm font-semibold tracking-wide text-neutral-300">scree</h1>
         <div className="flex items-center gap-2">
+          {/* One hamburger, both ways: it is where a reader looks for the
+              panel whether it is showing or not. */}
           <button
-            onClick={() => void openTab()}
-            title="Open (⌘O)"
-            className="inline-flex items-center gap-2 rounded-md bg-neutral-700 px-3 py-1.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-600 active:bg-neutral-800"
+            onClick={() => setPanelOpen((open) => !open)}
+            title={panelOpen ? "Hide transport" : "Show transport"}
+            aria-expanded={panelOpen}
+            className={
+              "rounded-md p-1.5 transition-colors " +
+              (panelOpen
+                ? "bg-neutral-700 text-neutral-100 hover:bg-neutral-600"
+                : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100")
+            }
           >
             <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
-              <path d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z" />
+              <path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z" />
             </svg>
-            Open
-            <span className="text-xs text-neutral-400">⌘O</span>
-          </button>
-          <button
-            onClick={() => void saveTab()}
-            title="Save (⌘S)"
-            className="inline-flex items-center gap-2 rounded-md bg-neutral-700 px-3 py-1.5 text-sm font-medium text-neutral-100 transition-colors hover:bg-neutral-600 active:bg-neutral-800"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
-              <path d="M17 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V7l-4-4zm-5 16a3 3 0 1 1 0-6 3 3 0 0 1 0 6zm3-10H5V5h10v4z" />
-            </svg>
-            Save
-            <span className="text-xs text-neutral-400">⌘S</span>
-          </button>
-          <button
-            onClick={() => void play()}
-            title="Run (⌘↵)"
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-emerald-500 active:bg-emerald-700"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-            Play
-            <span className="text-xs text-emerald-200/80">⌘↵</span>
-          </button>
-          <button
-            onClick={() => void stop()}
-            title="Stop (⌘.)"
-            className="inline-flex items-center gap-2 rounded-md bg-red-700 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-600 active:bg-red-800"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
-              <path d="M6 6h12v12H6z" />
-            </svg>
-            Stop
-            <span className="text-xs text-red-200/80">⌘.</span>
           </button>
         </div>
       </header>
@@ -265,7 +254,7 @@ function App() {
         </div>
         <button
           onClick={newTab}
-          title="New tab"
+          title="New tab (⌘N)"
           className="flex items-center px-3 text-neutral-400 transition-colors hover:bg-neutral-900 hover:text-neutral-100"
         >
           <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
@@ -274,17 +263,34 @@ function App() {
         </button>
       </div>
 
-      <main className="min-h-0 flex-1">
-        <CodeMirror
-          key={activeTab.id}
-          value={activeTab.content}
-          onChange={(value) => updateContent(activeTab.id, value)}
-          height="100%"
-          theme="dark"
-          extensions={extensions}
-          className="h-full text-sm"
-        />
-      </main>
+      <div className="flex min-h-0 flex-1">
+        <main className="min-h-0 min-w-0 flex-1">
+          {activeTab ? (
+            <CodeMirror
+              key={activeTab.id}
+              value={activeTab.content}
+              onChange={(value) => updateContent(activeTab.id, value)}
+              height="100%"
+              theme="dark"
+              extensions={extensions}
+              className="h-full text-sm"
+            />
+          ) : (
+            // Closing the last tab is allowed to leave nothing open. The two
+            // ways back are both in the File menu, so name them rather than
+            // growing a second set of buttons that only exist here.
+            <div className="flex h-full flex-col items-center justify-center gap-1 text-sm text-neutral-500">
+              <p>No file open</p>
+              <p className="text-xs">
+                <span className="font-mono text-neutral-400">⌘N</span> for a new
+                one, <span className="font-mono text-neutral-400">⌘O</span> to
+                open
+              </p>
+            </div>
+          )}
+        </main>
+        <TransportPanel open={panelOpen} play={play} stop={stop} />
+      </div>
     </div>
   );
 }

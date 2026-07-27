@@ -15,14 +15,14 @@
 use crate::brap_graph::environment::Value;
 use crate::lowerer::lists::check_arity;
 use crate::lowerer::lower::Lowerer;
+/// `bpm` is the transport's own conversion, so the two can never disagree.
+use crate::scheduler::clock::cps_from_bpm;
 
 /// MIDI note 69 is A4.
 const A4_MIDI: f64 = 69.0;
 const A4_HZ: f64 = 440.0;
 const SEMITONES_PER_OCTAVE: f64 = 12.0;
 const CENTS_PER_OCTAVE: f64 = 1200.0;
-/// One cycle is four beats, so `120.bpm` is the 0.5 cps default tempo.
-const BEATS_PER_CYCLE: f64 = 4.0;
 
 fn number(func: &str, what: &str, v: &Value) -> Result<f64, String> {
     match v {
@@ -82,7 +82,7 @@ impl Lowerer {
             "db" => 10.0f64.powf(x / 20.0),
             "amp" => 20.0 * positive(func, "the amplitude", x)?.log10(),
             "cents" => positive(func, "the frequency", x)? * (arg(1)? / CENTS_PER_OCTAVE).exp2(),
-            "bpm" => positive(func, "the tempo", x)? / 60.0 / BEATS_PER_CYCLE,
+            "bpm" => cps_from_bpm(positive(func, "the tempo", x)?),
 
             // --- pitch arithmetic ---
             "oct" => x + SEMITONES_PER_OCTAVE * arg(1)?,

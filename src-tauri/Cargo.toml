@@ -1,12 +1,12 @@
 [package]
-name = "brap"
+name = "scree"
 version = "0.1.0"
 description = "A Tauri App"
 authors = ["Jesse Raccio"]
 edition = "2021"
 
 [lib]
-name = "brap_lib"
+name = "scree_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
