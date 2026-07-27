@@ -15,6 +15,7 @@ mod engine;
 mod parser;
 mod brap_graph;
 mod lowerer;
+mod lang;
 
 /// Backend hook for the editor's "play" button.
 ///
@@ -61,6 +62,16 @@ fn read_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// The language's callable surface, for the editor's highlighting, completion
+/// and signature help.
+///
+/// Served from the same tables the lowerer dispatches on, so the editor can
+/// never offer a name the language does not have.
+#[tauri::command]
+fn language_metadata() -> lang::LanguageMetadata {
+    lang::metadata()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -69,7 +80,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             run_code,
             save_file,
-            read_file
+            read_file,
+            language_metadata
         ])
         .setup(|app| {
             let (engine, seq) = engine::start()?;

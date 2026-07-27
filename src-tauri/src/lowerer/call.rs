@@ -83,70 +83,53 @@ impl Lowerer {
         result
     }
 
+    /// Resolve a UGen name to its node kind and arity.
+    ///
+    /// Both come from the `lang::UGENS` table, which the editor also serves to
+    /// the frontend for completion — so a UGen cannot be callable without also
+    /// being completable, and its arity cannot disagree with its documented
+    /// parameter list.
     fn builtin(&self, func: &str) -> Option<(NodeKind, usize)> {
-        match func {
-            "adsr" => Some((NodeKind::ADSR, 5)),
-            "afollow" => Some((NodeKind::Afollow, 3)),
-            "allpass" => Some((NodeKind::Allpass, 3)),
-            "allpole" => Some((NodeKind::Allpole, 2)),
-            "bandpass" => Some((NodeKind::Bandpass, 3)),
-            "bandrez" => Some((NodeKind::Bandrez, 3)),
-            "bell" => Some((NodeKind::Bell, 4)),
-            "biquad" => Some((NodeKind::Biquad, 6)),
-            "brown" => Some((NodeKind::Brown, 0)),
-            "butterpass" => Some((NodeKind::Butterpass, 2)),
-            "chorus" => Some((NodeKind::Chorus, 5)),
-            "clip" => Some((NodeKind::Clip, 1)),
-            "clip_to" => Some((NodeKind::ClipTo, 3)),
-            "dcblock" => Some((NodeKind::Dcblock, 1)),
-            "declick" => Some((NodeKind::Declick, 1)),
-            "delay" => Some((NodeKind::Delay, 2)),
-            "dsf_saw" => Some((NodeKind::DsfSaw, 2)),
-            // Time-based envelopes. `env` needs the note length, which voices
-            // pre-bind as `dur`; `perc` is self-contained.
-            "env" => Some((NodeKind::Env, 5)),
-            "dsf_square" => Some((NodeKind::DsfSquare, 2)),
-            "fir3" => Some((NodeKind::Fir3, 2)),
-            "follow" => Some((NodeKind::Follow, 2)),
-            "hammond" => Some((NodeKind::Hammond, 1)),
-            "highpass" => Some((NodeKind::Highpass, 3)),
-            "highpole" => Some((NodeKind::Highpole, 2)),
-            "highshelf" => Some((NodeKind::Highshelf, 4)),
-            "hold" => Some((NodeKind::Hold, 3)),
-            "impulse" => Some((NodeKind::Impulse, 0)),
-            "limiter" => Some((NodeKind::Limiter, 3)),
-            "lorenz" => Some((NodeKind::Lorenz, 1)),
-            "lowpass" => Some((NodeKind::Lowpass, 3)),
-            "lowpole" => Some((NodeKind::Lowpole, 2)),
-            "lowrez" => Some((NodeKind::Lowrez, 3)),
-            "lowshelf" => Some((NodeKind::Lowshelf, 4)),
-            "mls" => Some((NodeKind::Mls, 0)),
-            "mls_bits" => Some((NodeKind::MlsBits, 1)),
-            "moog" => Some((NodeKind::Moog, 3)),
-            "morph" => Some((NodeKind::Morph, 4)),
-            "noise" => Some((NodeKind::Noise, 0)),
-            "notch" => Some((NodeKind::Notch, 3)),
-            "organ" => Some((NodeKind::Organ, 1)),
-            "peak" => Some((NodeKind::Peak, 3)),
-            "perc" => Some((NodeKind::Perc, 2)),
-            "pink" => Some((NodeKind::Pink, 0)),
-            "pinkpass" => Some((NodeKind::Pinkpass, 1)),
-            "pluck" => Some((NodeKind::Pluck, 4)),
-            "poly_pulse" => Some((NodeKind::PolyPulse, 2)),
-            "poly_saw" => Some((NodeKind::PolySaw, 1)),
-            "poly_square" => Some((NodeKind::PolySquare, 1)),
-            "pulse" => Some((NodeKind::Pulse, 2)),
-            "ramp" => Some((NodeKind::Ramp, 1)),
-            "resonator" => Some((NodeKind::Resonator, 3)),
-            "rossler" => Some((NodeKind::Rossler, 1)),
-            "saw" => Some((NodeKind::Saw, 1)),
-            "sin" => Some((NodeKind::Sin, 1)),
-            "soft_saw" => Some((NodeKind::SoftSaw, 1)),
-            "square" => Some((NodeKind::Square, 1)),
-            "tap" => Some((NodeKind::Tap, 4)),
-            "tick" => Some((NodeKind::Tick, 1)),
-            "triangle" => Some((NodeKind::Triangle, 1)),
-            _ => None
+        crate::lang::ugen(func).map(|u| (u.kind, u.params.len()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::lowerer::lower::lower;
+    use crate::parser::parser::parse;
+
+    fn lower_err(src: &str) -> String {
+        let items = parse(src.to_string()).expect("parse failed");
+        match lower(&items) {
+            Err(e) => e,
+            Ok(_) => panic!("expected {src} to fail lowering"),
+        }
+    }
+
+    /// The arity message is derived from the table now; it must still name the
+    /// same count the hand-written match arm enforced.
+    #[test]
+    fn wrong_arity_reports_the_expected_count() {
+        assert_eq!(lower_err("lowpass(sin(220), 400)\n"), "lowpass expects 3 inputs, got 2");
+        assert_eq!(lower_err("sin(220, 330)\n"), "sin expects 1 inputs, got 2");
+        assert_eq!(lower_err("noise(1)\n"), "noise expects 0 inputs, got 1");
+    }
+
+    /// A name in neither table is still an ordinary unbound-function error.
+    #[test]
+    fn unknown_names_are_not_functions() {
+        assert_eq!(lower_err("lowpas(sin(220), 400, 1)\n"), "lowpas is not a function");
+    }
+
+    /// Every UGen in the table really lowers, at its documented arity.
+    #[test]
+    fn every_ugen_lowers_at_its_documented_arity() {
+        for u in crate::lang::UGENS {
+            let args = vec!["1"; u.params.len()].join(", ");
+            let src = format!("{}({})\n", u.name, args);
+            let items = parse(src.clone()).unwrap_or_else(|e| panic!("{src} failed to parse: {e}"));
+            assert!(lower(&items).is_ok(), "{src} failed to lower");
         }
     }
 }

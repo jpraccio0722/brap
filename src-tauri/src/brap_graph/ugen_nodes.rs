@@ -4,7 +4,7 @@ use chumsky::span::SimpleSpan;
 pub struct NodeId(pub usize);
 
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum NodeKind {
     Add, ADSR, Afollow, Allpass, Allpole,
     Bandpass, Bandrez, Bell, Biquad, Brown, Butterpass,

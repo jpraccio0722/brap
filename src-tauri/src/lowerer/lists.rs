@@ -32,15 +32,31 @@ fn as_count(func: &str, what: &str, v: &Value) -> Result<i64, String> {
     Ok(n as i64)
 }
 
-fn arity(func: &str, args: &[Value], allowed: &[usize]) -> Result<(), String> {
-    if allowed.contains(&args.len()) {
+/// Check the argument count against the arities declared in `lang::LIST_BUILTINS`.
+///
+/// The allowed counts live in that table rather than at the call site so the
+/// editor's signature help and this check cannot disagree.
+fn arity(func: &str, args: &[Value]) -> Result<(), String> {
+    let Some(b) = crate::lang::list_builtin(func) else {
+        // Only reachable if an arm here has no matching table entry, which the
+        // `every_list_builtin_is_in_the_table` test rules out.
+        return Err(format!("{func} is missing from the builtin table"));
+    };
+
+    let max = b.arities.iter().max().copied().unwrap_or(0);
+    if b.arities.contains(&args.len()) || (b.variadic && args.len() >= max) {
         return Ok(());
     }
-    let expected = allowed
+
+    let mut expected = b
+        .arities
         .iter()
         .map(|n| n.to_string())
         .collect::<Vec<_>>()
         .join(" or ");
+    if b.variadic {
+        expected = format!("at least {max}");
+    }
     Err(format!(
         "{func} expects {expected} arguments, got {}",
         args.len()
@@ -76,7 +92,7 @@ impl Lowerer {
     pub fn list_builtin(&mut self, func: &str, args: &[Value]) -> Result<Option<Value>, String> {
         match func {
             "len" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 Ok(Some(Value::Number(as_list(func, &args[0])?.len() as f64)))
             }
 
@@ -112,14 +128,14 @@ impl Lowerer {
             }
 
             "rev" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 list(items.iter().rev().cloned().collect())
             }
 
             // `[a, b, c]` -> `[a, b, c, c, b, a]`: the sequence, then its mirror.
             "palindrome" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut out: Vec<Value> = items.iter().cloned().collect();
                 out.extend(items.iter().rev().cloned());
@@ -129,7 +145,7 @@ impl Lowerer {
             // Rotation amount defaults to 1 and wraps, so `rotl(l, len(l))` is
             // the identity and a negative amount rotates the other way.
             "rotl" | "rotr" => {
-                arity(func, args, &[1, 2])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 if items.is_empty() {
                     return list(Vec::new());
@@ -146,7 +162,7 @@ impl Lowerer {
             }
 
             "push" => {
-                arity(func, args, &[2])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut out: Vec<Value> = items.iter().cloned().collect();
                 out.push(args[1].clone());
@@ -156,7 +172,7 @@ impl Lowerer {
             // Removes the last element. Lists are immutable, so nothing is
             // returned "off the top" — index the list for that.
             "pop" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 if items.is_empty() {
                     return Err("pop: the list is already empty".into());
@@ -165,7 +181,7 @@ impl Lowerer {
             }
 
             "sort" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut nums = items
                     .iter()
@@ -176,7 +192,7 @@ impl Lowerer {
             }
 
             "sum" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut it = items.iter();
                 let Some(first) = it.next() else {
@@ -193,7 +209,7 @@ impl Lowerer {
 
             // Chunks of `n`; a short final chunk is kept.
             "split" => {
-                arity(func, args, &[2])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let n = as_count(func, "the chunk size", &args[1])?;
                 if n < 1 {
@@ -207,7 +223,7 @@ impl Lowerer {
             }
 
             "choice" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 if items.is_empty() {
                     return Err("choice: the list is empty".into());
@@ -218,7 +234,7 @@ impl Lowerer {
 
             // `wchoice(values, weights)` — parallel lists, like zip.
             "wchoice" => {
-                arity(func, args, &[2])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let weights = as_list(func, &args[1])?;
                 if items.is_empty() {
@@ -254,7 +270,7 @@ impl Lowerer {
             }
 
             "scramble" => {
-                arity(func, args, &[1])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut out: Vec<Value> = items.iter().cloned().collect();
                 // Fisher-Yates.
@@ -268,7 +284,7 @@ impl Lowerer {
             // `filter(list, predicate)` — keeps elements the predicate answers
             // non-zero for. The predicate is an ordinary user `fn`.
             "filter" => {
-                arity(func, args, &[2])?;
+                arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let Value::Function(def) = &args[1] else {
                     return Err("filter: the second argument must be a function".into());
@@ -295,5 +311,64 @@ impl Lowerer {
 
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::brap_graph::environment::Env;
+    use crate::brap_graph::graph::BrapGraph;
+
+    fn lowerer() -> Lowerer {
+        Lowerer {
+            env: Env::new(),
+            graph: BrapGraph::default(),
+            depth: 0,
+            bindings: Vec::new(),
+            rng: 0x9E37_79B9_7F4A_7C15,
+        }
+    }
+
+    /// Every name in `lang::LIST_BUILTINS` must actually be handled here —
+    /// otherwise the editor would complete a name that lowers to "not a
+    /// function". Detected by the arm returning something other than the
+    /// `Ok(None)` fallthrough.
+    #[test]
+    fn every_table_entry_is_handled() {
+        for b in crate::lang::LIST_BUILTINS {
+            let mut lowerer = lowerer();
+            // One list argument is enough to get past the match arm; whether it
+            // then succeeds or errors on arity/types is irrelevant here.
+            let args = vec![Value::List(Rc::new(vec![Value::Number(1.0)]))];
+            let handled = match lowerer.list_builtin(b.name, &args) {
+                Ok(None) => false,
+                Ok(Some(_)) | Err(_) => true,
+            };
+            assert!(handled, "{} is in the table but has no arm in list_builtin", b.name);
+        }
+    }
+
+    /// Arity errors now read from the table. `rotl` taking 1 or 2 is the case
+    /// that would regress if `arities` were flattened to a single number.
+    #[test]
+    fn arity_errors_list_every_accepted_count() {
+        let items = Value::List(Rc::new(vec![Value::Number(1.0)]));
+        let mut lowerer = lowerer();
+
+        // Value has no Debug, so unwrap_err() is unavailable here.
+        let err = |r: Result<Option<Value>, String>| match r {
+            Err(e) => e,
+            Ok(_) => panic!("expected an arity error"),
+        };
+
+        assert_eq!(
+            err(lowerer.list_builtin("rotl", &[items.clone(), Value::Number(1.0), Value::Number(2.0)])),
+            "rotl expects 1 or 2 arguments, got 3"
+        );
+        assert_eq!(
+            err(lowerer.list_builtin("push", &[items])),
+            "push expects 2 arguments, got 1"
+        );
     }
 }

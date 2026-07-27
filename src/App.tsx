@@ -1,8 +1,13 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import CodeMirror from "@uiw/react-codemirror";
-import { javascript } from "@codemirror/lang-javascript";
+import {
+  brapExtensions,
+  EMPTY_METADATA,
+  loadMetadata,
+  type LanguageMetadata,
+} from "./brap";
 
 interface Tab {
   id: string;
@@ -44,6 +49,25 @@ function App() {
   const [activeId, setActiveId] = useState<string>(() => tabs[0].id);
 
   const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0];
+
+  // The language's builtins, fetched once. Until it arrives the editor runs on
+  // EMPTY_METADATA: syntax highlighting is already correct, only the builtin
+  // colouring and completions are missing.
+  const [metadata, setMetadata] = useState<LanguageMetadata>(EMPTY_METADATA);
+  useEffect(() => {
+    let live = true;
+    loadMetadata()
+      .then((meta) => {
+        if (live) setMetadata(meta);
+      })
+      .catch((e) => console.error("could not load language metadata:", e));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // Identity must be stable: CodeMirror reconfigures whenever it changes.
+  const extensions = useMemo(() => brapExtensions(metadata), [metadata]);
 
   const newTab = useCallback(() => {
     const tab = makeTab();
@@ -257,7 +281,7 @@ function App() {
           onChange={(value) => updateContent(activeTab.id, value)}
           height="100%"
           theme="dark"
-          extensions={[javascript()]}
+          extensions={extensions}
           className="h-full text-sm"
         />
       </main>
