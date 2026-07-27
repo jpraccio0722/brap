@@ -3,9 +3,9 @@
 
 use fundsp::net::Net;
 
-use crate::brap_graph::realizer::realize;
+use crate::scree_graph::realizer::realize;
 use crate::lowerer::lower::lower_voice;
-use crate::parser::parser::{BrapItem, Expr, Ident};
+use crate::parser::parser::{Arg, ScreeItem, Expr, Ident};
 
 /// The instrument definitions from the most recent eval.
 ///
@@ -13,17 +13,17 @@ use crate::parser::parser::{BrapItem, Expr, Ident};
 /// lowered on demand. An eval replaces this wholesale, exactly like `Patterns`.
 #[derive(Clone, Debug, Default)]
 pub struct Instruments {
-    pub defs: Vec<BrapItem>,
+    pub defs: Vec<ScreeItem>,
 }
 
 impl Instruments {
     /// Keep only the function definitions; everything else in a program is
     /// the persistent graph's business, not a voice's.
-    pub fn from_program(items: &[BrapItem]) -> Instruments {
+    pub fn from_program(items: &[ScreeItem]) -> Instruments {
         Instruments {
             defs: items
                 .iter()
-                .filter(|i| matches!(i, BrapItem::Function { .. }))
+                .filter(|i| matches!(i, ScreeItem::Function { .. }))
                 .cloned()
                 .collect(),
         }
@@ -38,20 +38,25 @@ impl Instruments {
     /// arguments, so a fixed drum needs no placeholder parameter.
     pub fn param_count(&self, name: &str) -> Option<usize> {
         self.defs.iter().find_map(|i| match i {
-            BrapItem::Function { name: n, params, .. } if n.0 == name => Some(params.len()),
+            ScreeItem::Function { name: n, params, .. } if n.0 == name => Some(params.len()),
             _ => None,
         })
     }
 }
 
-/// Lower and realize `instrument(value)` into a playable 0-in / 2-out network.
+/// Lower and realize `instrument(value, name: v, ...)` into a playable
+/// 0-in / 2-out network.
 ///
 /// Synthesizing a call and running the normal pipeline means voices get every
-/// language feature for free — `for`, `if`, nested calls, the lot.
+/// language feature for free — `for`, `if`, nested calls, the lot. Lane values
+/// are passed by name for the same reason: a parameter no lane filled then
+/// falls to its own default, evaluated in the callee's scope where the earlier
+/// parameters are already bound.
 pub fn build_voice(
     instruments: &Instruments,
     instrument: &str,
     value: f64,
+    lanes: &[(String, f64)],
     dur_secs: f64,
 ) -> Result<Net, String> {
     let Some(params) = instruments.param_count(instrument) else {
@@ -60,10 +65,11 @@ pub fn build_voice(
 
     // An instrument that declares no parameters is called with none — the
     // event's value is simply unused, which is what `\` in a pattern means.
-    let args = if params == 0 { vec![] } else { vec![Expr::Num(value)] };
+    let mut args = if params == 0 { vec![] } else { vec![Arg::positional(Expr::Num(value))] };
+    args.extend(lanes.iter().map(|(name, v)| Arg::named(name, Expr::Num(*v))));
 
     let mut items = instruments.defs.clone();
-    items.push(BrapItem::Expr(Expr::Call {
+    items.push(ScreeItem::Expr(Expr::Call {
         func: Ident(instrument.to_string()),
         args,
     }));
@@ -94,7 +100,7 @@ mod tests {
     #[test]
     fn voice_is_stereo_and_sourceless() {
         let ins = instruments("fn kick(f) = sin(f) / 4\n");
-        let net = build_voice(&ins, "kick", 220.0, 1.0).expect("should build");
+        let net = build_voice(&ins, "kick", 220.0, &[], 1.0).expect("should build");
         assert_eq!(net.inputs(), 0);
         assert_eq!(net.outputs(), 2);
     }
@@ -103,7 +109,7 @@ mod tests {
     #[test]
     fn event_value_reaches_the_instrument() {
         let ins = instruments("fn tone(f) = sin(f)\n");
-        let mut net = build_voice(&ins, "tone", 110.0, 1.0).expect("should build");
+        let mut net = build_voice(&ins, "tone", 110.0, &[], 1.0).expect("should build");
         net.set_sample_rate(44100.0);
 
         let samples: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
@@ -124,7 +130,7 @@ mod tests {
     #[test]
     fn voices_may_use_language_features() {
         let ins = instruments("fn rich(f) = for i in 1..=3 { sin(f * i) / 6 }\n");
-        let net = build_voice(&ins, "rich", 110.0, 1.0).expect("should build");
+        let net = build_voice(&ins, "rich", 110.0, &[], 1.0).expect("should build");
         assert_eq!(net.outputs(), 2);
     }
 
@@ -132,7 +138,7 @@ mod tests {
     fn unknown_instrument_is_an_error() {
         let ins = instruments("fn kick(f) = sin(f)\n");
         // Net has no Debug, so unwrap_err() is unavailable here.
-        let err = match build_voice(&ins, "snare", 1.0, 1.0) {
+        let err = match build_voice(&ins, "snare", 1.0, &[], 1.0) {
             Err(e) => e,
             Ok(_) => panic!("expected an error for an unknown instrument"),
         };
@@ -144,7 +150,73 @@ mod tests {
     #[test]
     fn broken_instrument_reports_an_error() {
         let ins = instruments("fn bad(f) = nope(f)\n");
-        assert!(build_voice(&ins, "bad", 1.0, 1.0).is_err());
+        assert!(build_voice(&ins, "bad", 1.0, &[], 1.0).is_err());
+    }
+
+    // ---- lanes ----
+
+    fn rising_crossings(ins: &Instruments, lanes: &[(String, f64)]) -> usize {
+        let mut net = build_voice(ins, "tone", 110.0, lanes, 1.0).expect("should build");
+        net.set_sample_rate(44100.0);
+        let s: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+        s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+    }
+
+    /// A lane value really reaches the parameter it names: doubling `mul`
+    /// doubles the pitch of a 110 Hz tone.
+    #[test]
+    fn a_lane_value_reaches_its_parameter() {
+        let ins = instruments("fn tone(n, mul = 1) = sin(n * mul)\n");
+
+        let plain = rising_crossings(&ins, &[]);
+        let doubled = rising_crossings(&ins, &[("mul".to_string(), 2.0)]);
+
+        assert!((plain as i64 - 110).abs() <= 1, "expected ~110, got {plain}");
+        assert!((doubled as i64 - 220).abs() <= 1, "expected ~220, got {doubled}");
+    }
+
+    /// Lanes bind by name, so the order the scheduler happens to collect them
+    /// in cannot matter.
+    #[test]
+    fn lane_order_does_not_matter() {
+        let ins = instruments("fn tone(n, mul = 1, div = 1) = sin(n * mul / div)\n");
+
+        let forward = rising_crossings(
+            &ins, &[("mul".to_string(), 4.0), ("div".to_string(), 2.0)]);
+        let backward = rising_crossings(
+            &ins, &[("div".to_string(), 2.0), ("mul".to_string(), 4.0)]);
+
+        assert_eq!(forward, backward);
+        assert!((forward as i64 - 220).abs() <= 1, "expected ~220, got {forward}");
+    }
+
+    /// A parameter no lane filled falls to its own default — which is what a
+    /// resting lane relies on.
+    #[test]
+    fn an_unfilled_parameter_uses_its_default() {
+        let ins = instruments("fn tone(n, mul = 2) = sin(n * mul)\n");
+        assert!((rising_crossings(&ins, &[]) as i64 - 220).abs() <= 1);
+    }
+
+    /// A default that reads an earlier parameter still works when a later lane
+    /// is supplied by name — the reason lanes are passed as named arguments
+    /// rather than flattened into positions.
+    #[test]
+    fn a_default_may_read_the_event_value() {
+        let ins = instruments("fn tone(n, hz = n * 2, mul = 1) = sin(hz * mul)\n");
+        assert!((rising_crossings(&ins, &[("mul".to_string(), 1.0)]) as i64 - 220).abs() <= 1);
+    }
+
+    /// A lane the instrument has no parameter for is refused at bind time, but
+    /// the voice builder must not panic if one reaches it anyway.
+    #[test]
+    fn an_unknown_lane_is_an_error_not_a_panic() {
+        let ins = instruments("fn tone(n) = sin(n)\n");
+        let err = match build_voice(&ins, "tone", 110.0, &[("nope".to_string(), 1.0)], 1.0) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error for an unknown lane"),
+        };
+        assert!(err.contains("no parameter named 'nope'"), "got: {err}");
     }
 }
 
@@ -180,7 +252,7 @@ play([110, 165], bass, 0.5)
         let ins = Instruments::from_program(&parse(PROGRAM.to_string()).unwrap());
 
         for (name, freq, dur) in [("kick", 55.0, 1.0), ("bass", 110.0, 1.0)] {
-            let mut net = build_voice(&ins, name, freq, dur).expect("should build");
+            let mut net = build_voice(&ins, name, freq, &[], dur).expect("should build");
             assert_eq!(net.outputs(), 2);
             net.set_sample_rate(44100.0);
 
@@ -216,7 +288,7 @@ fn kick(f) = {
         let ins = Instruments::from_program(
             &crate::parser::parser::parse(KICK.to_string()).expect("parse failed"),
         );
-        let mut net = build_voice(&ins, "kick", freq, dur).expect("should build");
+        let mut net = build_voice(&ins, "kick", freq, &[], dur).expect("should build");
         net.set_sample_rate(44100.0);
         (0..(secs * 44100.0) as usize).map(|_| net.get_mono()).collect()
     }
@@ -275,7 +347,7 @@ mod zero_param_tests {
         let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
         assert_eq!(ins.param_count("kick"), Some(0));
 
-        let mut net = build_voice(&ins, "kick", 1.0, 1.0).expect("should build");
+        let mut net = build_voice(&ins, "kick", 1.0, &[], 1.0).expect("should build");
         assert_eq!(net.outputs(), 2);
         net.set_sample_rate(44100.0);
 
@@ -290,7 +362,7 @@ mod zero_param_tests {
         let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
 
         let render = |v: f64| {
-            let mut net = build_voice(&ins, "kick", v, 1.0).unwrap();
+            let mut net = build_voice(&ins, "kick", v, &[], 1.0).unwrap();
             net.set_sample_rate(44100.0);
             (0..4410).map(|_| net.get_mono()).collect::<Vec<f32>>()
         };
@@ -302,7 +374,7 @@ mod zero_param_tests {
     fn one_parameter_instruments_are_unaffected() {
         let ins = instruments("fn tone(f) = sin(f)\n");
         assert_eq!(ins.param_count("tone"), Some(1));
-        assert!(build_voice(&ins, "tone", 220.0, 1.0).is_ok());
+        assert!(build_voice(&ins, "tone", 220.0, &[], 1.0).is_ok());
     }
 
     /// Declaring a parameter and ignoring it still works, for compatibility.
@@ -310,6 +382,6 @@ mod zero_param_tests {
     fn an_ignored_parameter_still_works() {
         let ins = instruments("fn kick(_) = sin(50) * perc(0.002, 0.3)\n");
         assert_eq!(ins.param_count("kick"), Some(1));
-        assert!(build_voice(&ins, "kick", 1.0, 1.0).is_ok());
+        assert!(build_voice(&ins, "kick", 1.0, &[], 1.0).is_ok());
     }
 }

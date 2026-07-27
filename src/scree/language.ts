@@ -11,12 +11,12 @@ import { Tag, tags as t } from "@lezer/highlight";
 import type { BuiltinIndex, LanguageMetadata } from "./metadata";
 
 /**
- * A brap tokenizer for CodeMirror, mirroring `src-tauri/src/parser/lex.rs`.
+ * A scree tokenizer for CodeMirror, mirroring `src-tauri/src/parser/lex.rs`.
  *
- * A stream tokenizer rather than a Lezer grammar: brap's lexical structure is
+ * A stream tokenizer rather than a Lezer grammar: scree's lexical structure is
  * flat enough that a generated parser would buy nothing but a build step.
  *
- * The one rule worth stating explicitly — **brap has no string literal, and no
+ * The one rule worth stating explicitly — **scree has no string literal, and no
  * escape sequences**. The JavaScript mode this replaces treated the backtick
  * rest token as the start of a template literal, which swallowed the remainder
  * of the file, and would read a backslash trigger as escaping the next
@@ -24,7 +24,7 @@ import type { BuiltinIndex, LanguageMetadata } from "./metadata";
  */
 
 /** The rest token: `` ` `` inside a pattern. Its own tag, because it is the
- *  most brap-specific thing on screen and deserves to stand out. */
+ *  most scree-specific thing on screen and deserves to stand out. */
 export const restTag = Tag.define();
 /** The trigger token: a backslash — a step that sounds but carries no value.
  *  Tagged separately from `rest` so a pattern's rhythm is readable at a
@@ -79,7 +79,7 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
   const keywords = new Set(meta.keywords.length ? meta.keywords : FALLBACK_KEYWORDS);
 
   return {
-    name: "brap",
+    name: "scree",
 
     startState: () => ({ afterFn: false }),
 
@@ -103,12 +103,12 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
       // together because they are read together.
       if (stream.match("`")) {
         state.afterFn = false;
-        return "brapRest";
+        return "screeRest";
       }
 
       if (stream.match("\\")) {
         state.afterFn = false;
-        return "brapTrigger";
+        return "screeTrigger";
       }
 
       // `match` is typed as `RegExpMatchArray | true | null`; a regex argument
@@ -125,8 +125,8 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
           state.afterFn = name === "fn";
           return "keyword";
         }
-        if (NOTE.test(name)) return "brapNote";
-        if (index.has(name)) return "brapBuiltin";
+        if (NOTE.test(name)) return "screeNote";
+        if (index.has(name)) return "screeBuiltin";
         // A name in call position is a user function; anything else is a value.
         return stream.match(/^\s*\(/, false) ? "fnName" : "variable";
       }
@@ -160,10 +160,10 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
     // `keyword`, `operator`, `bracket`, `punctuation`, `variable`, `def` —
     // resolves through that built-in table on purpose.
     tokenTable: {
-      brapBuiltin: builtinTag,
-      brapNote: noteTag,
-      brapRest: restTag,
-      brapTrigger: triggerTag,
+      screeBuiltin: builtinTag,
+      screeNote: noteTag,
+      screeRest: restTag,
+      screeTrigger: triggerTag,
       fnName: t.function(t.variableName),
     },
   };
@@ -173,7 +173,7 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
  * Colours for the dark editor theme. Deliberately gives `rest` a loud, warm
  * colour: it is a single character that changes what a pattern plays.
  */
-export const brapHighlightStyle = HighlightStyle.define([
+export const screeHighlightStyle = HighlightStyle.define([
   // `t.comment`, not `t.lineComment`: the tokenizer's `comment` token resolves
   // to the base tag, and fallback runs specific -> general, never the reverse.
   { tag: t.comment, color: "#6b7280", fontStyle: "italic" },
@@ -196,13 +196,13 @@ export const brapHighlightStyle = HighlightStyle.define([
 ]);
 
 /**
- * The brap language, with completion attached as language data.
+ * The scree language, with completion attached as language data.
  *
  * Attached here rather than through a second `autocompletion()` extension
  * because the editor's `basicSetup` already installs one; adding another would
  * mount two completion tooltips.
  */
-export function brapLanguage(
+export function screeLanguage(
   meta: LanguageMetadata,
   index: BuiltinIndex,
   autocomplete: CompletionSource,
@@ -214,6 +214,6 @@ export function brapLanguage(
     // highlighter with a rule for a tag wins. Without raising precedence only
     // the tags that theme does not define (`rest`, `builtin`) would be ours,
     // leaving the palette half applied.
-    Prec.high(syntaxHighlighting(brapHighlightStyle)),
+    Prec.high(syntaxHighlighting(screeHighlightStyle)),
   ]);
 }

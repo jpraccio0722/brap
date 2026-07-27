@@ -14,7 +14,7 @@ import {
 } from "./metadata";
 
 /**
- * Identifier completion for brap: backend builtins, keywords, and whatever the
+ * Identifier completion for scree: backend builtins, keywords, and whatever the
  * current buffer defines.
  *
  * Document symbols are scraped with regexes rather than parsed. The text being
@@ -28,8 +28,10 @@ const FOR = /\bfor\s+([a-zA-Z_]\w*)\s+in\b/g;
 /** Strips `//` comments so definitions inside them are not offered. */
 const COMMENT = /\/\/[^\n]*/g;
 
-/** Local symbols rank above builtins; there are fewer and they are yours. */
-const BOOST = { local: 2, builtin: 1, keyword: 0 } as const;
+/** Local symbols rank above builtins; there are fewer and they are yours. The
+ *  drawn patterns rank highest: there are fewer still, and the panel is the
+ *  only place their names are written down. */
+const BOOST = { pattern: 3, local: 2, builtin: 1, keyword: 0 } as const;
 
 interface LocalSymbol {
   name: string;
@@ -103,7 +105,15 @@ function builtinCompletion(b: Builtin): Completion {
 /** Exposed for tests; not part of the extension's public surface. */
 export const __test = { scrapeLocals };
 
-export function brapCompletions(meta: LanguageMetadata): CompletionSource {
+/**
+ * @param patternNames The drawn patterns' names, read at completion time
+ * rather than captured. The panel changes them constantly, and rebuilding this
+ * source per edit would mean reconfiguring the editor per keystroke.
+ */
+export function screeCompletions(
+  meta: LanguageMetadata,
+  patternNames: () => string[],
+): CompletionSource {
   const builtins = meta.builtins.map(builtinCompletion);
   const keywords: Completion[] = meta.keywords.map((label) => ({
     label,
@@ -117,12 +127,23 @@ export function brapCompletions(meta: LanguageMetadata): CompletionSource {
     if (!word && !context.explicit) return null;
     if (word?.from === word?.to && !context.explicit) return null;
 
+    const patterns: Completion[] = patternNames().map((name) => ({
+      label: name,
+      detail: "graphical pattern",
+      info: "Drawn in the side panel. Bound as a list, so it plays like one: play(name, kick)",
+      type: "variable",
+      boost: BOOST.pattern,
+    }));
+
     // `call_with` tries the builtin tables before the environment, so a local
     // `fn saw` never runs — the UGen does. Drop the shadowed local rather than
     // offering a name whose completion would describe the wrong thing.
     const taken = new Set([
       ...builtins.map((b) => b.label),
       ...keywords.map((k) => k.label),
+      // A `let` of a pattern's name shadows the panel, but it is still one
+      // name, and the drawn one already says where to go and change it.
+      ...patterns.map((p) => p.label),
     ]);
     const locals = scrapeLocals(context.state.doc.toString())
       .filter((s) => !taken.has(s.name))
@@ -136,7 +157,7 @@ export function brapCompletions(meta: LanguageMetadata): CompletionSource {
         }),
       );
 
-    const options = [...locals, ...keywords, ...builtins];
+    const options = [...patterns, ...locals, ...keywords, ...builtins];
 
     return {
       from: word?.from ?? context.pos,

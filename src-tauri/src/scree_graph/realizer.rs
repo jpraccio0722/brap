@@ -1,6 +1,6 @@
 use fundsp::prelude64::*;
 
-use crate::brap_graph::{graph::BrapGraph, ugen_nodes::{NodeInput, NodeKind, UGenNode}};
+use crate::scree_graph::{graph::ScreeGraph, ugen_nodes::{NodeInput, NodeKind, UGenNode}};
 
 /// How often a time-based envelope samples its shape. `Envelope` linearly
 /// interpolates between samples, and these shapes are piecewise linear, so
@@ -42,7 +42,7 @@ fn const_param(n: &UGenNode, idx: usize, name: &str) -> Result<f32, String> {
 /// The result is always 0-in / 2-out. Both consumers require it: the engine's
 /// program slot is stereo (crossfade asserts matching arity) and the sequencer
 /// is stereo (push asserts it). A mono result fans out to both channels.
-pub fn realize(graph: &BrapGraph) -> Result<Net, String> {
+pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
     let mut net = Net::new(0, 2);
     let mut ids: Vec<fundsp::net::NodeId> = Vec::with_capacity(graph.nodes.len());
 
@@ -244,7 +244,7 @@ pub fn realize(graph: &BrapGraph) -> Result<Net, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brap_graph::ugen_nodes::NodeId;
+    use crate::scree_graph::ugen_nodes::NodeId;
     use crate::lowerer::lower::lower;
     use crate::parser::parser::parse;
 
@@ -287,7 +287,7 @@ mod tests {
     /// and actually move.
     #[test]
     fn adsr_gated_by_slow_sine() {
-        let graph = BrapGraph {
+        let graph = ScreeGraph {
             nodes: vec![
                 UGenNode {
                     kind: NodeKind::Sin,
@@ -324,7 +324,7 @@ mod tests {
     /// A signal in a parameter slot is a user error, not a wiring job.
     #[test]
     fn adsr_signal_parameter_is_an_error() {
-        let graph = BrapGraph {
+        let graph = ScreeGraph {
             nodes: vec![
                 UGenNode {
                     kind: NodeKind::Sin,
@@ -358,7 +358,7 @@ mod tests {
 #[cfg(test)]
 mod envelope_tests {
     use super::*;
-    use crate::brap_graph::ugen_nodes::NodeId;
+    use crate::scree_graph::ugen_nodes::NodeId;
     use crate::lowerer::lower::{lower, lower_voice};
     use crate::parser::parser::parse;
 
@@ -459,7 +459,7 @@ mod envelope_tests {
     /// Envelope arguments are baked at construction, so a signal is rejected.
     #[test]
     fn envelope_arguments_must_be_constants() {
-        let graph = BrapGraph {
+        let graph = ScreeGraph {
             nodes: vec![
                 UGenNode { kind: NodeKind::Sin, inputs: vec![NodeInput::Const(2.0)], span: None },
                 UGenNode {

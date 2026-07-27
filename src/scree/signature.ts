@@ -90,10 +90,10 @@ function callAt(text: string, pos: number): CallSite | null {
 /** `lowpass(audio, `**`cutoff`**`, q)` as DOM, with the active param marked. */
 function render(b: Builtin, argIndex: number): HTMLElement {
   const dom = document.createElement("div");
-  dom.className = "cm-brap-signature";
+  dom.className = "cm-scree-signature";
 
   const name = dom.appendChild(document.createElement("span"));
-  name.className = "cm-brap-signature-name";
+  name.className = "cm-scree-signature-name";
   name.textContent = b.name;
 
   dom.appendChild(document.createTextNode("("));
@@ -103,7 +103,7 @@ function render(b: Builtin, argIndex: number): HTMLElement {
     if (i > 0) dom.appendChild(document.createTextNode(", "));
     const span = dom.appendChild(document.createElement("span"));
     span.textContent = i < required ? param : `${param}?`;
-    if (i === argIndex) span.className = "cm-brap-signature-active";
+    if (i === argIndex) span.className = "cm-scree-signature-active";
   });
 
   if (b.variadic) {
@@ -114,7 +114,7 @@ function render(b: Builtin, argIndex: number): HTMLElement {
 
   if (b.doc) {
     const doc = dom.appendChild(document.createElement("div"));
-    doc.className = "cm-brap-signature-doc";
+    doc.className = "cm-scree-signature-doc";
     doc.textContent = b.doc;
   }
 
@@ -146,19 +146,19 @@ function tooltips(state: EditorState, index: BuiltinIndex): readonly Tooltip[] {
 }
 
 const signatureTheme = EditorView.baseTheme({
-  ".cm-brap-signature": {
+  ".cm-scree-signature": {
     padding: "4px 8px",
     fontFamily: "monospace",
     fontSize: "12px",
     maxWidth: "42em",
     borderRadius: "4px",
   },
-  ".cm-brap-signature-name": { fontWeight: "bold" },
-  ".cm-brap-signature-active": {
+  ".cm-scree-signature-name": { fontWeight: "bold" },
+  ".cm-scree-signature-active": {
     fontWeight: "bold",
     textDecoration: "underline",
   },
-  ".cm-brap-signature-doc": {
+  ".cm-scree-signature-doc": {
     marginTop: "4px",
     fontFamily: "sans-serif",
     opacity: "0.75",

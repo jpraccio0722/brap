@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::rc::Rc;
-use crate::brap_graph::ugen_nodes::NodeId;
+use crate::scree_graph::ugen_nodes::NodeId;
 use crate::parser::parser::{Expr, Param};
 
 #[derive(Clone)]

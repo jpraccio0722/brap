@@ -9,11 +9,28 @@ pub struct Ident(pub String);
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param { pub name: Ident, pub default: Option<Expr> }
 
+/// One argument at a call site. `name` is `Some` for `cut: 400`, which binds to
+/// the parameter of that name rather than by position.
 #[derive(Clone, Debug, PartialEq)]
-pub enum BrapItem {
+pub struct Arg { pub name: Option<Ident>, pub value: Expr }
+
+impl Arg {
+    /// A positional argument, for the many places that synthesize calls.
+    pub fn positional(value: Expr) -> Arg {
+        Arg { name: None, value }
+    }
+
+    /// A named argument: `cut: 400`.
+    pub fn named(name: &str, value: Expr) -> Arg {
+        Arg { name: Some(Ident(name.to_string())), value }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ScreeItem {
     Function { name: Ident, params: Vec<Param>, body: Expr },
     Let { name: Ident, value: Expr },
-    Call { func: Ident, args: Vec<Expr> },
+    Call { func: Ident, args: Vec<Arg> },
     Expr(Expr),
 }
 
@@ -21,7 +38,7 @@ pub enum BrapItem {
 pub enum Expr {
     Add   { lhs: Box<Expr>, rhs: Box<Expr> },
     Block { stmts: Vec<Statement>, tail: Box<Expr> },
-    Call  { func: Ident, args: Vec<Expr> },
+    Call  { func: Ident, args: Vec<Arg> },
     Cmp { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Chain { lhs: Box<Expr>, rhs: Box<Expr> },
     Div   { lhs: Box<Expr>, rhs: Box<Expr> },
@@ -79,7 +96,7 @@ pub enum SumOp {
 /// a fold so `xs[0].m2h` and `x.scale(s)[1]` both parse.
 enum Postfix {
     Index(Expr),
-    Method(Ident, Vec<Expr>),
+    Method(Ident, Vec<Arg>),
 }
 
 fn ident<'a, I>() -> impl Parser<'a, I, Ident, extra::Err<Rich<'a, Token>>> + Clone
@@ -87,7 +104,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     select! { Token::Ident(s) => Ident(s) }
 }
 
-pub fn parse(code: String) -> Result<Vec<BrapItem>, String> {
+pub fn parse(code: String) -> Result<Vec<ScreeItem>, String> {
     
     let raw_tokens: Vec<Token> = Token::lexer(&code)
         .collect::<Result<_, _>>()
@@ -113,7 +130,17 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         let paren = expr.clone()
             .delimited_by(just(Token::ParensOpen), just(Token::ParensClose));
 
-        let args = expr.clone()
+        // `cut: 400` is tried before a bare expression. Both start with an
+        // Ident, so this relies on `choice` rewinding when the Colon is absent.
+        let arg = choice((
+            ident()
+                .then_ignore(just(Token::Colon))
+                .then(expr.clone())
+                .map(|(name, value)| Arg { name: Some(name), value }),
+            expr.clone().map(Arg::positional),
+        ));
+
+        let args = arg
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>();
@@ -291,7 +318,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     })
 }
 
-fn parser<'a, I>() -> impl Parser<'a, I, Vec<BrapItem>, extra::Err<Rich<'a, Token>>>
+fn parser<'a, I>() -> impl Parser<'a, I, Vec<ScreeItem>, extra::Err<Rich<'a, Token>>>
 where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
 
     let param = ident()
@@ -313,17 +340,17 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         .then(params)
         .then_ignore(just(Token::Assign))
         .then(expr())
-        .map(|((name, params), body)| BrapItem::Function { name, params, body });
+        .map(|((name, params), body)| ScreeItem::Function { name, params, body });
 
     let let_item = just(Token::Let)
         .ignore_then(ident())
         .then_ignore(just(Token::Assign))
         .then(expr())
-        .map(|(name, value)| BrapItem::Let { name, value });
+        .map(|(name, value)| ScreeItem::Let { name, value });
 
     let item = choice((
         function,
-        expr().map(BrapItem::Expr),
+        expr().map(ScreeItem::Expr),
         let_item,
     ));
 
@@ -348,7 +375,7 @@ mod tests {
     fn parses_function_adding_two_vars() {
         let ast = parse("fn add(a, b) = a + b\n".to_string()).expect("should parse");
 
-        let expected = vec![BrapItem::Function {
+        let expected = vec![ScreeItem::Function {
             name: Ident("add".to_string()),
             params: vec![
                 Param { name: Ident("a".to_string()), default: None },
@@ -358,5 +385,60 @@ mod tests {
         }];
 
         assert_eq!(ast, expected);
+    }
+
+    /// The one argument list, parsed both ways at once.
+    #[test]
+    fn parses_named_and_positional_arguments() {
+        let ast = parse("play(kick, cut: 400)\n".to_string()).expect("should parse");
+
+        let expected = vec![ScreeItem::Expr(Expr::Call {
+            func: Ident("play".to_string()),
+            args: vec![
+                Arg::positional(Expr::Var(Ident("kick".to_string()))),
+                Arg::named("cut", Expr::Num(400.0)),
+            ],
+        })];
+
+        assert_eq!(ast, expected);
+    }
+
+    /// A named argument's value is a whole expression, not just a literal —
+    /// which is what makes a lane able to be a pattern.
+    #[test]
+    fn a_named_argument_takes_any_expression() {
+        let ast = parse("play(bass, cut: [400, 2000])\n".to_string()).expect("should parse");
+
+        let Some(ScreeItem::Expr(Expr::Call { args, .. })) = ast.first() else {
+            panic!("expected a call, got {ast:?}");
+        };
+        assert_eq!(args[1].name, Some(Ident("cut".to_string())));
+        assert_eq!(args[1].value, Expr::List(vec![Expr::Num(400.0), Expr::Num(2000.0)]));
+    }
+
+    /// `choice` has to rewind after the Ident when no Colon follows, or a bare
+    /// variable argument stops parsing.
+    #[test]
+    fn a_bare_identifier_argument_still_parses() {
+        let ast = parse("sin(freq)\n".to_string()).expect("should parse");
+
+        let Some(ScreeItem::Expr(Expr::Call { args, .. })) = ast.first() else {
+            panic!("expected a call, got {ast:?}");
+        };
+        assert_eq!(args, &vec![Arg::positional(Expr::Var(Ident("freq".to_string())))]);
+    }
+
+    /// Method sugar shares the argument parser, so names work there too.
+    #[test]
+    fn method_calls_take_named_arguments() {
+        let ast = parse("[220] >> play(bass, cut: 400)\n".to_string()).expect("should parse");
+
+        let Some(ScreeItem::Expr(Expr::Chain { rhs, .. })) = ast.first() else {
+            panic!("expected a chain, got {ast:?}");
+        };
+        let Expr::Call { args, .. } = rhs.as_ref() else {
+            panic!("expected a call on the right of the chain");
+        };
+        assert_eq!(args[1], Arg::named("cut", Expr::Num(400.0)));
     }
 }

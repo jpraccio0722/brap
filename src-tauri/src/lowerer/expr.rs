@@ -1,8 +1,8 @@
 use std::fmt::format;
 use std::rc::Rc;
 
-use crate::brap_graph::environment::{Env, Value};
-use crate::brap_graph::ugen_nodes::{NodeInput, NodeKind};
+use crate::scree_graph::environment::{Env, Value};
+use crate::scree_graph::ugen_nodes::{NodeInput, NodeKind};
 use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{CmpOp, Expr, Statement};
 use crate::parser::parser::Range;

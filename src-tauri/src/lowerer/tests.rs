@@ -1,10 +1,10 @@
-use crate::brap_graph::graph::BrapGraph;
-use crate::brap_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
+use crate::scree_graph::graph::ScreeGraph;
+use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::lowerer::lower::lower;
 use crate::parser::parser::parse;
 use NodeInput::{Const, Node};
 
-fn lower_src(src: &str) -> Result<BrapGraph, String> {
+fn lower_src(src: &str) -> Result<ScreeGraph, String> {
     let items = parse(src.to_string()).expect("parse failed");
     lower(&items).map(|l| l.graph)
 }
@@ -725,6 +725,196 @@ fn play_rejects_a_signal_rate() {
     assert!(err.contains("compile-time number"), "got: {err}");
 }
 
+// ---- play_once / playn ----
+
+/// `play` loops; the whole of the difference is the binding's `cycles`.
+#[test]
+fn play_loops_forever() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick)\n");
+    assert_eq!(bs[0].cycles, None);
+}
+
+#[test]
+fn play_once_bounds_the_binding_to_one_cycle() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220, 330], kick)\n");
+    assert_eq!(bs[0].instrument, "kick");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(220.0), Step::Value(330.0),
+    ]));
+    assert_eq!(bs[0].cycles, Some(1.0));
+}
+
+#[test]
+fn playn_bounds_the_binding_to_its_count() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4)\n");
+    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(220.0)]));
+}
+
+/// Repeats count passes of the pattern, so a rate that packs two passes into
+/// each cycle halves the number of cycles they take.
+#[test]
+fn a_rate_shortens_the_window_it_speeds_up() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4, 2)\n");
+    assert_eq!(bs[0].cycles, Some(2.0));
+    assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
+        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, 0.5)\n");
+    assert_eq!(bs[0].cycles, Some(2.0), "a half-speed pass takes two cycles");
+}
+
+/// Both take a piped pattern and lanes, like `play`.
+#[test]
+fn the_bounded_plays_pipe_and_take_lanes() {
+    let bs = bindings_of(&format!("{BASS}[220, 330] >> play_once(bass, cut: [400, 2000])\n"));
+    assert_eq!(bs[0].cycles, Some(1.0));
+    assert_eq!(bs[0].lanes.len(), 1);
+
+    let bs = bindings_of(&format!("{BASS}[220] >> playn(bass, 3, legato: 0.5)\n"));
+    assert_eq!(bs[0].cycles, Some(3.0));
+    assert_eq!(bs[0].lanes.len(), 1);
+}
+
+#[test]
+fn playn_needs_a_count() {
+    let err = play_err("fn kick(f) = sin(f)\nplayn([220], kick)\n");
+    assert!(err.contains("number of repeats"), "got: {err}");
+}
+
+#[test]
+fn playn_rejects_a_count_below_one() {
+    for src in ["playn([220], kick, 0)\n", "playn([220], kick, -2)\n"] {
+        let err = play_err(&format!("fn kick(f) = sin(f)\n{src}"));
+        assert!(err.contains("at least 1"), "got: {err}");
+    }
+}
+
+#[test]
+fn playn_rejects_a_signal_count() {
+    let err = play_err("fn kick(f) = sin(f)\nplayn([220], kick, sin(2))\n");
+    assert!(err.contains("compile-time number"), "got: {err}");
+}
+
+/// The count is an argument like any other, so the arity message has to say
+/// four rather than `play`'s three.
+#[test]
+fn playn_reports_its_own_arity() {
+    let err = play_err("fn kick(f) = sin(f)\nplayn([220], kick, 2, 1, 9)\n");
+    assert!(err.contains("playn expects at most 4 arguments, got 5"), "got: {err}");
+}
+
+/// Errors name the function that was actually called.
+#[test]
+fn a_bounded_play_reports_under_its_own_name() {
+    let err = play_err("fn kick(f) = sin(f)\nplay_once([220], kick, 0)\n");
+    assert!(err.starts_with("play_once:"), "got: {err}");
+}
+
+// ---- lanes ----
+
+const BASS: &str = "fn bass(n, cut = 800, amp = 1) = saw(n) * amp\n";
+
+#[test]
+fn a_lane_is_bound_as_a_pattern() {
+    let bs = bindings_of(&format!("{BASS}play([220, 330], bass, cut: [400, 2000])\n"));
+
+    assert_eq!(bs[0].lanes.len(), 1);
+    assert_eq!(bs[0].lanes[0].name, "cut");
+    assert_eq!(
+        bs[0].lanes[0].pattern,
+        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)])
+    );
+}
+
+/// A scalar lane is just a one-step pattern, so `amp: 0.8` needs no special
+/// case anywhere downstream.
+#[test]
+fn a_scalar_lane_is_a_one_step_pattern() {
+    let bs = bindings_of(&format!("{BASS}play([220], bass, amp: 0.8)\n"));
+    assert_eq!(bs[0].lanes[0].pattern, Pattern::Steps(vec![Step::Value(0.8)]));
+}
+
+#[test]
+fn lanes_survive_the_pipe_form() {
+    let bs = bindings_of(&format!("{BASS}[220, 330] >> play(bass, cut: [400, 2000])\n"));
+    assert_eq!(bs[0].instrument, "bass");
+    assert_eq!(bs[0].lanes.len(), 1);
+}
+
+/// `rate` is a property of the binding, so a lane written step-for-step
+/// against the pattern still lines up with it.
+#[test]
+fn rate_compresses_the_lanes_too() {
+    let bs = bindings_of(&format!("{BASS}play([220, 330], bass, 2, cut: [400, 2000])\n"));
+
+    assert_eq!(bs[0].pattern, Pattern::Fast(2.0, Box::new(
+        Pattern::Steps(vec![Step::Value(220.0), Step::Value(330.0)]))));
+    assert_eq!(bs[0].lanes[0].pattern, Pattern::Fast(2.0, Box::new(
+        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)]))));
+}
+
+#[test]
+fn legato_is_accepted_without_being_a_parameter() {
+    let bs = bindings_of(&format!("{BASS}play([220], bass, legato: 0.4)\n"));
+    assert_eq!(bs[0].lanes[0].name, "legato");
+}
+
+// ---- lane errors ----
+
+#[test]
+fn play_rejects_a_lane_the_instrument_has_no_parameter_for() {
+    let err = play_err(&format!("{BASS}play([220], bass, cutt: 400)\n"));
+    assert!(err.contains("no parameter named 'cutt'"), "got: {err}");
+}
+
+/// The pattern fills the first parameter, so naming it as a lane is a
+/// contradiction rather than an override.
+#[test]
+fn play_rejects_a_lane_naming_the_first_parameter() {
+    let err = play_err(&format!("{BASS}play([220], bass, n: 400)\n"));
+    assert!(err.contains("first parameter"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_repeated_lane() {
+    let err = play_err(&format!("{BASS}play([220], bass, cut: 400, cut: 900)\n"));
+    assert!(err.contains("given twice"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_an_instrument_whose_parameter_nothing_fills() {
+    let err = play_err("fn bass(n, cut) = saw(n)\nplay([220], bass)\n");
+    assert!(err.contains("needs 'cut'"), "got: {err}");
+}
+
+/// Filling it by name is exactly what that error asks for.
+#[test]
+fn a_lane_satisfies_a_parameter_with_no_default() {
+    let bs = bindings_of("fn bass(n, cut) = saw(n) * cut\nplay([220], bass, cut: 400)\n");
+    assert_eq!(bs[0].lanes[0].name, "cut");
+}
+
+/// `legato` changes the note's length, so it can never reach a parameter —
+/// which has to be said at bind time, not discovered by ear.
+#[test]
+fn play_rejects_an_instrument_with_a_legato_parameter() {
+    let err = play_err("fn bass(n, legato = 1) = saw(n)\nplay([220], bass, legato: 0.5)\n");
+    assert!(err.contains("sets the note's length"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_signal_in_a_lane() {
+    let err = play_err(&format!("{BASS}play([220], bass, cut: [sin(2)])\n"));
+    assert!(err.contains("signal"), "got: {err}");
+}
+
+#[test]
+fn play_rejects_a_positional_argument_after_a_lane() {
+    let err = play_err(&format!("{BASS}play([220], cut: 400, bass)\n"));
+    assert!(err.contains("must come before named"), "got: {err}");
+}
+
 // ---- list builtins ----
 
 /// Lower `expr` and read back the constant it folded to.
@@ -1089,7 +1279,7 @@ fn every_example_compiles_and_realizes() {
 
     for entry in std::fs::read_dir(dir).expect("examples/ should exist") {
         let path = entry.expect("a readable entry").path();
-        if path.extension().map(|e| e != "brap").unwrap_or(true) {
+        if path.extension().map(|e| e != "scree").unwrap_or(true) {
             continue;
         }
         let name = path.file_name().unwrap().to_string_lossy().to_string();
@@ -1098,7 +1288,7 @@ fn every_example_compiles_and_realizes() {
         let items = parse(src).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
         let lowered = crate::lowerer::lower::lower(&items)
             .unwrap_or_else(|e| panic!("{name} failed to lower: {e}"));
-        if crate::brap_graph::realizer::realize(&lowered.graph).is_err() {
+        if crate::scree_graph::realizer::realize(&lowered.graph).is_err() {
             panic!("{name} failed to realize");
         }
 
@@ -1111,8 +1301,16 @@ fn every_example_compiles_and_realizes() {
         // Every instrument a pattern names must exist and build.
         let instruments = crate::scheduler::voice::Instruments::from_program(&items);
         for binding in &lowered.bindings {
+            // Lanes go in as the scheduler would send them: sampled at the
+            // first onset, so an example's named arguments are exercised too.
+            let lanes: Vec<(String, f64)> = binding
+                .lanes
+                .iter()
+                .filter(|l| l.name != crate::pattern::patterns::LEGATO)
+                .filter_map(|l| l.pattern.sample(0.0).map(|v| (l.name.clone(), v)))
+                .collect();
             let voice = crate::scheduler::voice::build_voice(
-                &instruments, &binding.instrument, 60.0, 0.5);
+                &instruments, &binding.instrument, 60.0, &lanes, 0.5);
             if voice.is_err() {
                 panic!("{name}: instrument `{}` failed to build", binding.instrument);
             }

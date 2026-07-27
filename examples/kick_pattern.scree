@@ -9,7 +9,7 @@ fn bass(n) = {
   let hz = n.m2h
   let osc = saw(hz) + saw(hz * 2) * 0.5 + saw(hz * 3) * 0.25
   let amp = env(0.005, 0.32, 0.5, 0.06, dur)
-  (osc * amp).lowpass(660, 0.7) * 0.5  .
+  (osc * amp).lowpass(660, 0.7) * 0.5
 }
 
 // Slash \ is a trigger and ` is a rest 

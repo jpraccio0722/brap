@@ -16,6 +16,17 @@ pub fn bpm_from_cps(cps: f64) -> f64 {
     cps * 60.0 * BEATS_PER_CYCLE
 }
 
+/// How far ahead of the present `reset` places cycle 0.
+///
+/// The scheduler works ahead of the audio clock and matches onsets half-open,
+/// so a window never reaches back for a step it has already passed. Pinning
+/// cycle 0 to "now" hands it an origin the next pass has already walked past:
+/// the step at cycle 0 falls behind that window and never sounds, and the
+/// pattern is heard from its second step. The lead-in has to clear one
+/// scheduler tick plus the eval that follows it, so the pass that first sees
+/// the new bindings still has the whole first cycle in front of it.
+pub const START_LEAD_SECS: f64 = 0.1;
+
 /// Tempo and phase, kept behind one lock because a tempo change moves both:
 /// a reader that saw the new rate against the old origin would place cycle 0
 /// somewhere the beat never was. Only the command and scheduler threads read
@@ -40,8 +51,9 @@ struct Tempo {
 ///
 /// *Musical time* is cycles, derived from audio time by the tempo and an
 /// **origin** — the audio time at which cycle 0 sits. Re-evaluating never
-/// moves the origin, so the beat survives an edit; `reset` moves it to the
-/// present so playing from silence starts a pattern at its first step.
+/// moves the origin, so the beat survives an edit; `reset` moves it to just
+/// ahead of the present so playing from silence starts a pattern at its first
+/// step.
 ///
 /// The origin exists because the frame counter cannot be zeroed: it is what
 /// stays aligned with the sequencer's own internal clock, and rewinding it
@@ -100,14 +112,17 @@ impl Clock {
         self.tempo().origin_secs
     }
 
-    /// Put cycle 0 at the present, so the next pattern starts at its first
-    /// step. Called when playing from silence and when stopping — never on a
-    /// re-eval while something is already playing, which is what keeps an edit
-    /// from jolting the groove.
+    /// Put cycle 0 just ahead of the present, so the next pattern starts at its
+    /// first step. Called when playing from silence and when stopping — never
+    /// on a re-eval while something is already playing, which is what keeps an
+    /// edit from jolting the groove.
+    ///
+    /// The lead-in is what makes the first step audible rather than merely
+    /// nominal; see `START_LEAD_SECS`.
     pub fn reset(&self) {
         let now = self.now_secs();
         let mut tempo = self.tempo.lock().unwrap_or_else(|e| e.into_inner());
-        tempo.origin_secs = now;
+        tempo.origin_secs = now + START_LEAD_SECS;
         tempo.epoch = tempo.epoch.wrapping_add(1);
     }
 
@@ -223,19 +238,39 @@ mod tests {
         assert!((clock.now_cycles() - 2.0).abs() < 1e-9);
     }
 
-    /// Reset puts cycle 0 at the present without touching the frame counter,
-    /// which has to stay aligned with the sequencer's own clock.
+    /// Reset puts cycle 0 just ahead of the present without touching the frame
+    /// counter, which has to stay aligned with the sequencer's own clock.
     #[test]
-    fn reset_moves_cycle_zero_to_now() {
+    fn reset_moves_cycle_zero_to_just_ahead_of_now() {
         let clock = Clock::with_cps(44100.0, 0.5);
         clock.advance(44100 * 5); // five seconds in
         assert!((clock.now_cycles() - 2.5).abs() < 1e-9);
 
         clock.reset();
-        assert!(clock.now_cycles().abs() < 1e-9, "now is cycle 0");
         // Audio time is untouched: only the origin moved.
         assert!((clock.now_secs() - 5.0).abs() < 1e-9);
-        assert!((clock.origin_secs() - 5.0).abs() < 1e-9);
+        assert!((clock.origin_secs() - (5.0 + START_LEAD_SECS)).abs() < 1e-9);
+        // The present sits a lead-in *before* cycle 0, which is what leaves the
+        // first step in front of the scheduler rather than behind it.
+        assert!(clock.now_cycles() < 0.0, "cycle 0 must still be ahead");
+        assert!((clock.now_cycles() + START_LEAD_SECS * 0.5).abs() < 1e-9);
+    }
+
+    /// The bug the lead-in exists for: the scheduler reads the clock a tick
+    /// after the eval that reset it, and its window has to still contain
+    /// cycle 0 by then.
+    #[test]
+    fn cycle_zero_is_still_ahead_one_scheduler_tick_later() {
+        let clock = Clock::with_cps(44100.0, 0.5);
+        clock.reset();
+        // The audio thread keeps rendering while the scheduler sleeps.
+        clock.advance((44100.0 * super::super::scheduler::TICK.as_secs_f64()) as u64);
+
+        assert!(
+            clock.now_cycles() < 0.0,
+            "a pass one tick after the reset must not have passed cycle 0, got {}",
+            clock.now_cycles(),
+        );
     }
 
     /// After a reset, cycle 0 maps back to the audio time it was pinned to —
@@ -246,8 +281,8 @@ mod tests {
         clock.advance(44100 * 7);
         clock.reset();
 
-        assert!((clock.secs_at(0.0) - 7.0).abs() < 1e-9);
-        assert!((clock.secs_at(1.0) - 9.0).abs() < 1e-9);
+        assert!((clock.secs_at(0.0) - (7.0 + START_LEAD_SECS)).abs() < 1e-9);
+        assert!((clock.secs_at(1.0) - (9.0 + START_LEAD_SECS)).abs() < 1e-9);
         for cycles in [0.0, 0.25, 3.75, 100.5] {
             let round = clock.cycles_at(clock.secs_at(cycles));
             assert!((round - cycles).abs() < 1e-9, "round trip failed for {cycles}");
@@ -262,7 +297,7 @@ mod tests {
         let reader = clock.clone();
         clock.advance(44100 * 4);
         clock.reset();
-        assert!(reader.now_cycles().abs() < 1e-9);
+        assert!((reader.origin_secs() - (4.0 + START_LEAD_SECS)).abs() < 1e-9);
     }
 
     /// A tempo change is heard from here on, not retroactively: the beat we
@@ -339,13 +374,14 @@ mod tests {
         }
     }
 
-    /// Time keeps running after a reset, from the new zero.
+    /// Time keeps running after a reset, from the new zero — which the lead-in
+    /// puts a moment after the reset itself.
     #[test]
     fn cycles_advance_from_the_new_origin() {
         let clock = Clock::with_cps(44100.0, 0.5);
         clock.advance(44100 * 5);
         clock.reset();
-        clock.advance(44100 * 2); // two more seconds = one cycle
-        assert!((clock.now_cycles() - 1.0).abs() < 1e-9);
+        clock.advance((44100.0 * (2.0 + START_LEAD_SECS)) as u64);
+        assert!((clock.now_cycles() - 1.0).abs() < 1e-6);
     }
 }

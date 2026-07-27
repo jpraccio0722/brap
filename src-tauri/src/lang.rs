@@ -2,7 +2,7 @@
 //!
 //! Names, arities and parameter names used to live in three places at once: the
 //! match arm in `lowerer::call`, the arity literals in `lowerer::lists`, and —
-//! for parameters — nowhere except the error strings in `brap_graph::realizer`.
+//! for parameters — nowhere except the error strings in `scree_graph::realizer`.
 //! The editor needs all of it, so it lives here instead, and the lowerer reads
 //! it rather than repeating it. Adding a UGen to `UGENS` is now the only step
 //! needed to make it callable *and* completable.
@@ -13,7 +13,7 @@
 
 use serde::Serialize;
 
-use crate::brap_graph::ugen_nodes::NodeKind;
+use crate::scree_graph::ugen_nodes::NodeKind;
 
 /// A UGen builtin: a name that lowers to a graph node.
 ///
@@ -662,7 +662,21 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["pattern", "instrument", "rate"],
         arities: &[2, 3],
         variadic: false,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1.",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. `legato:` scales the note's length instead of being passed.",
+    },
+    ListBuiltin {
+        name: "play_once",
+        params: &["pattern", "instrument", "rate"],
+        arities: &[2, 3],
+        variadic: false,
+        doc: "`play`, stopping after one pass of the pattern: `[60, 64, 67] >> play_once(stab)`. Started while something is already playing it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again.",
+    },
+    ListBuiltin {
+        name: "playn",
+        params: &["pattern", "instrument", "times", "rate"],
+        arities: &[3, 4],
+        variadic: false,
+        doc: "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two cycles. Lanes work as they do on `play`.",
     },
     ListBuiltin {
         name: "dur",
@@ -782,7 +796,7 @@ pub struct LanguageMetadata {
     pub keywords: &'static [&'static str],
 }
 
-/// Everything the editor needs to highlight, complete and describe brap.
+/// Everything the editor needs to highlight, complete and describe scree.
 pub fn metadata() -> LanguageMetadata {
     let ugens = UGENS.iter().map(|u| BuiltinInfo {
         name: u.name,
@@ -882,6 +896,23 @@ mod tests {
         }
     }
 
+    /// `dur` aside, every special is one of the `play` family — and the lowerer
+    /// has to intercept exactly those. A name in the table the lowerer does not
+    /// know is completable but not callable; one it knows that is missing here
+    /// is callable but invisible to the editor.
+    #[test]
+    fn the_table_and_the_lowerer_agree_on_the_play_family() {
+        use crate::lowerer::lower::Lowerer;
+        for b in SPECIALS {
+            assert_eq!(
+                Lowerer::is_play(b.name),
+                b.name != "dur",
+                "{} is a play to one of the two and not the other",
+                b.name,
+            );
+        }
+    }
+
     /// The realizer reads inputs positionally, so a UGen's parameter names must
     /// line up one-to-one with its inputs — no duplicates, none blank.
     #[test]
@@ -910,7 +941,7 @@ mod tests {
         }
     }
 
-    /// The wire shape the `Builtin` interface in `src/brap/metadata.ts` is
+    /// The wire shape the `Builtin` interface in `src/scree/metadata.ts` is
     /// written against. A rename here is a silent breakage over there.
     #[test]
     fn metadata_serializes_to_the_shape_the_editor_expects() {

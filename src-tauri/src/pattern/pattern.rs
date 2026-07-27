@@ -135,6 +135,44 @@ impl Pattern {
             }
         }
     }
+
+    /// What this pattern is *holding* at one instant, or `None` over a rest.
+    ///
+    /// This is how a lane is read: structure comes from the pattern being
+    /// played, and every lane is asked what it has at that event's onset.
+    /// Matching lanes to events by onset instead would need float equality, and
+    /// would have nothing to say when the lanes are of different lengths — which
+    /// is the case worth having, since that is where polymeter comes from.
+    pub fn sample(&self, at: f64) -> Option<f64> {
+        if !at.is_finite() { return None; }
+        match self {
+            Pattern::Silence => None,
+
+            Pattern::Steps(steps) => {
+                if steps.is_empty() { return None; }
+                let pos = at.rem_euclid(1.0);
+                let len = steps.len() as f64;
+                // `min` guards the case where rem_euclid rounds up to exactly 1.
+                let i = ((pos * len) as usize).min(steps.len() - 1);
+                match &steps[i] {
+                    Step::Rest => None,
+                    Step::Value(v) => Some(*v),
+                    // Slot-local time: one cycle of the inner pattern fills the
+                    // slot, exactly as `query` treats a group.
+                    Step::Group(inner) => inner.sample(pos * len - i as f64),
+                }
+            }
+
+            // First lane that has something wins, so a stack reads as a layered
+            // fallback rather than silently summing.
+            Pattern::Stack(ps) => ps.iter().find_map(|p| p.sample(at)),
+
+            Pattern::Fast(rate, p) => {
+                if *rate <= 0.0 || !rate.is_finite() { return None; }
+                p.sample(at * rate)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -218,6 +256,80 @@ mod tests {
     fn degenerate_rates_are_safe() {
         let p = Pattern::fast(0.0, Pattern::steps([Some(1.0)]));
         assert!(p.query(Span::new(0.0, 1.0)).is_empty());
+    }
+
+    // ---- sample ----
+
+    #[test]
+    fn sample_reads_the_step_holding_that_instant() {
+        let p = Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        assert_eq!(p.sample(0.0), Some(1.0));
+        assert_eq!(p.sample(0.24), Some(1.0));
+        assert_eq!(p.sample(0.25), Some(2.0));
+        assert_eq!(p.sample(0.99), Some(4.0));
+    }
+
+    /// A lane is sampled at absolute cycle time, so it has to repeat like the
+    /// pattern it accompanies rather than run out after cycle 0.
+    #[test]
+    fn sample_repeats_every_cycle() {
+        let p = Pattern::steps([Some(1.0), Some(2.0)]);
+        assert_eq!(p.sample(7.75), Some(2.0));
+        assert_eq!(p.sample(-0.25), Some(2.0));
+        assert_eq!(p.sample(-0.75), Some(1.0));
+    }
+
+    /// The case the design is for: a lane shorter or longer than the pattern
+    /// it decorates, drifting against it instead of erroring.
+    #[test]
+    fn a_lane_of_a_different_length_drifts() {
+        let notes = Pattern::steps([Some(0.0), Some(0.0), Some(0.0), Some(0.0)]);
+        let lane = Pattern::steps([Some(10.0), Some(20.0), Some(30.0)]);
+
+        let onsets: Vec<f64> = notes.query(Span::new(0.0, 2.0)).iter().map(|e| e.begin).collect();
+        let sampled: Vec<Option<f64>> = onsets.iter().map(|t| lane.sample(*t)).collect();
+
+        assert_eq!(sampled, vec![
+            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // cycle 0
+            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // cycle 1
+        ]);
+    }
+
+    #[test]
+    fn sample_over_a_rest_is_none() {
+        let p = Pattern::steps([Some(1.0), None]);
+        assert_eq!(p.sample(0.5), None);
+        assert_eq!(Pattern::Silence.sample(0.3), None);
+        assert_eq!(Pattern::steps([]).sample(0.3), None);
+    }
+
+    #[test]
+    fn sample_descends_into_a_group() {
+        let p = Pattern::Steps(vec![
+            Step::Value(1.0),
+            Step::Group(Box::new(Pattern::steps([Some(2.0), Some(3.0)]))),
+        ]);
+        assert_eq!(p.sample(0.0), Some(1.0));
+        assert_eq!(p.sample(0.5), Some(2.0));
+        assert_eq!(p.sample(0.76), Some(3.0));
+    }
+
+    /// Sampling has to agree with `query`: a lane written step-for-step against
+    /// its pattern must line up with it at any rate.
+    #[test]
+    fn sample_and_query_agree_under_fast() {
+        let p = Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)]));
+        for e in p.query(Span::new(0.0, 4.0)) {
+            assert_eq!(p.sample(e.begin), Some(e.value), "at {}", e.begin);
+        }
+    }
+
+    #[test]
+    fn degenerate_sample_inputs_are_safe() {
+        let p = Pattern::steps([Some(1.0)]);
+        assert_eq!(p.sample(f64::NAN), None);
+        assert_eq!(p.sample(f64::INFINITY), None);
+        assert_eq!(Pattern::fast(0.0, p).sample(0.5), None);
     }
 
     #[test]

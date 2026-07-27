@@ -1,13 +1,14 @@
 use std::rc::Rc;
-use crate::brap_graph::environment::{Env, FunctionDef, Value};
-use crate::brap_graph::graph::BrapGraph;
-use crate::brap_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
-use crate::parser::parser::BrapItem;
+use crate::scree_graph::environment::{Env, FunctionDef, Value};
+use crate::scree_graph::graph::ScreeGraph;
+use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
+use crate::parser::parser::ScreeItem;
+use crate::pattern::graphical::{define_all, GraphicalPattern};
 use crate::pattern::patterns::Binding;
 
 pub struct Lowerer {
     pub env: Env,
-    pub graph: BrapGraph,
+    pub graph: ScreeGraph,
     pub depth: usize,
     pub bindings: Vec<Binding>,
     /// Seeded per eval, so `choice` and `scramble` differ each time.
@@ -17,7 +18,7 @@ pub struct Lowerer {
 /// One eval produces two artifacts: the persistent graph, which is crossfaded
 /// into the engine's slot, and the pattern bindings, which go to the scheduler.
 pub struct Lowered {
-    pub graph: BrapGraph,
+    pub graph: ScreeGraph,
     pub bindings: Vec<Binding>,
 }
 
@@ -31,8 +32,17 @@ fn seed_from_clock() -> u64 {
         | 1
 }
 
-pub fn lower(items: &Vec<BrapItem>) -> Result<Lowered, String> {
-    lower_inner(items, None)
+pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
+    lower_inner(items, None, &[])
+}
+
+/// Lower a program alongside the patterns drawn in the side panel, each of
+/// which the program can name as if it had written the list itself.
+pub fn lower_with_patterns(
+    items: &Vec<ScreeItem>,
+    patterns: &[GraphicalPattern],
+) -> Result<Lowered, String> {
+    lower_inner(items, None, patterns)
 }
 
 /// Lower a single scheduler voice.
@@ -40,14 +50,21 @@ pub fn lower(items: &Vec<BrapItem>) -> Result<Lowered, String> {
 /// `dur` (the note length in seconds) is pre-bound as an ordinary number, so an
 /// instrument can shape itself against the note it is playing — `env(a, d, s,
 /// r, dur)`. Outside a voice the name is simply unbound.
-pub fn lower_voice(items: &Vec<BrapItem>, dur: f64) -> Result<Lowered, String> {
-    lower_inner(items, Some(dur))
+///
+/// Drawn patterns are deliberately absent: a voice is one note's worth of
+/// audio, and this runs per note.
+pub fn lower_voice(items: &Vec<ScreeItem>, dur: f64) -> Result<Lowered, String> {
+    lower_inner(items, Some(dur), &[])
 }
 
-fn lower_inner(items: &Vec<BrapItem>, dur: Option<f64>) -> Result<Lowered, String> {
+fn lower_inner(
+    items: &Vec<ScreeItem>,
+    dur: Option<f64>,
+    patterns: &[GraphicalPattern],
+) -> Result<Lowered, String> {
     let mut lw = Lowerer {
         env: Env::new(),
-        graph: BrapGraph::default(),
+        graph: ScreeGraph::default(),
         depth: 0,
         bindings: Vec::new(),
         rng: seed_from_clock(),
@@ -56,6 +73,8 @@ fn lower_inner(items: &Vec<BrapItem>, dur: Option<f64>) -> Result<Lowered, Strin
     if let Some(dur) = dur {
         lw.env.define("dur", Value::Number(dur));
     }
+
+    define_all(&mut lw.env, patterns)?;
 
     for item in items {
         lw.item(item)?;
@@ -66,15 +85,15 @@ fn lower_inner(items: &Vec<BrapItem>, dur: Option<f64>) -> Result<Lowered, Strin
 
 /// Lower a program that is only expected to produce a graph.
 #[cfg(test)]
-pub fn lower_graph(items: &Vec<BrapItem>) -> Result<BrapGraph, String> {
+pub fn lower_graph(items: &Vec<ScreeItem>) -> Result<ScreeGraph, String> {
     lower(items).map(|l| l.graph)
 }
 
 impl Lowerer {
 
-    fn item(&mut self, item: &BrapItem) -> Result<(), String> {
+    fn item(&mut self, item: &ScreeItem) -> Result<(), String> {
         match item {
-            BrapItem::Function { name, params, body } => {
+            ScreeItem::Function { name, params, body } => {
                 self.env.define(&name.0.as_str(), Value::Function(
                     Rc::new(
                         FunctionDef { params: params.to_vec(), body: body.clone() }
@@ -84,13 +103,13 @@ impl Lowerer {
                 Ok(())
             }
 
-            BrapItem::Let { name, value } => {
+            ScreeItem::Let { name, value } => {
                 let v = self.expr(value)?;
                 self.env.define(&name.0.as_str(), v);
                 Ok(())
             }
 
-            BrapItem::Expr(e) => {
+            ScreeItem::Expr(e) => {
                 let v = self.expr(e)?;
                 if let Value::Signal(id) = v {
                     self.add_to_output(id);
@@ -98,7 +117,7 @@ impl Lowerer {
                 Ok(())
             }
 
-            BrapItem::Call { func, args } => {
+            ScreeItem::Call { func, args } => {
                 let v = self.call(func, args)?;
                 if let Value::Signal(id) = v {
                     self.add_to_output(id);

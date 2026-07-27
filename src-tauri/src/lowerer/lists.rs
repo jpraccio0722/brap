@@ -6,8 +6,8 @@
 
 use std::rc::Rc;
 
-use crate::brap_graph::environment::Value;
-use crate::brap_graph::ugen_nodes::NodeKind;
+use crate::scree_graph::environment::Value;
+use crate::scree_graph::ugen_nodes::NodeKind;
 use crate::lowerer::lower::Lowerer;
 
 fn as_list(func: &str, v: &Value) -> Result<Rc<Vec<Value>>, String> {
@@ -326,13 +326,13 @@ impl Lowerer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brap_graph::environment::Env;
-    use crate::brap_graph::graph::BrapGraph;
+    use crate::scree_graph::environment::Env;
+    use crate::scree_graph::graph::ScreeGraph;
 
     fn lowerer() -> Lowerer {
         Lowerer {
             env: Env::new(),
-            graph: BrapGraph::default(),
+            graph: ScreeGraph::default(),
             depth: 0,
             bindings: Vec::new(),
             rng: 0x9E37_79B9_7F4A_7C15,

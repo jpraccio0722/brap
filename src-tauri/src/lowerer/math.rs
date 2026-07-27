@@ -12,7 +12,7 @@
 //! A poisoned constant propagates silently into the graph and surfaces as
 //! silence much later, which is miserable to trace back.
 
-use crate::brap_graph::environment::Value;
+use crate::scree_graph::environment::Value;
 use crate::lowerer::lists::check_arity;
 use crate::lowerer::lower::Lowerer;
 /// `bpm` is the transport's own conversion, so the two can never disagree.
@@ -160,7 +160,7 @@ const MAJOR: &str = "[0, 2, 4, 5, 7, 9, 11]";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brap_graph::ugen_nodes::NodeInput;
+    use crate::scree_graph::ugen_nodes::NodeInput;
     use crate::lang::MATH_BUILTINS;
     use crate::lowerer::lower::lower;
     use crate::parser::parser::parse;

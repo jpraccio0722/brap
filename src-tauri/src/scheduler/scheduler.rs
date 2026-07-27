@@ -18,8 +18,10 @@ use crate::scheduler::voice::{Instruments, build_voice};
 
 /// How far ahead of the audio clock we schedule.
 const LOOKAHEAD_SECS: f64 = 0.2;
-/// How often the thread wakes. Must be well under LOOKAHEAD_SECS.
-const TICK: Duration = Duration::from_millis(25);
+/// How often the thread wakes. Must be well under LOOKAHEAD_SECS, and well
+/// under the clock's `START_LEAD_SECS` — a pass a tick behind an eval still has
+/// to find cycle 0 ahead of it.
+pub(crate) const TICK: Duration = Duration::from_millis(25);
 /// Per-voice fades, clamped against short notes before pushing.
 const FADE_IN_SECS: f64 = 0.005;
 const FADE_OUT_SECS: f64 = 0.02;
@@ -160,8 +162,11 @@ fn schedule_pass(
 
     let events = match state.patterns.lock() {
         Ok(p) => {
+            // Nothing playing yet, so claim nothing: an eval racing this pass
+            // resets the clock and publishes its bindings a moment later, and
+            // a watermark out at the horizon would swallow their first steps.
             if p.is_empty() {
-                return next;
+                return Some(Mark { epoch, cycles: from });
             }
             p.query(Span::new(from, horizon))
         }
@@ -193,7 +198,9 @@ fn schedule_pass(
         let begin_secs = clock.secs_at(bound.event.begin);
         let dur_secs = clock.secs_at(bound.event.end) - begin_secs;
 
-        match build_voice(&instruments, &bound.instrument, bound.event.value, dur_secs) {
+        match build_voice(
+            &instruments, &bound.instrument, bound.event.value, &bound.args, dur_secs,
+        ) {
             // A bad instrument must not kill the thread: log it and let the
             // rest of the pattern keep playing.
             Err(e) => eprintln!("scheduler: {}: {e}", bound.instrument),
@@ -241,7 +248,7 @@ fn push_voice(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::brap_graph::realizer::realize;
+    use crate::scree_graph::realizer::realize;
     use crate::lowerer::lower::lower;
     use crate::parser::parser::parse;
     use crate::pattern::pattern::Pattern;
@@ -307,7 +314,10 @@ mod tests {
             bindings: vec![Binding {
                 instrument: "kick".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
+                lanes: Vec::new(),
+                cycles: None,
             }],
+            ..Default::default()
         };
 
         let events = pats.query(Span::new(1.0, 2.0));
@@ -337,7 +347,10 @@ mod pass_tests {
             bindings: vec![Binding {
                 instrument: "kick".into(),
                 pattern: Pattern::steps(steps),
+                lanes: Vec::new(),
+                cycles: None,
             }],
+            ..Default::default()
         };
         s
     }
@@ -376,6 +389,68 @@ mod pass_tests {
 
         // Only the step at cycle 0.0 falls inside [0, 0.2).
         assert!(peak_over(&mut seq, 4410) > 0.5, "the first step should sound");
+    }
+
+    /// The whole lane path, end to end: an eval's named argument becomes a
+    /// sampled value that reaches the instrument's parameter and is audible.
+    #[test]
+    fn a_pass_carries_lane_values_into_its_voices() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let src = "fn tone(n, mul = 1) = sin(n * mul)\nplay([110], tone, mul: [4])\n";
+        let ast = parse(src.to_string()).unwrap();
+        let lowered = lower(&ast).expect("lower failed");
+
+        let state = SchedulerState::new();
+        *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *state.patterns.lock().unwrap() =
+            Patterns { bindings: lowered.bindings, ..Default::default() };
+
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+        pass(&mut seq, &clock, &state, None);
+
+        // 110 Hz times a `mul` of 4 is 440 Hz, over the 0.1 s rendered here.
+        let s: Vec<f32> = (0..4410).map(|_| seq.get_stereo().0).collect();
+        let crossings = s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
+        assert!((crossings as i64 - 44).abs() <= 2, "expected ~44 crossings, got {crossings}");
+    }
+
+    /// Legato shortens the event, and the scheduler derives the voice's own
+    /// lifetime from that same span — so a staccato note really does stop.
+    #[test]
+    fn legato_cuts_the_voice_short() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let render = |src: &str| {
+            let ast = parse(src.to_string()).unwrap();
+            let lowered = lower(&ast).expect("lower failed");
+            let state = SchedulerState::new();
+            *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+            *state.patterns.lock().unwrap() =
+                Patterns { bindings: lowered.bindings, ..Default::default() };
+
+            // Slow enough that one step spans far beyond the rendered window:
+            // at cps 0.25 a natural note lasts 4 seconds.
+            let clock = Clock::with_cps(44100.0, 0.25);
+            let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+            seq.set_sample_rate(44100.0);
+            pass(&mut seq, &clock, &state, None);
+
+            let s: Vec<f32> = (0..8820).map(|_| seq.get_stereo().0).collect();
+            // 0.15 - 0.2 s: past a note shortened to 0.1 s and its fade out,
+            // but a long way inside the natural one.
+            s[6615..].iter().fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+
+        let held = render("fn tone(n) = sin(n)\nplay([220], tone)\n");
+        let short = render("fn tone(n) = sin(n)\nplay([220], tone, legato: 0.025)\n");
+
+        assert!(held > 0.5, "the held note should still be sounding, got {held}");
+        assert!(short < 0.01, "legato should have cut it short, got {short}");
     }
 
     /// Re-running with no clock movement must not re-schedule the same notes.
@@ -459,7 +534,10 @@ mod pass_tests {
             bindings: vec![Binding {
                 instrument: "ghost".into(),
                 pattern: Pattern::steps(vec![Some(1.0)]),
+                lanes: Vec::new(),
+                cycles: None,
             }],
+            ..Default::default()
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
 
@@ -499,7 +577,7 @@ mod pass_tests {
         seq.set_sample_rate(44100.0);
 
         let items = parse("sin(220)\n".to_string()).unwrap();
-        let net = crate::brap_graph::realizer::realize(
+        let net = crate::scree_graph::realizer::realize(
             &crate::lowerer::lower::lower(&items).unwrap().graph,
         )
         .unwrap();
@@ -570,7 +648,10 @@ mod start_position_tests {
             bindings: vec![Binding {
                 instrument: "k".into(),
                 pattern: Pattern::steps(steps),
+                lanes: Vec::new(),
+                cycles: None,
             }],
+            ..Default::default()
         };
         s
     }
@@ -608,6 +689,81 @@ mod start_position_tests {
 
         clock.reset();
         assert_eq!(steps_over(&state, &clock, 2.0), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    /// The reported bug: the scheduler reads the clock a tick after the eval
+    /// that reset it, so with cycle 0 pinned to the eval's "now" the first step
+    /// was already behind the window and the pattern was heard from its second.
+    #[test]
+    fn a_pattern_starts_at_step_one_even_a_tick_after_the_eval() {
+        let clock = Clock::with_cps(44100.0, 0.5);
+        clock.advance(44100 * 5);
+        // Three steps, as in the report: dropping the first is audible as the
+        // pattern starting on the second note.
+        let state = state_with(vec![Some(1.0), Some(2.0), Some(3.0)]);
+
+        clock.reset();
+        // The audio thread renders on while the scheduler sleeps out its tick.
+        clock.advance((44100.0 * TICK.as_secs_f64()) as u64);
+
+        let first = steps_over(&state, &clock, LOOKAHEAD_SECS)
+            .first()
+            .copied()
+            .expect("the first pass after an eval must schedule something");
+        assert_eq!(first, 1.0, "the pattern must start on its first step");
+    }
+
+    /// Silence must not claim the lookahead window: the eval that fills it is a
+    /// hair behind the pass that saw nothing, and its first steps land there.
+    #[test]
+    fn an_empty_pass_does_not_swallow_the_next_evals_first_step() {
+        let clock = Clock::with_cps(44100.0, 0.5);
+        let empty = SchedulerState::new();
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+
+        // A pass with nothing playing, in the sliver between reset and publish.
+        clock.reset();
+        let mark = schedule_pass(&mut seq, &clock, &empty, None, &mut Vec::new());
+        assert!(
+            mark.unwrap().cycles <= 0.0,
+            "an empty pass must not claim past cycle 0, got {mark:?}",
+        );
+
+        // Now the bindings arrive and the next pass runs against that mark.
+        let state = state_with(vec![Some(1.0), Some(2.0), Some(3.0)]);
+        let mut live = Vec::new();
+        schedule_pass(&mut seq, &clock, &state, mark, &mut live);
+        assert_eq!(live.len(), 1, "the first step should have been pushed");
+    }
+
+    /// A one-shot published from silence, as `run_code` publishes one: the
+    /// reset leaves the origin a lead-in *short* of cycle 0, and that is the
+    /// number the patterns are handed. The binding has to sound its whole first
+    /// cycle from there and nothing after it.
+    #[test]
+    fn a_one_shot_sounds_its_first_cycle_and_then_stops() {
+        let clock = Clock::with_cps(44100.0, 0.5);
+        clock.advance(44100 * 5);
+        clock.reset();
+
+        let s = SchedulerState::new();
+        let ast = parse("fn k(n) = sin(n)\n".to_string()).unwrap();
+        *s.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *s.patterns.lock().unwrap() = Patterns {
+            bindings: vec![Binding {
+                instrument: "k".into(),
+                pattern: Pattern::steps([Some(1.0), Some(2.0)]),
+                lanes: Vec::new(),
+                cycles: Some(1.0),
+            }],
+            origin: clock.now_cycles(),
+        };
+
+        // One cycle is two seconds at this tempo.
+        assert_eq!(steps_over(&s, &clock, 2.0), vec![1.0, 2.0]);
+        clock.advance(44100 * 4);
+        assert!(steps_over(&s, &clock, 8.0).is_empty(), "the one-shot should be over");
     }
 
     /// Stop, wait, play: the silence must not advance the pattern.

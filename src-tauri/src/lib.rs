@@ -1,8 +1,9 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use crate::engine::{stop as stop_graph, swap_program};
-use crate::{brap_graph::realizer::realize, lowerer::lower::lower, parser::parser::parse};
+use crate::{scree_graph::realizer::realize, lowerer::lower::lower_with_patterns, parser::parser::parse};
 use crate::engine::AudioEngine;
+use crate::pattern::graphical::GraphicalPattern;
 use crate::pattern::patterns::Patterns;
 use crate::scheduler::clock::{bpm_from_cps, cps_from_bpm};
 use crate::scheduler::scheduler::SchedulerState;
@@ -16,7 +17,7 @@ mod pattern;
 mod scheduler;
 mod engine;
 mod parser;
-mod brap_graph;
+mod scree_graph;
 mod lowerer;
 mod lang;
 
@@ -25,14 +26,20 @@ mod lang;
 /// Produces two artifacts from one program: the persistent graph, which is
 /// crossfaded into the engine's slot, and the pattern bindings, which go to
 /// the scheduler along with the instrument definitions it builds voices from.
+///
+/// `patterns` are the ones drawn in the side panel. They arrive with the code
+/// rather than being held here, because they are part of what is being
+/// evaluated: the editor is the only thing that knows them, and an eval is the
+/// only moment they matter.
 #[tauri::command]
 fn run_code(
     code: String,
+    patterns: Vec<GraphicalPattern>,
     engine: tauri::State<Mutex<AudioEngine>>,
     sched: tauri::State<SchedulerState>,
 ) -> Result<(), String> {
     let ast = parse(code)?;
-    let lowered = lower(&ast)?;
+    let lowered = lower_with_patterns(&ast, &patterns)?;
     let audio_graph = realize(&lowered.graph)?;
 
     // Instruments before patterns: the scheduler must be able to build a voice
@@ -52,16 +59,20 @@ fn run_code(
     // re-eval of something already playing must not jolt the groove. The clock
     // moves *before* the patterns are published, so the scheduler can never
     // see the new bindings against the old origin.
-    if starting_from_silence && !lowered.bindings.is_empty() {
-        engine
-            .lock()
-            .map_err(|_| "audio engine poisoned")?
-            .clock
-            .reset();
-    }
+    //
+    // Whatever cycle that leaves us on is the origin the bounded bindings —
+    // `play_once`, `playn` — count from, read under the same lock as the reset
+    // so the two can never disagree.
+    let origin = {
+        let eng = engine.lock().map_err(|_| "audio engine poisoned")?;
+        if starting_from_silence && !lowered.bindings.is_empty() {
+            eng.clock.reset();
+        }
+        eng.clock.now_cycles()
+    };
 
     *sched.patterns.lock().map_err(|_| "patterns lock poisoned")? =
-        Patterns { bindings: lowered.bindings };
+        Patterns { bindings: lowered.bindings, origin };
 
     let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     swap_program(&mut eng, audio_graph);

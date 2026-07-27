@@ -4,12 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import CodeMirror from "@uiw/react-codemirror";
 import {
-  brapExtensions,
+  screeExtensions,
   EMPTY_METADATA,
   loadMetadata,
   type LanguageMetadata,
-} from "./brap";
+} from "./scree";
 import { TransportPanel } from "./TransportPanel";
+import { toWire, type GraphicalPattern } from "./patterns";
 
 interface Tab {
   id: string;
@@ -22,16 +23,22 @@ interface Tab {
   dirty: boolean;
 }
 
-const BRAP_FILTER = [{ name: "brap", extensions: ["brap"] }];
+const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
 
-const STARTER_CONTENT = `// Write some code, then hit Play (or ⌘↵)`;
+/** How wide the side panel may be dragged. The floor is what a pattern's grid
+ *  and the sliders need; the ceiling keeps the editor from vanishing. */
+const MIN_PANEL = 240;
+const MAX_PANEL = 720;
+const DEFAULT_PANEL = 288;
+
+const STARTER_CONTENT = `// Write some code, then hit Play (or ⌘,)`;
 
 let tabCounter = 0;
 function makeTab(overrides: Partial<Tab> = {}): Tab {
   tabCounter += 1;
   return {
     id: `tab-${tabCounter}`,
-    title: `untitled-${tabCounter}.brap`,
+    title: `untitled-${tabCounter}.scree`,
     path: null,
     content: "",
     dirty: false,
@@ -50,6 +57,42 @@ function App() {
   ]);
   const [activeId, setActiveId] = useState<string | null>(() => tabs[0].id);
   const [panelOpen, setPanelOpen] = useState(true);
+  const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL);
+
+  // Drawn patterns belong to the session rather than to any one tab: they are
+  // named bindings the program can reach for, like the transport is.
+  const [patterns, setPatterns] = useState<GraphicalPattern[]>([]);
+
+  /**
+   * Drag the panel's edge.
+   *
+   * Pointer capture is what makes this reliable: the pointer leaves the 8px
+   * handle on the first frame of any real drag, and without capture the moves
+   * would be delivered to whatever it crossed — including the editor, which
+   * would start selecting text.
+   */
+  const startResize = useCallback((e: React.PointerEvent) => {
+    e.preventDefault();
+    const handle = e.currentTarget as HTMLElement;
+    handle.setPointerCapture(e.pointerId);
+
+    const onMove = (ev: PointerEvent) => {
+      // The panel is anchored to the right edge, so its width is whatever is
+      // left of the window from the pointer.
+      setPanelWidth(
+        Math.min(MAX_PANEL, Math.max(MIN_PANEL, window.innerWidth - ev.clientX)),
+      );
+    };
+    const onUp = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onUp);
+      handle.removeEventListener("pointercancel", onUp);
+    };
+
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onUp);
+    handle.addEventListener("pointercancel", onUp);
+  }, []);
 
   // Null when every tab has been closed, which the editor is built to show.
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
@@ -70,8 +113,21 @@ function App() {
     };
   }, []);
 
-  // Identity must be stable: CodeMirror reconfigures whenever it changes.
-  const extensions = useMemo(() => brapExtensions(metadata), [metadata]);
+  // The completion source reads the drawn patterns through a ref so a rename
+  // in the panel shows up in the next completion without touching the
+  // extension array — whose identity must stay stable, since CodeMirror
+  // reconfigures whenever it changes.
+  const patternsRef = useRef(patterns);
+  patternsRef.current = patterns;
+  const patternNames = useCallback(
+    () => toWire(patternsRef.current).map((p) => p.name),
+    [],
+  );
+
+  const extensions = useMemo(
+    () => screeExtensions(metadata, patternNames),
+    [metadata, patternNames],
+  );
 
   const newTab = useCallback(() => {
     const tab = makeTab();
@@ -105,7 +161,7 @@ function App() {
   }, []);
 
   const openTab = useCallback(async () => {
-    const selected = await open({ multiple: false, filters: BRAP_FILTER });
+    const selected = await open({ multiple: false, filters: SCREE_FILTER });
     if (!selected || typeof selected !== "string") return; // user cancelled
     const path = selected;
 
@@ -126,8 +182,10 @@ function App() {
     // Nothing open is nothing to run — the transport's buttons stay live for
     // stop, which is about what the engine is holding, not about a tab.
     if (!activeTab) return;
-    await invoke("run_code", { code: activeTab.content });
-  }, [activeTab]);
+    // The drawn patterns go with the code: they are bindings the program can
+    // name, and an eval is the only moment they mean anything.
+    await invoke("run_code", { code: activeTab.content, patterns: toWire(patterns) });
+  }, [activeTab, patterns]);
 
   const stop = useCallback(async () => {
     await invoke("stop_audio");
@@ -138,8 +196,8 @@ function App() {
     if (!tab) return;
     let path = tab.path;
     if (!path) {
-      // First save: ask where to put it, defaulting to a .brap file.
-      path = await save({ defaultPath: tab.title, filters: BRAP_FILTER });
+      // First save: ask where to put it, defaulting to a .scree file.
+      path = await save({ defaultPath: tab.title, filters: SCREE_FILTER });
       if (!path) return; // user cancelled
     }
     await invoke("save_file", { path, content: tab.content });
@@ -171,12 +229,12 @@ function App() {
     };
   }, []);
 
-  // ⌘↵ plays, ⌘. stops. The file shortcuts aren't here: they hang off their
+  // ⌘, plays, ⌘. stops. The file shortcuts aren't here: they hang off their
   // menu items, whose accelerators fire before the key reaches the webview.
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       const mod = e.metaKey || e.ctrlKey;
-      if (mod && e.key === "Enter") {
+      if (mod && e.key === ",") {
         e.preventDefault();
         void play();
       } else if (mod && e.key === ".") {
@@ -289,7 +347,15 @@ function App() {
             </div>
           )}
         </main>
-        <TransportPanel open={panelOpen} play={play} stop={stop} />
+        <TransportPanel
+          open={panelOpen}
+          width={panelWidth}
+          onResizeStart={startResize}
+          play={play}
+          stop={stop}
+          patterns={patterns}
+          onPatternsChange={setPatterns}
+        />
       </div>
     </div>
   );

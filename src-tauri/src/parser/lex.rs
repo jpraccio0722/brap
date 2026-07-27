@@ -3,13 +3,7 @@ use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
-// A line comment runs to — but not through — the newline, so the newline still
-// terminates the statement it followed. As a `#[regex]` this was silently
-// inert: logos only reads skip patterns from `#[logos(skip ..)]`, and every
-// comment was lexed as two `Div` tokens followed by its own words.
-// `allow_greedy` because the class is dot-equivalent to logos' eye; the `\n`
-// exclusion does bound it, and a comment is the one token we *want* to run to
-// the end of its line.
+
 #[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum Token {
     #[token("+")]
