@@ -78,6 +78,7 @@ pub fn to_pattern(v: &Value) -> Result<Pattern, String> {
         }
         Value::Number(n) => Ok(Pattern::Steps(vec![Step::Value(*n)])),
         Value::Rest => Ok(Pattern::Silence),
+        Value::Trigger => Ok(Pattern::Steps(vec![Step::Value(1.0)])),
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())
         }
@@ -89,6 +90,9 @@ fn to_step(v: &Value) -> Result<Step, String> {
     match v {
         Value::Number(n) => Ok(Step::Value(*n)),
         Value::Rest => Ok(Step::Rest),
+        // A trigger sounds but carries nothing; instruments that take an
+        // argument see 1.
+        Value::Trigger => Ok(Step::Value(1.0)),
         Value::List(_) => Ok(Step::Group(Box::new(to_pattern(v)?))),
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())

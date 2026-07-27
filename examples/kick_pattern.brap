@@ -1,0 +1,28 @@
+// Kick and bass — the smallest thing worth listening to.
+//
+// Two instruments, two patterns. The kick takes no argument and is driven by
+// `\` triggers; the bass takes a MIDI note and converts it with `.m2h`.
+
+// A drum, not a low beep: the pitch envelope is what makes the difference.
+// `sweep` falls from 200 Hz to 50 over 50 ms, and because `sin`'s frequency is
+// a port it accepts that envelope as a signal rather than only a constant.
+fn kick() = {
+  let sweep = 50 + 150 * perc(0.001, 0.05)
+  let click = noise() * perc(0.001, 0.006)
+  sin(sweep) * perc(0.002, 0.4) * 0.9 + click * 0.1
+}
+
+// Three saws an octave apart, rolled off. `env` releases exactly at the end of
+// the note, so the line stays legato without notes piling up.
+fn bass(n) = {
+  let hz = n.m2h
+  let osc = saw(hz) + saw(hz * 2) * 0.5 + saw(hz * 3) * 0.25
+  let amp = env(0.005, 0.12, 0.5, 0.06, dur)
+  (osc * amp).lowpass(660, 0.7) * 0.3
+}
+
+// The kick's value is discarded, so `\` says "hit" without inventing a number.
+play([\, `, \, `], kick)
+
+// A minor: root, root, minor third, root.
+play([a2, a2, c3, a2], bass)

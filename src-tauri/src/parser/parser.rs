@@ -37,6 +37,8 @@ pub enum Expr {
     Rem { lhs: Box<Expr>, rhs: Box<Expr> },
     /// A silent step in a pattern, written `` ` ``.
     Rest,
+    /// A sounding step with no value, written as a single backslash.
+    Trigger,
     Sub   { lhs: Box<Expr>, rhs: Box<Expr> },
     Var(Ident),
 }
@@ -71,6 +73,13 @@ pub enum ProductOp {
 #[derive(Clone, Debug)]
 pub enum SumOp {
     Add, Sub,
+}
+
+/// One postfix step. Both bind tighter than any infix operator, and they share
+/// a fold so `xs[0].m2h` and `x.scale(s)[1]` both parse.
+enum Postfix {
+    Index(Expr),
+    Method(Ident, Vec<Expr>),
 }
 
 fn ident<'a, I>() -> impl Parser<'a, I, Ident, extra::Err<Rich<'a, Token>>> + Clone
@@ -117,7 +126,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .map(Expr::List);
 
         let call = ident()
-            .then(args.delimited_by(just(Token::ParensOpen), just(Token::ParensClose)))
+            .then(args.clone().delimited_by(just(Token::ParensOpen), just(Token::ParensClose)))
             .map(|(func, args)| Expr::Call { func, args });
 
         let stmt = choice((
@@ -180,16 +189,44 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         // choice commits to the first success — var-first would leave `(...)`
         // unconsumed and split `sin(440)` into two items.
         let rest = just(Token::Rest).to(Expr::Rest);
+        let trigger = just(Token::Trigger).to(Expr::Trigger);
 
         let atom = choice((
-            int, rest, list, for_expr, if_expr, let_expr, block, call, var, paren,
+            int, rest, trigger, list, for_expr, if_expr, let_expr, block, call, var, paren,
         ));
 
-        let postfix = atom.foldl(
-            expr.clone()
+        // Indexing and method calls share one fold so they interleave freely:
+        // `xs[0].m2h`, `x.scale(s)[1]`.
+        //
+        // `a.f(b)` is desugared here into the same `Chain` node `a >> f(b)`
+        // produces — the two operators mean exactly the same thing and differ
+        // only in binding. Nothing downstream needs to know `.` exists.
+        let method = just(Token::Dot)
+            .ignore_then(ident())
+            .then(
+                args.clone()
+                    .delimited_by(just(Token::ParensOpen), just(Token::ParensClose))
+                    .or_not(),
+            )
+            .map(|(func, args)| Postfix::Method(func, args.unwrap_or_default()));
+
+        let index = expr
+            .clone()
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose))
-            .repeated(),
-            |base, index| Expr::Index { base: Box::new(base), index: Box::new(index) },
+            .map(Postfix::Index);
+
+        let postfix = atom.foldl(
+            choice((method, index)).repeated(),
+            |base, step| match step {
+                Postfix::Index(index) => Expr::Index {
+                    base: Box::new(base),
+                    index: Box::new(index),
+                },
+                Postfix::Method(func, args) => Expr::Chain {
+                    lhs: Box::new(base),
+                    rhs: Box::new(Expr::Call { func, args }),
+                },
+            },
         );
 
         let unary = just(Token::Sub)

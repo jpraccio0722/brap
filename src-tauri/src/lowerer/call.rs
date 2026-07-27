@@ -28,6 +28,10 @@ impl Lowerer {
             return Ok(v);
         }
 
+        if let Some(v) = self.math_builtin(&func.0, &arg_vals)? {
+            return Ok(v);
+        }
+
         if let Some((kind, arity)) = self.builtin(&func.0) {
             if arg_vals.len() != arity {
                return Err(format!("{} expects {} inputs, got {}",

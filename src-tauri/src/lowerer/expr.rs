@@ -146,6 +146,8 @@ impl Lowerer {
 
             Expr::Rest => Ok(Value::Rest),
 
+            Expr::Trigger => Ok(Value::Trigger),
+
             Expr::Range { lo, hi } => {
                 let lo = self.number(lo, "range start")?;
                 let hi = self.number(hi, "range end")?;
@@ -172,7 +174,24 @@ impl Lowerer {
             Expr::Sub { lhs, rhs } =>
                 self.binop(NodeKind::Sub, |a, b| a - b, lhs, rhs),
 
-            Expr::Var(id) => self.env.lookup(&id.0).ok_or_else(|| format!("unbound name: {}", id.0))
+            // A name the environment does not know may still be a note: `c4`,
+            // `as3`, `af1`. Bindings win, so a user `let` or parameter shadows
+            // a note name rather than colliding with it.
+            Expr::Var(id) => match self.env.lookup(&id.0) {
+                Some(v) => Ok(v),
+                None => match crate::lang::note(&id.0) {
+                    crate::lang::NoteName::Note(n) => Ok(Value::Number(n)),
+                    crate::lang::NoteName::OctaveOutOfRange(octave) => Err(format!(
+                        "note {} has octave {octave}, outside {}..={}",
+                        id.0,
+                        crate::lang::MIN_NOTE_OCTAVE,
+                        crate::lang::MAX_NOTE_OCTAVE
+                    )),
+                    crate::lang::NoteName::NotANote => {
+                        Err(format!("unbound name: {}", id.0))
+                    }
+                },
+            }
 
         }
     }
@@ -213,6 +232,7 @@ impl Lowerer {
             Value::Function(_) => Err("cannot use a function as a signal".into()),
             Value::List(_) => Err("cannot use a list as a signal (iterate it with `for`)".into()),
             Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
+            Value::Trigger => Err("cannot use a trigger as a signal (triggers belong in patterns)".into()),
         }
     }
 }

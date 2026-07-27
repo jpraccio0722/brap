@@ -920,3 +920,205 @@ fn list_builtins_feed_patterns() {
         Step::Rest, Step::Value(220.0), Step::Value(110.0), Step::Value(330.0),
     ]));
 }
+
+// ---- triggers and zero-parameter instruments ----
+
+/// `\` is a sounding step that carries no data.
+#[test]
+fn trigger_is_a_sounding_step() {
+    let bs = bindings_of("fn kick() = sin(50)\nplay([\\, `, \\, \\], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(1.0), Step::Rest, Step::Value(1.0), Step::Value(1.0),
+    ]));
+}
+
+/// Triggers subdivide like any other step.
+#[test]
+fn triggers_nest() {
+    let bs = bindings_of("fn kick() = sin(50)\nplay([\\, [\\, \\]], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(1.0),
+        Step::Group(Box::new(Pattern::Steps(vec![
+            Step::Value(1.0), Step::Value(1.0),
+        ]))),
+    ]));
+}
+
+/// Triggers and numbers mix freely in one pattern.
+#[test]
+fn triggers_and_numbers_mix() {
+    let bs = bindings_of("fn k(f) = sin(f)\nplay([220, \\, `, 330], k)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(220.0), Step::Value(1.0), Step::Rest, Step::Value(330.0),
+    ]));
+}
+
+/// A trigger is pattern data, not audio.
+#[test]
+fn trigger_used_as_a_signal_is_an_error() {
+    let err = lower_src("sin(\\)\n").unwrap_err();
+    assert!(err.contains("trigger"), "got: {err}");
+}
+
+/// List builtins are value-agnostic, so they work on triggers too.
+#[test]
+fn triggers_survive_list_builtins() {
+    let bs = bindings_of("fn kick() = sin(50)\nplay(rotl([\\, `, `, `]), kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Rest, Step::Rest, Step::Rest, Step::Value(1.0),
+    ]));
+}
+
+/// A trigger must not confuse the newline-to-terminator pass.
+#[test]
+fn trigger_across_a_newline() {
+    let bs = bindings_of("fn kick() = sin(50)\nplay([\n  \\,\n  `\n], kick)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(1.0), Step::Rest]));
+}
+
+// ---- note names ----
+
+/// The anchors: middle C, concert A, and the value from the original request.
+#[test]
+fn note_names_use_the_standard_numbering() {
+    assert_eq!(num("c4"), 60.0);
+    assert_eq!(num("a4"), 69.0);
+    assert_eq!(num("a1"), 33.0);
+    assert_eq!(num("g3"), 55.0);
+}
+
+/// `a4` really is 440 Hz, so note names and `m2h` agree.
+#[test]
+fn note_names_agree_with_m2h() {
+    assert!((num("a4.m2h") - 440.0).abs() < 1e-9);
+    assert!((num("c4.m2h") - 261.625_565).abs() < 1e-4);
+}
+
+#[test]
+fn sharps_and_flats_shift_one_semitone() {
+    assert_eq!(num("a1"), 33.0);
+    assert_eq!(num("as1"), 34.0);
+    assert_eq!(num("af1"), 32.0);
+    assert_eq!(num("cs4"), 61.0);
+    assert_eq!(num("df4"), 61.0); // the same pitch, spelled two ways
+}
+
+/// Enharmonics across the octave boundary resolve correctly.
+#[test]
+fn enharmonics_cross_octaves() {
+    assert_eq!(num("bs3"), num("c4"));
+    assert_eq!(num("cf4"), num("b3"));
+    assert_eq!(num("es4"), num("f4"));
+    assert_eq!(num("ff4"), num("e4"));
+}
+
+#[test]
+fn every_natural_note_in_an_octave() {
+    let expected = [("c4", 60.0), ("d4", 62.0), ("e4", 64.0),
+                    ("f4", 65.0), ("g4", 67.0), ("a4", 69.0), ("b4", 71.0)];
+    for (name, midi) in expected {
+        assert_eq!(num(name), midi, "{name}");
+    }
+}
+
+/// Octaves span the MIDI range: c0 is 12, g9 is 127.
+#[test]
+fn octave_range_covers_midi() {
+    assert_eq!(num("c0"), 12.0);
+    assert_eq!(num("g9"), 127.0);
+}
+
+/// The octave is required, which is what keeps short names usable.
+#[test]
+fn a_bare_letter_is_not_a_note() {
+    assert!(lower_src("sin(f)\n").unwrap_err().contains("unbound name: f"));
+    assert!(lower_src("sin(as)\n").unwrap_err().contains("unbound name: as"));
+    let g = lower_src("fn voice(f) = sin(f)\nvoice(220)\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(220.0)])]);
+}
+
+/// Bindings shadow note names rather than colliding with them.
+#[test]
+fn bindings_shadow_note_names() {
+    assert_eq!(num("c4"), 60.0);
+    let g = lower_src("let c4 = 100\nsin(c4)\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(100.0)])]);
+
+    let g = lower_src("fn f(a4) = sin(a4)\nf(7)\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(7.0)])]);
+}
+
+/// Builtin names beginning with a note letter must not be read as notes.
+#[test]
+fn builtin_names_are_not_notes() {
+    assert!(lower_src("sin(abs)\n").unwrap_err().contains("unbound name: abs"));
+    assert_eq!(num("(-3).abs"), 3.0);
+    assert_eq!(num("2.pow(3)"), 8.0);
+}
+
+/// An out-of-range octave says so, rather than reporting an unbound name.
+#[test]
+fn an_impossible_octave_is_reported() {
+    let e = lower_src("sin(c12)\n").unwrap_err();
+    assert!(e.contains("octave 12"), "got: {e}");
+    assert!(e.contains("0..=9"), "got: {e}");
+}
+
+/// Note names are numbers, so everything numeric works on them.
+#[test]
+fn note_names_compose_with_methods_and_patterns() {
+    assert_eq!(num("c4.oct(1)"), 72.0);
+    assert_eq!(num("c4.semi(7)"), num("g4"));
+    assert_eq!(num("[c4, e4, g4][1]"), 64.0);
+
+    let bs = bindings_of("fn lead(n) = sin(n.m2h)\nplay([c4, ef4, `, g4], lead)\n");
+    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+        Step::Value(60.0), Step::Value(63.0), Step::Rest, Step::Value(67.0),
+    ]));
+}
+
+/// Every file in `examples/` must parse, lower, and realize.
+///
+/// A shipped example that does not compile is worse than no example, and these
+/// are the first thing anyone reads. Realizing too, not just lowering, because
+/// port/param mistakes only surface there.
+#[test]
+fn every_example_compiles_and_realizes() {
+    let dir = std::path::Path::new("../examples");
+    let mut checked = 0;
+
+    for entry in std::fs::read_dir(dir).expect("examples/ should exist") {
+        let path = entry.expect("a readable entry").path();
+        if path.extension().map(|e| e != "brap").unwrap_or(true) {
+            continue;
+        }
+        let name = path.file_name().unwrap().to_string_lossy().to_string();
+        let src = std::fs::read_to_string(&path).expect("a readable file");
+
+        let items = parse(src).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+        let lowered = crate::lowerer::lower::lower(&items)
+            .unwrap_or_else(|e| panic!("{name} failed to lower: {e}"));
+        if crate::brap_graph::realizer::realize(&lowered.graph).is_err() {
+            panic!("{name} failed to realize");
+        }
+
+        // An example that makes no sound is a broken example.
+        assert!(
+            !lowered.bindings.is_empty() || lowered.graph.output.is_some(),
+            "{name} produces neither patterns nor a graph output"
+        );
+
+        // Every instrument a pattern names must exist and build.
+        let instruments = crate::scheduler::voice::Instruments::from_program(&items);
+        for binding in &lowered.bindings {
+            let voice = crate::scheduler::voice::build_voice(
+                &instruments, &binding.instrument, 60.0, 0.5);
+            if voice.is_err() {
+                panic!("{name}: instrument `{}` failed to build", binding.instrument);
+            }
+        }
+        checked += 1;
+    }
+
+    assert!(checked > 0, "no examples were checked");
+}

@@ -6,3 +6,4 @@ pub mod call;
 mod tests;
 pub mod play;
 pub mod lists;
+pub mod math;

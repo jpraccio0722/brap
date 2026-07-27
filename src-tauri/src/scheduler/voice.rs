@@ -30,9 +30,16 @@ impl Instruments {
     }
 
     pub fn has(&self, name: &str) -> bool {
-        self.defs.iter().any(|i| match i {
-            BrapItem::Function { name: n, .. } => n.0 == name,
-            _ => false,
+        self.param_count(name).is_some()
+    }
+
+    /// How many parameters an instrument declares, or `None` if there is no
+    /// such instrument. A zero-parameter instrument is called with no
+    /// arguments, so a fixed drum needs no placeholder parameter.
+    pub fn param_count(&self, name: &str) -> Option<usize> {
+        self.defs.iter().find_map(|i| match i {
+            BrapItem::Function { name: n, params, .. } if n.0 == name => Some(params.len()),
+            _ => None,
         })
     }
 }
@@ -47,14 +54,18 @@ pub fn build_voice(
     value: f64,
     dur_secs: f64,
 ) -> Result<Net, String> {
-    if !instruments.has(instrument) {
+    let Some(params) = instruments.param_count(instrument) else {
         return Err(format!("no instrument named `{instrument}`"));
-    }
+    };
+
+    // An instrument that declares no parameters is called with none — the
+    // event's value is simply unused, which is what `\` in a pattern means.
+    let args = if params == 0 { vec![] } else { vec![Expr::Num(value)] };
 
     let mut items = instruments.defs.clone();
     items.push(BrapItem::Expr(Expr::Call {
         func: Ident(instrument.to_string()),
-        args: vec![Expr::Num(value)],
+        args,
     }));
 
     let lowered = lower_voice(&items, dur_secs)?;
@@ -182,5 +193,123 @@ play([110, 165], bass, 0.5)
             assert!(onset > 0.05, "{name} should sound immediately, got {onset}");
             assert!(tail < 0.02, "{name} should be quiet by the note end, got {tail}");
         }
+    }
+}
+
+#[cfg(test)]
+mod kick_example_tests {
+    use super::*;
+    use fundsp::prelude64::AudioUnit;
+
+    /// A synth kick. The pattern number is the fundamental; everything else is
+    /// shaped by envelopes inside the instrument.
+    const KICK: &str = "\
+fn kick(f) = {
+  let sweep = f + f * 3 * perc(0.001, 0.05)
+  let body  = sin(sweep) * perc(0.002, 0.4)
+  let click = noise() * perc(0.001, 0.006)
+  body * 0.9 + click * 0.1
+}
+";
+
+    fn render(freq: f64, dur: f64, secs: f64) -> Vec<f32> {
+        let ins = Instruments::from_program(
+            &crate::parser::parser::parse(KICK.to_string()).expect("parse failed"),
+        );
+        let mut net = build_voice(&ins, "kick", freq, dur).expect("should build");
+        net.set_sample_rate(44100.0);
+        (0..(secs * 44100.0) as usize).map(|_| net.get_mono()).collect()
+    }
+
+    fn rising_crossings(s: &[f32]) -> usize {
+        s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+    }
+
+    #[test]
+    fn the_kick_sounds_and_decays() {
+        let s = render(50.0, 1.0, 1.0);
+        assert!(s.iter().all(|v| v.is_finite()));
+
+        let onset = s[..2205].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        let tail = s[35000..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(onset > 0.5, "should hit hard, peak {onset}");
+        assert!(tail < 0.02, "should have decayed, peak {tail}");
+        assert!(s.iter().all(|v| v.abs() <= 1.05), "should not clip badly");
+    }
+
+    /// The pitch envelope really sweeps: the first 50 ms contains far more
+    /// cycles than a later window of the same length.
+    #[test]
+    fn the_pitch_sweeps_downward() {
+        let s = render(50.0, 1.0, 1.0);
+        let early = rising_crossings(&s[..2205]);        // 0 - 50 ms
+        let late = rising_crossings(&s[6615..8820]);     // 150 - 200 ms
+        assert!(
+            early > late * 2,
+            "expected a downward sweep, early={early} late={late}"
+        );
+    }
+
+    /// The pattern number scales the whole drum, so it is a real parameter.
+    #[test]
+    fn the_pattern_number_sets_the_fundamental() {
+        let low = rising_crossings(&render(40.0, 1.0, 0.4)[4410..8820]);
+        let high = rising_crossings(&render(120.0, 1.0, 0.4)[4410..8820]);
+        assert!(high > low * 2, "120 Hz should cycle faster: {high} vs {low}");
+    }
+}
+
+#[cfg(test)]
+mod zero_param_tests {
+    use super::*;
+    use crate::parser::parser::parse;
+    use fundsp::prelude64::AudioUnit;
+
+    fn instruments(src: &str) -> Instruments {
+        Instruments::from_program(&parse(src.to_string()).expect("parse failed"))
+    }
+
+    /// A fixed drum needs no placeholder parameter.
+    #[test]
+    fn a_zero_parameter_instrument_builds() {
+        let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
+        assert_eq!(ins.param_count("kick"), Some(0));
+
+        let mut net = build_voice(&ins, "kick", 1.0, 1.0).expect("should build");
+        assert_eq!(net.outputs(), 2);
+        net.set_sample_rate(44100.0);
+
+        let s: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+        let onset = s[..2205].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(onset > 0.5, "should sound, peak {onset}");
+    }
+
+    /// The event value is ignored, so every trigger sounds identical.
+    #[test]
+    fn the_event_value_is_ignored() {
+        let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
+
+        let render = |v: f64| {
+            let mut net = build_voice(&ins, "kick", v, 1.0).unwrap();
+            net.set_sample_rate(44100.0);
+            (0..4410).map(|_| net.get_mono()).collect::<Vec<f32>>()
+        };
+        assert_eq!(render(1.0), render(9999.0), "the value must not matter");
+    }
+
+    /// One-parameter instruments still receive the value.
+    #[test]
+    fn one_parameter_instruments_are_unaffected() {
+        let ins = instruments("fn tone(f) = sin(f)\n");
+        assert_eq!(ins.param_count("tone"), Some(1));
+        assert!(build_voice(&ins, "tone", 220.0, 1.0).is_ok());
+    }
+
+    /// Declaring a parameter and ignoring it still works, for compatibility.
+    #[test]
+    fn an_ignored_parameter_still_works() {
+        let ins = instruments("fn kick(_) = sin(50) * perc(0.002, 0.3)\n");
+        assert_eq!(ins.param_count("kick"), Some(1));
+        assert!(build_voice(&ins, "kick", 1.0, 1.0).is_ok());
     }
 }

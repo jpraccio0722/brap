@@ -37,9 +37,18 @@ fn as_count(func: &str, what: &str, v: &Value) -> Result<i64, String> {
 /// The allowed counts live in that table rather than at the call site so the
 /// editor's signature help and this check cannot disagree.
 fn arity(func: &str, args: &[Value]) -> Result<(), String> {
-    let Some(b) = crate::lang::list_builtin(func) else {
-        // Only reachable if an arm here has no matching table entry, which the
-        // `every_list_builtin_is_in_the_table` test rules out.
+    check_arity(func, args, crate::lang::list_builtin(func))
+}
+
+/// Shared by the list and math builtins, which use the same spec shape.
+pub(crate) fn check_arity(
+    func: &str,
+    args: &[Value],
+    spec: Option<&crate::lang::ListBuiltin>,
+) -> Result<(), String> {
+    let Some(b) = spec else {
+        // Only reachable if an arm has no matching table entry, which the
+        // `every_*_builtin_is_*` tests rule out.
         return Err(format!("{func} is missing from the builtin table"));
     };
 

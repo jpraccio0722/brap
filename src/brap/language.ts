@@ -16,20 +16,36 @@ import type { BuiltinIndex, LanguageMetadata } from "./metadata";
  * A stream tokenizer rather than a Lezer grammar: brap's lexical structure is
  * flat enough that a generated parser would buy nothing but a build step.
  *
- * The one rule worth stating explicitly — **brap has no string literal**. The
- * JavaScript mode this replaces treated the backtick rest token as the start of
- * a template literal, which swallowed the remainder of the file.
+ * The one rule worth stating explicitly — **brap has no string literal, and no
+ * escape sequences**. The JavaScript mode this replaces treated the backtick
+ * rest token as the start of a template literal, which swallowed the remainder
+ * of the file, and would read a backslash trigger as escaping the next
+ * character. Both are ordinary one-character tokens here.
  */
 
 /** The rest token: `` ` `` inside a pattern. Its own tag, because it is the
  *  most brap-specific thing on screen and deserves to stand out. */
 export const restTag = Tag.define();
+/** The trigger token: a backslash — a step that sounds but carries no value.
+ *  Tagged separately from `rest` so a pattern's rhythm is readable at a
+ *  glance: hits and silences should never be the same colour. */
+export const triggerTag = Tag.define();
 /** A name resolved from the backend's builtin table. */
 export const builtinTag = Tag.define();
+/** A note name: letter, optional `s`/`f`, octave. Tagged apart from ordinary
+ *  variables because pitch is the thing you scan a pattern for. */
+export const noteTag = Tag.define();
 
 /** Matches `lex.rs`'s number regex, anchored for `StringStream.match`. */
 const NUMBER = /^(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?/;
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*/;
+/**
+ * Mirrors `lang::note`. Whole-string, and the octave is required — that is
+ * what keeps `f` and `a` reading as ordinary names. A binding may still shadow
+ * a note, which the highlighter cannot know, so this is a spelling test rather
+ * than a resolution.
+ */
+const NOTE = /^[a-g][sf]?[0-9]$/;
 /**
  * Used until the backend's keyword list arrives, so a file is highlighted
  * correctly on the very first frame rather than rendering every keyword as a
@@ -82,9 +98,17 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
         return "number";
       }
 
+      // The two pattern literals. Neither can start an identifier, so their
+      // position relative to the IDENT branch does not matter — they are kept
+      // together because they are read together.
       if (stream.match("`")) {
         state.afterFn = false;
         return "brapRest";
+      }
+
+      if (stream.match("\\")) {
+        state.afterFn = false;
+        return "brapTrigger";
       }
 
       // `match` is typed as `RegExpMatchArray | true | null`; a regex argument
@@ -101,6 +125,7 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
           state.afterFn = name === "fn";
           return "keyword";
         }
+        if (NOTE.test(name)) return "brapNote";
         if (index.has(name)) return "brapBuiltin";
         // A name in call position is a user function; anything else is a value.
         return stream.match(/^\s*\(/, false) ? "fnName" : "variable";
@@ -136,7 +161,9 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
     // resolves through that built-in table on purpose.
     tokenTable: {
       brapBuiltin: builtinTag,
+      brapNote: noteTag,
       brapRest: restTag,
+      brapTrigger: triggerTag,
       fnName: t.function(t.variableName),
     },
   };
@@ -153,10 +180,16 @@ export const brapHighlightStyle = HighlightStyle.define([
   { tag: t.number, color: "#f0abfc" },
   { tag: t.keyword, color: "#c084fc" },
   { tag: builtinTag, color: "#5eead4" },
+  // Rose: warm like a pitch, and clear of the fuchsia numbers, the amber
+  // `def`, and the orange rest it will sit beside inside a pattern.
+  { tag: noteTag, color: "#fda4af" },
   { tag: t.function(t.variableName), color: "#93c5fd" },
   { tag: t.definition(t.variableName), color: "#fcd34d" },
   { tag: t.variableName, color: "#e5e7eb" },
+  // Warm for silence, cool-bright for a hit: the pair has to be separable at
+  // a glance inside a dense pattern like `[\, `, \, [\, \]]`.
   { tag: restTag, color: "#fb923c", fontWeight: "bold" },
+  { tag: triggerTag, color: "#4ade80", fontWeight: "bold" },
   { tag: t.operator, color: "#94a3b8" },
   { tag: t.bracket, color: "#94a3b8" },
   { tag: t.punctuation, color: "#94a3b8" },

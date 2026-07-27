@@ -11,6 +11,8 @@ pub enum Value {
     List(Rc<Vec<Value>>),
     /// A silent step. Only meaningful inside a pattern.
     Rest,
+    /// A sounding step carrying no value. Only meaningful inside a pattern.
+    Trigger,
 }
 
 pub struct FunctionDef {

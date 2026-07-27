@@ -3,7 +3,14 @@ use logos::Logos;
 
 #[derive(Logos, Debug, PartialEq, Clone)]
 #[logos(skip r"[ \t]+")]
-#[regex(r"//[^\n]*", logos::skip)]
+// A line comment runs to — but not through — the newline, so the newline still
+// terminates the statement it followed. As a `#[regex]` this was silently
+// inert: logos only reads skip patterns from `#[logos(skip ..)]`, and every
+// comment was lexed as two `Div` tokens followed by its own words.
+// `allow_greedy` because the class is dot-equivalent to logos' eye; the `\n`
+// exclusion does bound it, and a comment is the one token we *want* to run to
+// the end of its line.
+#[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum Token {
     #[token("+")]
     Ad,
@@ -31,6 +38,11 @@ pub enum Token {
 
     #[token("/")]
     Div,
+
+    /// Method sugar: `60.m2h`. One character, so `..=` wins by longest match
+    /// and `.5` still lexes as a number.
+    #[token(".")]
+    Dot,
 
     #[token("..=")]
     DotDotEq,
@@ -96,6 +108,10 @@ pub enum Token {
     #[token("`")]
     Rest,
 
+    /// A sounding step carrying no data, written as a single backslash.
+    #[token("\\")]
+    Trigger,
+
     #[token("%")]
     Percent,
 
@@ -115,7 +131,7 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
 
     fn can_end(t: &Token) -> bool {
         matches!(t,
-            Token::Ident(_) | Token::Num(_) | Token::Rest |
+            Token::Ident(_) | Token::Num(_) | Token::Rest | Token::Trigger |
             Token::BraceClose | Token::BracketClose | Token::ParensClose
         )
     }
@@ -127,7 +143,7 @@ pub fn insert_terminators(raw: Vec<Token>) -> Vec<Token> {
             // previous line's value.
             Token::Ad | Token::Assign | Token::BraceOpen |
             Token::Colon |
-            Token::Comma | Token::Div | Token::DotDotEq |
+            Token::Comma | Token::Div | Token::Dot | Token::DotDotEq |
             Token::Else | Token::EqEq | Token::Ge | Token::Gt |
             Token::Le | Token::Lt | Token::Mul | Token::Ne |
             Token::Percent | Token::ShiftRight | Token::Sub

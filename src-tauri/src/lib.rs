@@ -1,6 +1,7 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
-use crate::{brap_graph::realizer::realize, engine::swap_program, lowerer::lower::lower, parser::parser::parse};
+use crate::engine::{stop as stop_graph, swap_program};
+use crate::{brap_graph::realizer::realize, lowerer::lower::lower, parser::parser::parse};
 use crate::engine::AudioEngine;
 use crate::pattern::patterns::Patterns;
 use crate::scheduler::scheduler::SchedulerState;
@@ -48,6 +49,29 @@ fn run_code(
     Ok(())
 }
 
+/// Backend hook for the editor's "stop" button.
+///
+/// Silence has three parts, because a program has three places sound can come
+/// from: the persistent graph in the engine's slot, the pattern bindings the
+/// scheduler keeps turning into voices, and the voices it has already pushed
+/// into the lookahead window. Clearing only the first two leaves the last few
+/// notes ringing out.
+#[tauri::command]
+fn stop_audio(
+    engine: tauri::State<Mutex<AudioEngine>>,
+    sched: tauri::State<SchedulerState>,
+) -> Result<(), String> {
+    // Bindings first, so the next pass has nothing to schedule, then the flag
+    // the scheduler thread reads to cut what it already pushed.
+    *sched.patterns.lock().map_err(|_| "patterns lock poisoned")? = Patterns::default();
+    sched.request_stop();
+
+    let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
+    stop_graph(&mut eng);
+
+    Ok(())
+}
+
 /// Write a tab's contents to disk. The frontend picks the path via the save
 /// dialog; here we just persist the bytes.
 #[tauri::command]
@@ -79,6 +103,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             run_code,
+            stop_audio,
             save_file,
             read_file,
             language_metadata

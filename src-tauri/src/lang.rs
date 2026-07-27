@@ -509,6 +509,150 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
     },
 ];
 
+/// Compile-time arithmetic on numbers. Shares `ListBuiltin`'s shape because
+/// the two are the same kind of thing — a name evaluated during lowering that
+/// emits no node — and they differ only in what they accept.
+///
+/// These read naturally through the dot operator: `60.m2h`.
+pub static MATH_BUILTINS: &[ListBuiltin] = &[
+    // --- conversions ---
+    ListBuiltin {
+        name: "m2h",
+        params: &["note"],
+        arities: &[1],
+        variadic: false,
+        doc: "MIDI note number to frequency in hertz: `69.m2h` is 440. Equal temperament, A4 = 440 Hz.",
+    },
+    ListBuiltin {
+        name: "h2m",
+        params: &["hz"],
+        arities: &[1],
+        variadic: false,
+        doc: "Frequency in hertz to MIDI note number, the inverse of `m2h`: `440.h2m` is 69. The result may be fractional.",
+    },
+    ListBuiltin {
+        name: "db",
+        params: &["decibels"],
+        arities: &[1],
+        variadic: false,
+        doc: "Decibels to a linear amplitude: `0.db` is 1, `-6.db` is about 0.5. Use it to write gains the way you hear them.",
+    },
+    ListBuiltin {
+        name: "amp",
+        params: &["amplitude"],
+        arities: &[1],
+        variadic: false,
+        doc: "Linear amplitude to decibels, the inverse of `db`: `1.amp` is 0. The amplitude must be above zero.",
+    },
+    ListBuiltin {
+        name: "cents",
+        params: &["hz", "cents"],
+        arities: &[2],
+        variadic: false,
+        doc: "Detune a frequency by cents, 1/100 of a semitone: `440.cents(-14)` flattens A4 slightly.",
+    },
+    ListBuiltin {
+        name: "bpm",
+        params: &["beats"],
+        arities: &[1],
+        variadic: false,
+        doc: "Beats per minute to cycles per second, taking one cycle as four beats: `120.bpm` is 0.5, which is the default tempo.",
+    },
+    // --- pitch arithmetic ---
+    ListBuiltin {
+        name: "oct",
+        params: &["note", "octaves"],
+        arities: &[2],
+        variadic: false,
+        doc: "Transpose a MIDI note by whole octaves: `60.oct(-1)` is 48.",
+    },
+    ListBuiltin {
+        name: "semi",
+        params: &["note", "semitones"],
+        arities: &[2],
+        variadic: false,
+        doc: "Transpose a MIDI note by semitones: `60.semi(7)` is 67.",
+    },
+    ListBuiltin {
+        name: "scale",
+        params: &["note", "scale"],
+        arities: &[2],
+        variadic: false,
+        doc: "Snap a MIDI note to the nearest tone of a scale, given as semitone offsets within an octave: `61.scale([0, 2, 4, 5, 7, 9, 11])` is 60. Ties snap down.",
+    },
+    // --- ranges and shaping ---
+    ListBuiltin {
+        name: "clamp",
+        params: &["x", "lo", "hi"],
+        arities: &[3],
+        variadic: false,
+        doc: "Constrain a number to `lo..=hi`.",
+    },
+    ListBuiltin {
+        name: "norm",
+        params: &["x", "lo", "hi"],
+        arities: &[3],
+        variadic: false,
+        doc: "Map 0..1 onto `lo..hi`. Values outside 0..1 extrapolate; `clamp` first if you do not want that.",
+    },
+    ListBuiltin {
+        name: "wrap",
+        params: &["x", "lo", "hi"],
+        arities: &[3],
+        variadic: false,
+        doc: "Fold a number back into `lo..hi`, wrapping around rather than clamping. Useful for modular pitch.",
+    },
+    ListBuiltin {
+        name: "round",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Nearest whole number, halves away from zero.",
+    },
+    ListBuiltin {
+        name: "floor",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Largest whole number at or below `x`.",
+    },
+    ListBuiltin {
+        name: "ceil",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Smallest whole number at or above `x`.",
+    },
+    ListBuiltin {
+        name: "abs",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Magnitude, dropping the sign.",
+    },
+    ListBuiltin {
+        name: "pow",
+        params: &["x", "exponent"],
+        arities: &[2],
+        variadic: false,
+        doc: "`x` raised to a power: `2.pow(10)` is 1024. Good for exponential curve shaping.",
+    },
+    ListBuiltin {
+        name: "sqrt",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Square root. `x` must not be negative.",
+    },
+    ListBuiltin {
+        name: "log2",
+        params: &["x"],
+        arities: &[1],
+        variadic: false,
+        doc: "Base-2 logarithm. `x` must be above zero.",
+    },
+];
+
 /// Names that exist but belong to neither table: `play` is intercepted before
 /// evaluation because it needs its instrument argument syntactically, and `dur`
 /// is not a function at all — it is the note length, bound only inside a voice.
@@ -539,6 +683,78 @@ pub fn ugen(name: &str) -> Option<&'static Ugen> {
 /// from here.
 pub fn list_builtin(name: &str) -> Option<&'static ListBuiltin> {
     LIST_BUILTINS.iter().find(|b| b.name == name)
+}
+
+/// Look up a math builtin by name. `lowerer::math` reads its arities from here.
+pub fn math_builtin(name: &str) -> Option<&'static ListBuiltin> {
+    MATH_BUILTINS.iter().find(|b| b.name == name)
+}
+
+// ---------------------------------------------------------------------------
+// Note names.
+// ---------------------------------------------------------------------------
+
+/// Semitone offset of each natural note from C.
+const NOTE_OFFSETS: [(u8, i32); 7] = [
+    (b'c', 0),
+    (b'd', 2),
+    (b'e', 4),
+    (b'f', 5),
+    (b'g', 7),
+    (b'a', 9),
+    (b'b', 11),
+];
+
+/// `c0` is MIDI 12 and `g9` is 127, the top of the MIDI range.
+pub const MIN_NOTE_OCTAVE: i32 = 0;
+pub const MAX_NOTE_OCTAVE: i32 = 9;
+
+pub enum NoteName {
+    /// A MIDI note number.
+    Note(f64),
+    /// Shaped like a note, but the octave is outside the supported range.
+    OctaveOutOfRange(i32),
+    NotANote,
+}
+
+/// Read a bare identifier as a note name: letter, optional `s`/`f`, octave.
+///
+/// Deliberately **not** seeded into the environment. Resolution happens only
+/// when a variable lookup misses, so user bindings shadow note names for free
+/// and `lower_voice` — which runs per note — pays nothing to set them up.
+///
+/// The octave is required, which is what keeps `f`, `a` and `e` usable as
+/// ordinary parameter names. Flats are `f` rather than `b`, both because `b`
+/// is itself a note and because `db3` would read against the `db` builtin.
+/// Enharmonics are allowed: `bs3` is `c4`, `cf4` is `b3`.
+pub fn note(name: &str) -> NoteName {
+    let Some(&letter) = name.as_bytes().first() else {
+        return NoteName::NotANote;
+    };
+    let Some((_, offset)) = NOTE_OFFSETS.iter().find(|(c, _)| *c == letter) else {
+        return NoteName::NotANote;
+    };
+
+    let rest = &name[1..];
+    let (accidental, digits) = if let Some(d) = rest.strip_prefix('s') {
+        (1, d)
+    } else if let Some(d) = rest.strip_prefix('f') {
+        (-1, d)
+    } else {
+        (0, rest)
+    };
+
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return NoteName::NotANote;
+    }
+    let Ok(octave) = digits.parse::<i32>() else {
+        return NoteName::NotANote;
+    };
+    if !(MIN_NOTE_OCTAVE..=MAX_NOTE_OCTAVE).contains(&octave) {
+        return NoteName::OctaveOutOfRange(octave);
+    }
+
+    NoteName::Note(((octave + 1) * 12 + offset + accidental) as f64)
 }
 
 // ---------------------------------------------------------------------------
@@ -586,6 +802,15 @@ pub fn metadata() -> LanguageMetadata {
         doc: b.doc,
     });
 
+    let maths = MATH_BUILTINS.iter().map(|b| BuiltinInfo {
+        name: b.name,
+        params: b.params,
+        arities: b.arities.to_vec(),
+        variadic: b.variadic,
+        category: "math",
+        doc: b.doc,
+    });
+
     let specials = SPECIALS.iter().map(|b| BuiltinInfo {
         name: b.name,
         params: b.params,
@@ -596,7 +821,7 @@ pub fn metadata() -> LanguageMetadata {
     });
 
     LanguageMetadata {
-        builtins: ugens.chain(lists).chain(specials).collect(),
+        builtins: ugens.chain(lists).chain(maths).chain(specials).collect(),
         keywords: KEYWORDS,
     }
 }
@@ -695,7 +920,16 @@ mod tests {
         assert!(keywords.iter().any(|k| k == "fn"));
 
         let builtins = json["builtins"].as_array().unwrap();
-        assert_eq!(builtins.len(), UGENS.len() + LIST_BUILTINS.len() + SPECIALS.len());
+        assert_eq!(
+            builtins.len(),
+            UGENS.len() + LIST_BUILTINS.len() + MATH_BUILTINS.len() + SPECIALS.len()
+        );
+
+        let m2h = builtins
+            .iter()
+            .find(|b| b["name"] == "m2h")
+            .expect("m2h is missing");
+        assert_eq!(m2h["category"], "math");
 
         let lowpass = builtins
             .iter()
