@@ -3,12 +3,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import CodeMirror from "@uiw/react-codemirror";
+import type { EditorView } from "@codemirror/view";
 import {
   screeExtensions,
+  revealPosition,
+  showErrorLines,
   EMPTY_METADATA,
   loadMetadata,
   type LanguageMetadata,
 } from "./scree";
+import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
+import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
 import { toWire, type GraphicalPattern } from "./patterns";
 
@@ -25,11 +30,51 @@ interface Tab {
 
 const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
 
-/** How wide the side panel may be dragged. The floor is what a pattern's grid
- *  and the sliders need; the ceiling keeps the editor from vanishing. */
+/** How wide either side panel may be dragged. The floor is what a pattern's
+ *  grid and the sliders need; the ceiling keeps the editor from vanishing. */
 const MIN_PANEL = 240;
 const MAX_PANEL = 720;
 const DEFAULT_PANEL = 288;
+/** The problems panel holds wrapped prose and a snippet, which want a little
+ *  more room than the transport's sliders do. */
+const DEFAULT_PROBLEMS_PANEL = 340;
+
+/**
+ * Drag a panel's inner edge.
+ *
+ * Pointer capture is what makes this reliable: the pointer leaves the 8px
+ * handle on the first frame of any real drag, and without capture the moves
+ * would be delivered to whatever it crossed — including the editor, which
+ * would start selecting text.
+ *
+ * @param edge Which side of the window the panel is anchored to, which decides
+ * whether its width grows or shrinks as the pointer moves right.
+ */
+function usePanelResize(edge: "left" | "right", setWidth: (width: number) => void) {
+  return useCallback(
+    (e: React.PointerEvent) => {
+      e.preventDefault();
+      const handle = e.currentTarget as HTMLElement;
+      handle.setPointerCapture(e.pointerId);
+
+      const onMove = (ev: PointerEvent) => {
+        const width =
+          edge === "left" ? ev.clientX : window.innerWidth - ev.clientX;
+        setWidth(Math.min(MAX_PANEL, Math.max(MIN_PANEL, width)));
+      };
+      const onUp = () => {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        handle.removeEventListener("pointercancel", onUp);
+      };
+
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+      handle.addEventListener("pointercancel", onUp);
+    },
+    [edge, setWidth],
+  );
+}
 
 const STARTER_CONTENT = `// Write some code, then hit Play (or ⌘,)`;
 
@@ -59,43 +104,34 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL);
 
+  // The problems panel starts shut: there is nothing to say until something
+  // has been run. A failed run opens it, which is the whole point of it.
+  const [problemsOpen, setProblemsOpen] = useState(false);
+  const [problemsWidth, setProblemsWidth] = useState(DEFAULT_PROBLEMS_PANEL);
+  const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
+  const [runStatus, setRunStatus] = useState<RunStatus>("idle");
+  // Which tab the diagnostics describe. They outlive the run, and the editor
+  // may well have moved to another file by the time they are read.
+  const [sourceTabId, setSourceTabId] = useState<string | null>(null);
+
   // Drawn patterns belong to the session rather than to any one tab: they are
   // named bindings the program can reach for, like the transport is.
   const [patterns, setPatterns] = useState<GraphicalPattern[]>([]);
 
-  /**
-   * Drag the panel's edge.
-   *
-   * Pointer capture is what makes this reliable: the pointer leaves the 8px
-   * handle on the first frame of any real drag, and without capture the moves
-   * would be delivered to whatever it crossed — including the editor, which
-   * would start selecting text.
-   */
-  const startResize = useCallback((e: React.PointerEvent) => {
-    e.preventDefault();
-    const handle = e.currentTarget as HTMLElement;
-    handle.setPointerCapture(e.pointerId);
-
-    const onMove = (ev: PointerEvent) => {
-      // The panel is anchored to the right edge, so its width is whatever is
-      // left of the window from the pointer.
-      setPanelWidth(
-        Math.min(MAX_PANEL, Math.max(MIN_PANEL, window.innerWidth - ev.clientX)),
-      );
-    };
-    const onUp = () => {
-      handle.removeEventListener("pointermove", onMove);
-      handle.removeEventListener("pointerup", onUp);
-      handle.removeEventListener("pointercancel", onUp);
-    };
-
-    handle.addEventListener("pointermove", onMove);
-    handle.addEventListener("pointerup", onUp);
-    handle.addEventListener("pointercancel", onUp);
-  }, []);
+  const startResize = usePanelResize("right", setPanelWidth);
+  const startProblemsResize = usePanelResize("left", setProblemsWidth);
 
   // Null when every tab has been closed, which the editor is built to show.
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+
+  /** Show a failure. Everything that can fail comes through here, so nothing
+   *  can fail quietly — which is what this panel exists to prevent. */
+  const report = useCallback((diagnostic: Diagnostic, tabId: string | null) => {
+    setDiagnostics([diagnostic]);
+    setRunStatus("error");
+    setSourceTabId(tabId);
+    setProblemsOpen(true);
+  }, []);
 
   // The language's builtins, fetched once. Until it arrives the editor runs on
   // EMPTY_METADATA: syntax highlighting is already correct, only the builtin
@@ -161,55 +197,84 @@ function App() {
   }, []);
 
   const openTab = useCallback(async () => {
-    const selected = await open({ multiple: false, filters: SCREE_FILTER });
-    if (!selected || typeof selected !== "string") return; // user cancelled
-    const path = selected;
+    try {
+      const selected = await open({ multiple: false, filters: SCREE_FILTER });
+      if (!selected || typeof selected !== "string") return; // user cancelled
+      const path = selected;
 
-    // If the file is already open, just focus its tab.
-    const existing = tabs.find((t) => t.path === path);
-    if (existing) {
-      setActiveId(existing.id);
-      return;
+      // If the file is already open, just focus its tab.
+      const existing = tabs.find((t) => t.path === path);
+      if (existing) {
+        setActiveId(existing.id);
+        return;
+      }
+
+      const content = await invoke<string>("read_file", { path });
+      const tab = makeTab({ title: basename(path), path, content, dirty: false });
+      setTabs((prev) => [...prev, tab]);
+      setActiveId(tab.id);
+    } catch (e) {
+      report(toDiagnostic(e, "could not open that file"), null);
     }
+  }, [tabs, report]);
 
-    const content = await invoke<string>("read_file", { path });
-    const tab = makeTab({ title: basename(path), path, content, dirty: false });
-    setTabs((prev) => [...prev, tab]);
-    setActiveId(tab.id);
-  }, [tabs]);
-
+  /**
+   * Evaluate the active tab.
+   *
+   * A refusal from any compiler pass arrives here as a rejection, and every
+   * one of them ends up in the problems panel: this used to be an unhandled
+   * `await`, so a program with a typo in it simply never started while the
+   * previous one kept playing, with nothing on screen to say why.
+   */
   const play = useCallback(async () => {
     // Nothing open is nothing to run — the transport's buttons stay live for
     // stop, which is about what the engine is holding, not about a tab.
     if (!activeTab) return;
-    // The drawn patterns go with the code: they are bindings the program can
-    // name, and an eval is the only moment they mean anything.
-    await invoke("run_code", { code: activeTab.content, patterns: toWire(patterns) });
-  }, [activeTab, patterns]);
+    const tabId = activeTab.id;
+    try {
+      // The drawn patterns go with the code: they are bindings the program can
+      // name, and an eval is the only moment they mean anything.
+      await invoke("run_code", { code: activeTab.content, patterns: toWire(patterns) });
+      setDiagnostics([]);
+      setRunStatus("ok");
+      setSourceTabId(tabId);
+    } catch (e) {
+      report(toDiagnostic(e), tabId);
+    }
+  }, [activeTab, patterns, report]);
 
   const stop = useCallback(async () => {
-    await invoke("stop_audio");
-  }, []);
+    try {
+      await invoke("stop_audio");
+    } catch (e) {
+      report(toDiagnostic(e, "could not stop the engine"), null);
+    }
+  }, [report]);
 
   const saveTab = useCallback(async () => {
     const tab = activeTab;
     if (!tab) return;
-    let path = tab.path;
-    if (!path) {
-      // First save: ask where to put it, defaulting to a .scree file.
-      path = await save({ defaultPath: tab.title, filters: SCREE_FILTER });
-      if (!path) return; // user cancelled
+    try {
+      let path = tab.path;
+      if (!path) {
+        // First save: ask where to put it, defaulting to a .scree file.
+        path = await save({ defaultPath: tab.title, filters: SCREE_FILTER });
+        if (!path) return; // user cancelled
+      }
+      await invoke("save_file", { path, content: tab.content });
+      const savedPath = path;
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === tab.id
+            ? { ...t, path: savedPath, title: basename(savedPath), dirty: false }
+            : t,
+        ),
+      );
+    } catch (e) {
+      // Left dirty on purpose: the tab still differs from what is on disk.
+      report(toDiagnostic(e, `could not save ${tab.title}`), tab.id);
     }
-    await invoke("save_file", { path, content: tab.content });
-    const savedPath = path;
-    setTabs((prev) =>
-      prev.map((t) =>
-        t.id === tab.id
-          ? { ...t, path: savedPath, title: basename(savedPath), dirty: false }
-          : t,
-      ),
-    );
-  }, [activeTab]);
+  }, [activeTab, report]);
 
   // The File menu's items arrive as events. Their handlers take new identities
   // on every keystroke, so the listeners reach them through a ref and subscribe
@@ -228,6 +293,53 @@ function App() {
       for (const sub of subscriptions) void sub.then((unlisten) => unlisten());
     };
   }, []);
+
+  // The mounted editor, and the tab it belongs to.
+  //
+  // State rather than a ref, and tagged with its tab, for two reasons. The
+  // view is built in an effect inside CodeMirror, so a ref still reads empty
+  // when this component's effects run on a remount — the marks below would
+  // never be applied. And the editor remounts per tab, so a view without its
+  // tab's name on it is indistinguishable from the one that just closed.
+  const [editor, setEditor] = useState<{ tabId: string; view: EditorView } | null>(null);
+  const activeView = editor && editor.tabId === activeId ? editor.view : null;
+
+  const errorLines = useMemo(
+    () =>
+      diagnostics
+        .map((d) => d.line)
+        .filter((line): line is number => line !== null),
+    [diagnostics],
+  );
+
+  // Marks belong to the tab that was run, so switching away clears them — the
+  // same line number in another file means nothing. Switching back re-applies
+  // them, since the remount gives the editor a fresh state.
+  useEffect(() => {
+    if (!activeView) return;
+    showErrorLines(activeView, sourceTabId === activeId ? errorLines : []);
+  }, [activeView, errorLines, sourceTabId, activeId]);
+
+  // A click in the panel may have to switch tabs first, and the view for that
+  // tab does not exist until it has mounted — so the jump is left pending and
+  // made once there is somewhere to jump in.
+  const [pendingReveal, setPendingReveal] = useState<Diagnostic | null>(null);
+
+  const revealDiagnostic = useCallback(
+    (diagnostic: Diagnostic) => {
+      if (sourceTabId && sourceTabId !== activeId) setActiveId(sourceTabId);
+      setPendingReveal(diagnostic);
+    },
+    [sourceTabId, activeId],
+  );
+
+  useEffect(() => {
+    if (!pendingReveal || !activeView) return;
+    if (pendingReveal.line !== null) {
+      revealPosition(activeView, pendingReveal.line, pendingReveal.column);
+    }
+    setPendingReveal(null);
+  }, [pendingReveal, activeView]);
 
   // ⌘, plays, ⌘. stops. The file shortcuts aren't here: they hang off their
   // menu items, whose accelerators fire before the key reaches the webview.
@@ -249,7 +361,33 @@ function App() {
   return (
     <div className="flex h-screen flex-col bg-neutral-900 text-neutral-100">
       <header className="flex items-center justify-between border-b border-neutral-800 px-4 py-2">
-        <h1 className="text-sm font-semibold tracking-wide text-neutral-300">scree</h1>
+        <div className="flex items-center gap-2">
+          {/* On the left, for the panel on the left. Wears the number of
+              problems so a run that failed is visible with the panel shut. */}
+          <button
+            onClick={() => setProblemsOpen((open) => !open)}
+            title={problemsOpen ? "Hide problems" : "Show problems"}
+            aria-expanded={problemsOpen}
+            className={
+              "relative rounded-md p-1.5 transition-colors " +
+              (problemsOpen
+                ? "bg-neutral-700 text-neutral-100 hover:bg-neutral-600"
+                : diagnostics.length > 0
+                  ? "text-red-400 hover:bg-neutral-800 hover:text-red-300"
+                  : "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100")
+            }
+          >
+            <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
+              <path d="M3 6h18v2H3V6zm0 5h18v2H3v-2zm0 5h18v2H3v-2z" />
+            </svg>
+            {diagnostics.length > 0 && (
+              <span className="absolute -right-1 -top-1 min-w-4 rounded-full bg-red-600 px-1 text-center text-[10px] font-semibold leading-4 text-white">
+                {diagnostics.length}
+              </span>
+            )}
+          </button>
+          <h1 className="text-sm font-semibold tracking-wide text-neutral-300">scree</h1>
+        </div>
         <div className="flex items-center gap-2">
           {/* One hamburger, both ways: it is where a reader looks for the
               panel whether it is showing or not. */}
@@ -322,10 +460,21 @@ function App() {
       </div>
 
       <div className="flex min-h-0 flex-1">
+        <ProblemsPanel
+          open={problemsOpen}
+          width={problemsWidth}
+          onResizeStart={startProblemsResize}
+          status={runStatus}
+          diagnostics={diagnostics}
+          sourceTitle={tabs.find((t) => t.id === sourceTabId)?.title ?? null}
+          sourceIsActive={sourceTabId === activeId}
+          onReveal={revealDiagnostic}
+        />
         <main className="min-h-0 min-w-0 flex-1">
           {activeTab ? (
             <CodeMirror
               key={activeTab.id}
+              onCreateEditor={(view) => setEditor({ tabId: activeTab.id, view })}
               value={activeTab.content}
               onChange={(value) => updateContent(activeTab.id, value)}
               height="100%"

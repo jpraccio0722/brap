@@ -1,10 +1,12 @@
 import type { Extension } from "@codemirror/state";
 import { screeCompletions } from "./complete";
+import { errorMarks } from "./errors";
 import { screeLanguage } from "./language";
 import { buildIndex, type LanguageMetadata } from "./metadata";
 import { signatureHelp } from "./signature";
 
 export { EMPTY_METADATA, loadMetadata, type LanguageMetadata } from "./metadata";
+export { revealPosition, showErrorLines } from "./errors";
 
 /**
  * Every scree editor extension, built from one metadata snapshot.
@@ -28,5 +30,8 @@ export function screeExtensions(
   return [
     screeLanguage(meta, index, screeCompletions(meta, patternNames)),
     signatureHelp(index),
+    // Holds nothing until a run fails; the marks arrive by transaction, which
+    // is what keeps this array's identity out of it.
+    errorMarks(),
   ];
 }
