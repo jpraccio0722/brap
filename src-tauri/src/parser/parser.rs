@@ -1,7 +1,9 @@
+use chumsky::error::{RichPattern, RichReason};
 use chumsky::prelude::*;
 use chumsky::input::ValueInput;
 use logos::Logos;
-use crate::parser::lex::{insert_terminators, Token};
+use crate::diagnostic::{Diagnostic, Stage};
+use crate::parser::lex::{insert_terminators, Span, Token};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ident(pub String);
@@ -99,25 +101,147 @@ enum Postfix {
     Method(Ident, Vec<Arg>),
 }
 
+/// Labelled, because `select!` has nothing to say about what it wanted: an
+/// error where a name belongs would otherwise read "expected something else".
 fn ident<'a, I>() -> impl Parser<'a, I, Ident, extra::Err<Rich<'a, Token>>> + Clone
 where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
-    select! { Token::Ident(s) => Ident(s) }
+    select! { Token::Ident(s) => Ident(s) }.labelled("a name")
 }
 
-pub fn parse(code: String) -> Result<Vec<ScreeItem>, String> {
-    
-    let raw_tokens: Vec<Token> = Token::lexer(&code)
-        .collect::<Result<_, _>>()
-        .map_err(|_| "lexing error".to_string())?;
+/// Read a program, or say what stopped it.
+///
+/// Both failures carry a place in the source: the lexer's is the character it
+/// could not read, and the parser's is recovered by mapping the token index it
+/// reports back through the spans the lexer kept.
+pub fn parse(code: String) -> Result<Vec<ScreeItem>, Diagnostic> {
+    let mut raw_tokens: Vec<(Token, Span)> = Vec::new();
+    for (token, span) in Token::lexer(&code).spanned() {
+        match token {
+            Ok(token) => raw_tokens.push((token, span)),
+            Err(_) => {
+                let text = code.get(span.clone()).unwrap_or_default();
+                return Err(Diagnostic::at(
+                    Stage::Lex,
+                    format!("`{text}` is not part of the language"),
+                    &code,
+                    span.start,
+                ));
+            }
+        }
+    }
 
-    let tokens: Vec<Token> = insert_terminators(raw_tokens);
+    let (tokens, spans) = insert_terminators(raw_tokens);
 
+    // Bound rather than returned directly: the parser borrows `tokens`, and as
+    // a tail expression it would outlive them.
     let result = parser()
         .parse(&tokens[..])
         .into_result()
-        .map_err(|errs| format!("{:?}", errs));
+        .map_err(|errs| parse_diagnostic(&errs, &spans, &code));
 
     result
+}
+
+/// The first parse error, as something worth reading.
+///
+/// Only the first: chumsky reports every branch that failed, and after the
+/// earliest one they are describing a parse that had already gone wrong.
+fn parse_diagnostic(
+    errs: &[Rich<'_, Token>],
+    spans: &[Span],
+    code: &str,
+) -> Diagnostic {
+    let Some(err) = errs.first() else {
+        // `into_result` never gives an empty error vector, but a parse that
+        // failed must not report itself as having no reason.
+        return Diagnostic::message(Stage::Parse, "could not parse this program");
+    };
+
+    // The error's span indexes the token stream, not the source. A span past
+    // the end is an error against end-of-input, which belongs after the last
+    // token rather than nowhere.
+    let offset = spans
+        .get(err.span().start)
+        .map(|s| s.start)
+        .or_else(|| spans.last().map(|s| s.end))
+        .unwrap_or(0);
+
+    Diagnostic::at(Stage::Parse, parse_message(err), code, offset)
+}
+
+fn parse_message(err: &Rich<'_, Token>) -> String {
+    match err.reason() {
+        RichReason::Custom(message) => message.clone(),
+        RichReason::ExpectedFound { expected, .. } => {
+            let found = match err.found() {
+                Some(token) => format!("unexpected `{token}`"),
+                None => "the file ends here".to_string(),
+            };
+
+            // Ranked before sorting so the useful candidates survive the cap:
+            // a call missing its `)` can have the parser expecting every infix
+            // operator in the language alongside it, and the `)` is the answer.
+            let mut ranked: Vec<(u8, String)> = expected.iter().map(pattern_name).collect();
+            ranked.sort();
+            ranked.dedup();
+            let names: Vec<String> = ranked.into_iter().map(|(_, name)| name).collect();
+
+            match expected_list(&names) {
+                Some(list) => format!("{found}, expected {list}"),
+                None => found,
+            }
+        }
+    }
+}
+
+/// One thing the parser would have accepted, as it is written, paired with how
+/// much it is worth saying: the thing that closes or separates what you are in
+/// the middle of writing tells you more than the operators that could follow it.
+fn pattern_name(pattern: &RichPattern<'_, Token>) -> (u8, String) {
+    match pattern {
+        // The two tokens whose `Display` is a phrase rather than a spelling:
+        // backticks around them would be quoting something nobody can type.
+        RichPattern::Token(token) if matches!(&**token, Token::Term | Token::NewLine) => {
+            (1, token.to_string())
+        }
+        RichPattern::Token(token) => {
+            let rank = match &**token {
+                Token::ParensClose | Token::BracketClose | Token::BraceClose => 0,
+                Token::Comma | Token::Colon | Token::Assign | Token::Term => 1,
+                Token::ParensOpen | Token::BracketOpen | Token::BraceOpen => 2,
+                Token::Else | Token::For | Token::Function | Token::If
+                | Token::In | Token::Let => 2,
+                _ => 3,
+            };
+            (rank, format!("`{}`", &**token))
+        }
+        RichPattern::EndOfInput => (1, "the end of the file".to_string()),
+        other => (2, other.to_string()),
+    }
+}
+
+/// "`,`", "`,` or `]`", "`,`, `]` or 3 more".
+///
+/// Capped because a failure early in an expression can have the parser
+/// expecting every operator and every literal at once, and a list that long
+/// says less than the first few of it do.
+fn expected_list(names: &[String]) -> Option<String> {
+    const SHOWN: usize = 4;
+
+    match names.len() {
+        0 => None,
+        1 => Some(names[0].clone()),
+        n if n <= SHOWN => Some(format!(
+            "{} or {}",
+            names[..n - 1].join(", "),
+            names[n - 1],
+        )),
+        n => Some(format!(
+            "{} or {} more",
+            names[..SHOWN].join(", "),
+            n - SHOWN,
+        )),
+    }
 }
 
 fn expr<'a, I>() -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
@@ -125,7 +249,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     recursive(|expr| {
         let sep = just(Token::Term).repeated().at_least(1);
 
-        let int = select! { Token::Num(n) => Expr::Num(n) };
+        let int = select! { Token::Num(n) => Expr::Num(n) }.labelled("a number");
         let var = ident().map(Expr::Var);
         let paren = expr.clone()
             .delimited_by(just(Token::ParensOpen), just(Token::ParensClose));
@@ -440,5 +564,70 @@ mod tests {
             panic!("expected a call on the right of the chain");
         };
         assert_eq!(args[1], Arg::named("cut", Expr::Num(400.0)));
+    }
+
+    /// The whole point of the diagnostic: the error has to say where it is,
+    /// and say it in the source's own spelling rather than the token enum's.
+    #[test]
+    fn a_parse_error_points_at_the_line_it_is_on() {
+        let err = parse("let a = 1\nfn foo(a b) = a\nsin(220)\n".to_string())
+            .expect_err("a missing comma should not parse");
+
+        assert_eq!(err.stage, Stage::Parse);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.column, Some(10));
+        assert_eq!(err.snippet.as_deref(), Some("fn foo(a b) = a"));
+        assert_eq!(err.message, "unexpected `b`, expected `)`, `,` or `=`");
+    }
+
+    /// An unclosed bracket holds the statement open, so the error lands on the
+    /// line that finally could not continue it — not on the line that opened.
+    /// Reported honestly rather than guessed at, since the parser has no idea
+    /// which of the two the writer meant.
+    #[test]
+    fn an_unclosed_call_reports_where_it_gave_up() {
+        let err = parse("let a = 1\nsin(440\nlet b = 2\n".to_string())
+            .expect_err("an unclosed call should not parse");
+
+        assert_eq!(err.line, Some(3));
+        assert!(
+            err.message.starts_with("unexpected `let`, expected `)`"),
+            "the closing paren should lead the list: {}",
+            err.message,
+        );
+    }
+
+    /// A character the language has no token for stops at that character,
+    /// rather than at the start of the file.
+    #[test]
+    fn an_unknown_character_reports_itself() {
+        let err = parse("sin(440)\nlet x = 1 @ 2\n".to_string())
+            .expect_err("`@` should not lex");
+
+        assert_eq!(err.stage, Stage::Lex);
+        assert_eq!(err.line, Some(2));
+        assert_eq!(err.column, Some(11));
+        assert!(err.message.contains('@'), "unhelpful message: {}", err.message);
+    }
+
+    /// Trailing input must not parse quietly: before this, half a program
+    /// could reach the engine with the rest of it dropped on the floor.
+    #[test]
+    fn a_stray_bracket_is_an_error_rather_than_a_short_program() {
+        parse("sin(440)\n]\n".to_string()).expect_err("a stray `]` should not parse");
+    }
+
+    /// A block that ends in a `let` fails with the parser's own words, which
+    /// arrive by a different route than the expected/found errors.
+    #[test]
+    fn a_custom_parser_error_keeps_its_message() {
+        let err = parse("{ let a = 1 }\n".to_string())
+            .expect_err("a block ending in a let should not parse");
+
+        assert!(
+            err.message.contains("must end in an expression"),
+            "lost the parser's message: {}",
+            err.message,
+        );
     }
 }

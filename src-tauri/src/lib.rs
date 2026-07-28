@@ -2,6 +2,7 @@
 
 use crate::engine::{stop as stop_graph, swap_program};
 use crate::{scree_graph::realizer::realize, lowerer::lower::lower_with_patterns, parser::parser::parse};
+use crate::diagnostic::{Diagnostic, Stage};
 use crate::engine::AudioEngine;
 use crate::pattern::graphical::GraphicalPattern;
 use crate::pattern::patterns::Patterns;
@@ -15,6 +16,7 @@ use tauri::{Emitter, Manager};
 
 mod pattern;
 mod scheduler;
+mod diagnostic;
 mod engine;
 mod parser;
 mod scree_graph;
@@ -31,28 +33,36 @@ mod lang;
 /// rather than being held here, because they are part of what is being
 /// evaluated: the editor is the only thing that knows them, and an eval is the
 /// only moment they matter.
+///
+/// A refusal from any of the three passes goes back as a `Diagnostic` — which
+/// pass, what it said, and where — for the editor's problems panel. Nothing is
+/// swapped into the engine until all three have agreed, so a program that does
+/// not compile leaves whatever is playing alone.
 #[tauri::command]
 fn run_code(
     code: String,
     patterns: Vec<GraphicalPattern>,
     engine: tauri::State<Mutex<AudioEngine>>,
     sched: tauri::State<SchedulerState>,
-) -> Result<(), String> {
+) -> Result<(), Diagnostic> {
     let ast = parse(code)?;
-    let lowered = lower_with_patterns(&ast, &patterns)?;
-    let audio_graph = realize(&lowered.graph)?;
+    let lowered = lower_with_patterns(&ast, &patterns)
+        .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
+    let audio_graph = realize(&lowered.graph)
+        .map_err(|e| Diagnostic::message(Stage::Realize, e))?;
 
     // Instruments before patterns: the scheduler must be able to build a voice
     // for any binding it can see.
     *sched
         .instruments
         .lock()
-        .map_err(|_| "instruments lock poisoned")? = Instruments::from_program(&ast);
+        .map_err(|_| Diagnostic::message(Stage::Engine, "instruments lock poisoned"))? =
+        Instruments::from_program(&ast);
 
     let starting_from_silence = sched
         .patterns
         .lock()
-        .map_err(|_| "patterns lock poisoned")?
+        .map_err(|_| Diagnostic::message(Stage::Engine, "patterns lock poisoned"))?
         .is_empty();
 
     // Starting from silence should begin a pattern at its first step, but a
@@ -64,17 +74,24 @@ fn run_code(
     // `play_once`, `playn` — count from, read under the same lock as the reset
     // so the two can never disagree.
     let origin = {
-        let eng = engine.lock().map_err(|_| "audio engine poisoned")?;
+        let eng = engine
+            .lock()
+            .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?;
         if starting_from_silence && !lowered.bindings.is_empty() {
             eng.clock.reset();
         }
         eng.clock.now_cycles()
     };
 
-    *sched.patterns.lock().map_err(|_| "patterns lock poisoned")? =
+    *sched
+        .patterns
+        .lock()
+        .map_err(|_| Diagnostic::message(Stage::Engine, "patterns lock poisoned"))? =
         Patterns { bindings: lowered.bindings, origin };
 
-    let mut eng = engine.lock().map_err(|_| "audio engine poisoned")?;
+    let mut eng = engine
+        .lock()
+        .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?;
     swap_program(&mut eng, audio_graph);
 
     Ok(())
