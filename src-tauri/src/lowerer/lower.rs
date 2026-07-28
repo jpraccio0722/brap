@@ -11,6 +11,11 @@ pub struct Lowerer {
     pub graph: ScreeGraph,
     pub depth: usize,
     pub bindings: Vec<Binding>,
+    /// Cycles after the origin that the next `play` should start at.
+    ///
+    /// Zero at the top level; `.then` raises it while inlining the function it
+    /// was handed, which is the whole of "start when the last one finished".
+    pub play_start: f64,
     /// Seeded per eval, so `choice` and `scramble` differ each time.
     pub rng: u64,
 }
@@ -67,6 +72,7 @@ fn lower_inner(
         graph: ScreeGraph::default(),
         depth: 0,
         bindings: Vec::new(),
+        play_start: 0.0,
         rng: seed_from_clock(),
     };
 

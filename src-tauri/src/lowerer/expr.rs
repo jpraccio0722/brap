@@ -83,6 +83,19 @@ impl Lowerer {
                     let v = iteration?;
                     acc = Some(match acc {
                         None => v,
+                        // Several plays in one loop are not summed like audio:
+                        // they all happen, and the loop as a whole finishes
+                        // when the last of them does.
+                        Some(Value::Play { ends_at: a }) => {
+                            let Value::Play { ends_at: b } = v else {
+                                return Err(format!(
+                                    "for {}: a loop cannot mix plays with other values",
+                                    var.0));
+                            };
+                            // One that never stops makes the whole loop never
+                            // stop, so nothing may follow it.
+                            Value::Play { ends_at: crate::lowerer::play::later_end(a, b) }
+                        }
                         Some(prev) => self.combine(NodeKind::Add, |a, b| a + b, prev, v)?,
                     });
                 }
@@ -233,6 +246,8 @@ impl Lowerer {
             Value::List(_) => Err("cannot use a list as a signal (iterate it with `for`)".into()),
             Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
             Value::Trigger => Err("cannot use a trigger as a signal (triggers belong in patterns)".into()),
+            Value::Play { .. } => Err(
+                "cannot use a play as a signal (it schedules notes, it is not audio)".into()),
         }
     }
 }

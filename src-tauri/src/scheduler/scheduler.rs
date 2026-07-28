@@ -315,6 +315,7 @@ mod tests {
                 instrument: "kick".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles: None,
             }],
             ..Default::default()
@@ -348,6 +349,7 @@ mod pass_tests {
                 instrument: "kick".into(),
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles: None,
             }],
             ..Default::default()
@@ -535,6 +537,7 @@ mod pass_tests {
                 instrument: "ghost".into(),
                 pattern: Pattern::steps(vec![Some(1.0)]),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles: None,
             }],
             ..Default::default()
@@ -649,6 +652,7 @@ mod start_position_tests {
                 instrument: "k".into(),
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles: None,
             }],
             ..Default::default()
@@ -755,6 +759,7 @@ mod start_position_tests {
                 instrument: "k".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles: Some(1.0),
             }],
             origin: clock.now_cycles(),

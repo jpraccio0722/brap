@@ -13,6 +13,12 @@ pub enum Value {
     Rest,
     /// A sounding step carrying no value. Only meaningful inside a pattern.
     Trigger,
+    /// What a `play` call evaluates to: a handle onto the binding it made.
+    ///
+    /// `ends_at` is the cycle, counted from the pattern origin, at which the
+    /// binding falls silent — `None` for plain `play`, which never does. It is
+    /// what `.then` needs to know when to start what follows.
+    Play { ends_at: Option<f64> },
 }
 
 pub struct FunctionDef {

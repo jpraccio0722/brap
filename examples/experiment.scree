@@ -1,0 +1,8 @@
+fn kick() = {
+  let sweep = 50 + 150 * perc(0.001, 0.05)
+  let click = noise() * perc(0.001, 0.006)
+  sin(sweep) * perc(0.002, 0.4) * 0.9 + click * 0.1
+}
+
+play(kick_pat, kick, 1.0)
+

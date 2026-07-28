@@ -37,6 +37,24 @@ fn const_param(n: &UGenNode, idx: usize, name: &str) -> Result<f32, String> {
     }
 }
 
+/// `const_param`, rejecting values a reverb cannot survive.
+///
+/// The reverbs derive their feedback gain from `time` and `room_size`; at zero
+/// or below that gain reaches 1 or more, which is unbounded feedback straight
+/// into the audio thread. Every other UGen's bad parameters merely sound wrong.
+fn positive_param(n: &UGenNode, idx: usize, name: &str) -> Result<f32, String> {
+    match const_param(n, idx, name)? {
+        v if v > 0.0 => Ok(v),
+        v => Err(format!("{name} must be above zero, got {v}")),
+    }
+}
+
+/// Adapt a stereo reverb to the mono graph: feed the signal to both inputs and
+/// average the two outputs back down.
+fn mono(rev: An<impl AudioNode<Inputs = U2, Outputs = U2> + 'static>) -> Box<dyn AudioUnit> {
+    Box::new(split::<U2>() >> rev >> join::<U2>())
+}
+
 /// Realize an IR graph into a runnable network.
 ///
 /// The result is always 0-in / 2-out. Both consumers require it: the engine's
@@ -198,6 +216,39 @@ pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
             NodeKind::Pulse => (Box::new(pulse()), 2),
             NodeKind::Ramp => (Box::new(ramp()), 1),
             NodeKind::Resonator => (Box::new(resonator()), 3),
+            NodeKind::Reverb => (
+                mono(reverb_stereo(
+                    positive_param(n, 1, "reverb room size")?,
+                    positive_param(n, 2, "reverb time")?,
+                    const_param(n, 3, "reverb damping")?,
+                )),
+                1,
+            ),
+            NodeKind::Reverb2 => (
+                mono(reverb2_stereo(
+                    positive_param(n, 1, "reverb2 room size")?,
+                    positive_param(n, 2, "reverb2 time")?,
+                    const_param(n, 3, "reverb2 diffusion")?,
+                    const_param(n, 4, "reverb2 modulation")?,
+                    lowpole_hz(positive_param(n, 5, "reverb2 damping cutoff")?),
+                )),
+                1,
+            ),
+            NodeKind::Reverb3 => (
+                mono(reverb3_stereo(
+                    positive_param(n, 1, "reverb3 time")?,
+                    const_param(n, 2, "reverb3 diffusion")?,
+                    lowpole_hz(positive_param(n, 3, "reverb3 damping cutoff")?),
+                )),
+                1,
+            ),
+            NodeKind::Reverb4 => (
+                mono(reverb4_stereo(
+                    positive_param(n, 1, "reverb4 room size")?,
+                    positive_param(n, 2, "reverb4 time")?,
+                )),
+                1,
+            ),
             NodeKind::Rossler => (Box::new(rossler()), 1),
             NodeKind::Saw => (Box::new(saw()), 1),
             NodeKind::Sin => (Box::new(sine()), 1),
@@ -485,5 +536,90 @@ mod envelope_tests {
         let late = s[(0.4 * SR) as usize..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
         assert!(early > 0.5, "should be audible early, peak {early}");
         assert!(late < 0.01, "should have decayed, peak {late}");
+    }
+}
+
+#[cfg(test)]
+mod reverb_tests {
+    use super::*;
+    use crate::lowerer::lower::lower;
+    use crate::parser::parser::parse;
+
+    const SR: f64 = 44100.0;
+
+    /// Render `src` through the whole pipeline and return `secs` of samples.
+    fn render(src: &str, secs: f64) -> Vec<f32> {
+        let items = parse(src.to_string()).unwrap_or_else(|e| panic!("{src} failed to parse: {e}"));
+        let g = lower(&items).unwrap_or_else(|e| panic!("{src} failed to lower: {e}")).graph;
+        let mut net = realize(&g).unwrap_or_else(|e| panic!("{src} failed to realize: {e}"));
+        net.check();
+        net.set_sample_rate(SR);
+        (0..(secs * SR) as usize).map(|_| net.get_mono()).collect()
+    }
+
+    fn peak(samples: &[f32]) -> f32 {
+        samples.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+    }
+
+    /// Each reverb turns an impulse into a tail that rings and then dies away.
+    /// Short decay times keep the render — and so the test — brief.
+    #[test]
+    fn every_reverb_rings_and_decays() {
+        for src in [
+            "reverb(impulse(), 10, 0.4, 0.5)\n",
+            "reverb2(impulse(), 10, 0.4, 0.5, 1, 8000)\n",
+            "reverb3(impulse(), 0.4, 0.5, 8000)\n",
+            "reverb4(impulse(), 20, 0.4)\n",
+        ] {
+            let s = render(src, 1.2);
+            assert!(s.iter().all(|v| v.is_finite()), "{src} produced a non-finite sample");
+
+            // reverb4 fades in, so the "early" window starts after its onset.
+            let early = peak(&s[(0.05 * SR) as usize..(0.3 * SR) as usize]);
+            let late = peak(&s[(0.9 * SR) as usize..]);
+            assert!(early > 1e-4, "{src} made no tail, early peak was {early}");
+            assert!(late < early * 0.5, "{src} did not decay: {early} then {late}");
+        }
+    }
+
+    /// Wet only — the dry signal is not passed through, so mixing is the user's
+    /// to do. A sine straight into a reverb comes back quieter than it went in.
+    #[test]
+    fn reverbs_are_wet_only() {
+        let s = render("reverb(sin(220), 10, 0.4, 0.5)\n", 0.5);
+        assert!(peak(&s) < 0.9, "a dry-inclusive reverb would keep the unit sine");
+    }
+
+    /// A non-positive decay time makes the feedback gain 1 or more. That is
+    /// unbounded feedback, so it is rejected rather than realized.
+    #[test]
+    fn a_non_positive_time_is_rejected() {
+        for src in [
+            "reverb(impulse(), 10, 0, 0.5)\n",
+            "reverb2(impulse(), 10, -1, 0.5, 1, 8000)\n",
+            "reverb3(impulse(), 0, 0.5, 8000)\n",
+            "reverb4(impulse(), 20, 0)\n",
+        ] {
+            let items = parse(src.to_string()).unwrap();
+            let g = lower(&items).unwrap().graph;
+            let err = match realize(&g) {
+                Err(e) => e,
+                Ok(_) => panic!("{src} should not realize"),
+            };
+            assert!(err.contains("must be above zero"), "{src} gave: {err}");
+        }
+    }
+
+    /// The parameters are baked at construction, so a signal in one is an error
+    /// rather than a wiring job.
+    #[test]
+    fn reverb_parameters_must_be_constants() {
+        let items = parse("reverb(impulse(), 10, sin(1), 0.5)\n".to_string()).unwrap();
+        let g = lower(&items).unwrap().graph;
+        let err = match realize(&g) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a signal-valued reverb time to be an error"),
+        };
+        assert!(err.contains("must be a constant"), "got: {err}");
     }
 }
