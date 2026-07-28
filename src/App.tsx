@@ -13,6 +13,8 @@ import {
   type LanguageMetadata,
 } from "./scree";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
+import { ProjectPanel } from "./ProjectPanel";
+import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
 import { toWire, type GraphicalPattern } from "./patterns";
@@ -35,9 +37,9 @@ const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
 const MIN_PANEL = 240;
 const MAX_PANEL = 720;
 const DEFAULT_PANEL = 288;
-/** The problems panel holds wrapped prose and a snippet, which want a little
- *  more room than the transport's sliders do. */
-const DEFAULT_PROBLEMS_PANEL = 340;
+/** The left panel holds wrapped prose, a snippet and a file tree, all of which
+ *  want a little more room than the transport's sliders do. */
+const DEFAULT_SIDE_PANEL = 340;
 
 /**
  * Drag a panel's inner edge.
@@ -104,10 +106,12 @@ function App() {
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL);
 
-  // The problems panel starts shut: there is nothing to say until something
-  // has been run. A failed run opens it, which is the whole point of it.
-  const [problemsOpen, setProblemsOpen] = useState(false);
-  const [problemsWidth, setProblemsWidth] = useState(DEFAULT_PROBLEMS_PANEL);
+  // The left panel starts shut, on its problems tab: there is nothing to say
+  // until something has been run. A failed run opens it, which is the whole
+  // point of it.
+  const [sideOpen, setSideOpen] = useState(false);
+  const [sideWidth, setSideWidth] = useState(DEFAULT_SIDE_PANEL);
+  const [sideTab, setSideTab] = useState<SideTab>("problems");
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [runStatus, setRunStatus] = useState<RunStatus>("idle");
   // Which tab the diagnostics describe. They outlive the run, and the editor
@@ -118,8 +122,17 @@ function App() {
   // named bindings the program can reach for, like the transport is.
   const [patterns, setPatterns] = useState<GraphicalPattern[]>([]);
 
+  // A project is a folder and nothing else. It opens on the directory the app
+  // was launched from and follows whatever File ▸ New Project… picks after
+  // that. Null only until the backend has answered.
+  const [projectRoot, setProjectRoot] = useState<string | null>(null);
+  // Bumped to throw the tree's listings away and read the folder again —
+  // nothing watches the filesystem, so a change made outside the app has to be
+  // asked for.
+  const [projectVersion, setProjectVersion] = useState(0);
+
   const startResize = usePanelResize("right", setPanelWidth);
-  const startProblemsResize = usePanelResize("left", setProblemsWidth);
+  const startSideResize = usePanelResize("left", setSideWidth);
 
   // Null when every tab has been closed, which the editor is built to show.
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
@@ -130,7 +143,10 @@ function App() {
     setDiagnostics([diagnostic]);
     setRunStatus("error");
     setSourceTabId(tabId);
-    setProblemsOpen(true);
+    // Both, since the panel may well be open on the project tree instead: an
+    // open panel showing something else is as silent as a shut one.
+    setSideOpen(true);
+    setSideTab("problems");
   }, []);
 
   // The language's builtins, fetched once. Until it arrives the editor runs on
@@ -144,6 +160,21 @@ function App() {
         if (live) setMetadata(meta);
       })
       .catch((e) => console.error("could not load language metadata:", e));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // The default project, fetched once. Only the initial value: a folder picked
+  // from the File menu afterwards is the frontend's own, and must not be
+  // overwritten by a late answer.
+  useEffect(() => {
+    let live = true;
+    invoke<string>("project_root")
+      .then((root) => {
+        if (live) setProjectRoot((current) => current ?? root);
+      })
+      .catch((e) => console.error("could not read the working directory:", e));
     return () => {
       live = false;
     };
@@ -196,12 +227,10 @@ function App() {
     );
   }, []);
 
-  const openTab = useCallback(async () => {
-    try {
-      const selected = await open({ multiple: false, filters: SCREE_FILTER });
-      if (!selected || typeof selected !== "string") return; // user cancelled
-      const path = selected;
-
+  /** Open a file by path, wherever the path came from — the open dialog, or a
+   *  click in the project tree. */
+  const openPath = useCallback(
+    async (path: string) => {
       // If the file is already open, just focus its tab.
       const existing = tabs.find((t) => t.path === path);
       if (existing) {
@@ -209,14 +238,50 @@ function App() {
         return;
       }
 
-      const content = await invoke<string>("read_file", { path });
-      const tab = makeTab({ title: basename(path), path, content, dirty: false });
-      setTabs((prev) => [...prev, tab]);
-      setActiveId(tab.id);
+      try {
+        const content = await invoke<string>("read_file", { path });
+        const tab = makeTab({ title: basename(path), path, content, dirty: false });
+        setTabs((prev) => [...prev, tab]);
+        setActiveId(tab.id);
+      } catch (e) {
+        // Anything that isn't text lands here, which is the honest answer: the
+        // editor has nothing to show for a binary file.
+        report(toDiagnostic(e, `could not open ${basename(path)}`), null);
+      }
+    },
+    [tabs, report],
+  );
+
+  const openTab = useCallback(async () => {
+    try {
+      const selected = await open({ multiple: false, filters: SCREE_FILTER });
+      if (!selected || typeof selected !== "string") return; // user cancelled
+      await openPath(selected);
     } catch (e) {
       report(toDiagnostic(e, "could not open that file"), null);
     }
-  }, [tabs, report]);
+  }, [openPath, report]);
+
+  /**
+   * Point the project panel at another folder.
+   *
+   * There is no project file to create, so "new" is a folder chooser — and the
+   * platform's own dialog is where a new folder gets made, which is why this
+   * needs nothing else. Open tabs are left alone: they are files, and a file
+   * does not stop being open because the tree beside it moved.
+   */
+  const newProject = useCallback(async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (!selected || typeof selected !== "string") return; // user cancelled
+      setProjectRoot(selected);
+      setProjectVersion((v) => v + 1);
+      setSideOpen(true);
+      setSideTab("project");
+    } catch (e) {
+      report(toDiagnostic(e, "could not open that folder"), null);
+    }
+  }, [report]);
 
   /**
    * Evaluate the active tab.
@@ -280,14 +345,15 @@ function App() {
   // on every keystroke, so the listeners reach them through a ref and subscribe
   // once for the life of the app: re-subscribing is asynchronous, and a menu
   // click landing mid-swap could be heard by both the old listener and the new.
-  const fileActions = useRef({ newTab, openTab, saveTab });
-  fileActions.current = { newTab, openTab, saveTab };
+  const fileActions = useRef({ newTab, openTab, saveTab, newProject });
+  fileActions.current = { newTab, openTab, saveTab, newProject };
 
   useEffect(() => {
     const subscriptions = [
       listen("file-new", () => fileActions.current.newTab()),
       listen("file-open", () => void fileActions.current.openTab()),
       listen("file-save", () => void fileActions.current.saveTab()),
+      listen("project-new", () => void fileActions.current.newProject()),
     ];
     return () => {
       for (const sub of subscriptions) void sub.then((unlisten) => unlisten());
@@ -365,12 +431,12 @@ function App() {
           {/* On the left, for the panel on the left. Wears the number of
               problems so a run that failed is visible with the panel shut. */}
           <button
-            onClick={() => setProblemsOpen((open) => !open)}
-            title={problemsOpen ? "Hide problems" : "Show problems"}
-            aria-expanded={problemsOpen}
+            onClick={() => setSideOpen((open) => !open)}
+            title={sideOpen ? "Hide panel" : "Show panel"}
+            aria-expanded={sideOpen}
             className={
               "relative rounded-md p-1.5 transition-colors " +
-              (problemsOpen
+              (sideOpen
                 ? "bg-neutral-700 text-neutral-100 hover:bg-neutral-600"
                 : diagnostics.length > 0
                   ? "text-red-400 hover:bg-neutral-800 hover:text-red-300"
@@ -460,15 +526,33 @@ function App() {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <ProblemsPanel
-          open={problemsOpen}
-          width={problemsWidth}
-          onResizeStart={startProblemsResize}
-          status={runStatus}
-          diagnostics={diagnostics}
-          sourceTitle={tabs.find((t) => t.id === sourceTabId)?.title ?? null}
-          sourceIsActive={sourceTabId === activeId}
-          onReveal={revealDiagnostic}
+        <SidePanel
+          open={sideOpen}
+          width={sideWidth}
+          onResizeStart={startSideResize}
+          tab={sideTab}
+          onTabChange={setSideTab}
+          problemCount={diagnostics.length}
+          problems={
+            <ProblemsPanel
+              status={runStatus}
+              diagnostics={diagnostics}
+              sourceTitle={tabs.find((t) => t.id === sourceTabId)?.title ?? null}
+              sourceIsActive={sourceTabId === activeId}
+              onReveal={revealDiagnostic}
+            />
+          }
+          project={
+            <ProjectPanel
+              // Remounts the tree, which is how a refresh throws away every
+              // listing it is holding.
+              key={projectVersion}
+              root={projectRoot}
+              activePath={activeTab?.path ?? null}
+              onOpenFile={(path) => void openPath(path)}
+              onRefresh={() => setProjectVersion((v) => v + 1)}
+            />
+          }
         />
         <main className="min-h-0 min-w-0 flex-1">
           {activeTab ? (

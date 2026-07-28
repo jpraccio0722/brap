@@ -108,6 +108,39 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     select! { Token::Ident(s) => Ident(s) }.labelled("a name")
 }
 
+/// `{ let a = f * 2\n sin(a) }` — statements, then the expression the block is
+/// worth.
+///
+/// Takes the expression parser rather than calling `expr` itself so the copy
+/// inside `expr` can recurse through the recursive handle, while a function
+/// body — which is not inside an expression yet — can build its own.
+fn block<'a, I, E>(expr: E) -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+    E: Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone,
+{
+    let sep = just(Token::Term).repeated().at_least(1);
+
+    let stmt = choice((
+        expr.clone().map(Statement::Expr),
+        just(Token::Let)
+            .ignore_then(ident())
+            .then_ignore(just(Token::Assign))
+            .then(expr)
+            .map(|(name, value)| Statement::Let { name, value: Box::new(value) }),
+    ));
+
+    stmt.separated_by(sep)
+        .allow_leading()
+        .allow_trailing()
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
+        .try_map(|mut stmts, span| match stmts.pop() {
+            Some(Statement::Expr(tail)) => Ok(Expr::Block { stmts, tail: Box::new(tail) }),
+            _ => Err(Rich::custom(span, "a block must end in an expression")),
+        })
+}
+
 /// Read a program, or say what stopped it.
 ///
 /// Both failures carry a place in the source: the lexer's is the character it
@@ -247,8 +280,6 @@ fn expected_list(names: &[String]) -> Option<String> {
 fn expr<'a, I>() -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
 where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     recursive(|expr| {
-        let sep = just(Token::Term).repeated().at_least(1);
-
         let int = select! { Token::Num(n) => Expr::Num(n) }.labelled("a number");
         let var = ident().map(Expr::Var);
         let paren = expr.clone()
@@ -280,26 +311,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .then(args.clone().delimited_by(just(Token::ParensOpen), just(Token::ParensClose)))
             .map(|(func, args)| Expr::Call { func, args });
 
-        let stmt = choice((
-            expr.clone().map(Statement::Expr),
-            just(Token::Let)
-                .ignore_then(ident())
-                .then_ignore(just(Token::Assign))
-                .then(expr.clone())
-                .map(|(name, value)| Statement::Let { name, value: Box::new(value) }),
-        ));
-
-        let block = stmt.clone()
-            .separated_by(sep.clone())
-            .allow_leading()
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
-            .try_map(|mut stmts, span| match stmts.pop() {
-                Some(Statement::Expr(tail)) =>
-                    Ok(Expr::Block { stmts, tail: Box::new(tail) }),
-                _ => Err(Rich::custom(span, "a block must end in an expression")),
-            });
+        let block = block(expr.clone());
 
         let for_expr = just(Token::For)
             .ignore_then(ident())
@@ -459,11 +471,19 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         .collect::<Vec<_>>()
         .delimited_by(just(Token::ParensOpen), just(Token::ParensClose));
 
+    // Two spellings of one thing: `fn kick(f) = sin(f)` for a body that fits on
+    // the line, and `fn kick(f) { ... }` for one with statements in it. The
+    // braced form is the block expression the `=` form would have been handed,
+    // written without the `=` that would introduce it.
+    let body = choice((
+        just(Token::Assign).ignore_then(expr()),
+        block(expr()),
+    ));
+
     let function = just(Token::Function)
         .ignore_then(ident())
         .then(params)
-        .then_ignore(just(Token::Assign))
-        .then(expr())
+        .then(body)
         .map(|((name, params), body)| ScreeItem::Function { name, params, body });
 
     let let_item = just(Token::Let)
@@ -509,6 +529,76 @@ mod tests {
         }];
 
         assert_eq!(ast, expected);
+    }
+
+    /// The same function, braced. The body is the block the `=` form would
+    /// have been given explicitly, so it holds one expression and no statements.
+    #[test]
+    fn parses_a_braced_function_body() {
+        let ast = parse("fn add(a, b) { a + b }\n".to_string()).expect("should parse");
+
+        let expected = vec![ScreeItem::Function {
+            name: Ident("add".to_string()),
+            params: vec![
+                Param { name: Ident("a".to_string()), default: None },
+                Param { name: Ident("b".to_string()), default: None },
+            ],
+            body: Expr::Block {
+                stmts: Vec::new(),
+                tail: Box::new(Expr::Add { lhs: var("a"), rhs: var("b") }),
+            },
+        }];
+
+        assert_eq!(ast, expected);
+    }
+
+    /// The point of the braced form: statements ahead of the value, over lines.
+    #[test]
+    fn a_braced_body_holds_statements() {
+        let ast = parse(
+            "fn kick(f) {\n  let a = f * 2\n  sin(a)\n}\n".to_string()
+        ).expect("should parse");
+
+        let Some(ScreeItem::Function { body: Expr::Block { stmts, tail }, .. }) = ast.first()
+        else {
+            panic!("expected a function with a block body, got {ast:?}");
+        };
+        assert_eq!(stmts.len(), 1, "the `let` should be a statement of the block");
+        assert_eq!(**tail, Expr::Call {
+            func: Ident("sin".to_string()),
+            args: vec![Arg::positional(Expr::Var(Ident("a".to_string())))],
+        });
+    }
+
+    /// Defaults and the braced body are independent — one must not cost the
+    /// other, since both hang off the same `=`.
+    #[test]
+    fn a_braced_body_still_takes_parameter_defaults() {
+        let ast = parse("fn bass(n, cut = 800) { saw(n) }\n".to_string()).expect("should parse");
+
+        let Some(ScreeItem::Function { params, body, .. }) = ast.first() else {
+            panic!("expected a function, got {ast:?}");
+        };
+        assert_eq!(params[1].default, Some(Expr::Num(800.0)));
+        assert!(matches!(body, Expr::Block { .. }));
+    }
+
+    /// A block is worth its last expression, so there has to be one.
+    #[test]
+    fn an_empty_braced_body_is_an_error() {
+        assert!(parse("fn kick(f) { }\n".to_string()).is_err());
+        assert!(parse("fn kick(f) { let a = 1 }\n".to_string()).is_err());
+    }
+
+    /// Both forms mean the same thing to everything downstream — which is what
+    /// lets the body be a block without anything else knowing.
+    #[test]
+    fn both_function_forms_reach_the_same_value() {
+        let one_line = parse("fn f(a) = a * 2\nsin(f(4))\n".to_string()).expect("should parse");
+        let braced = parse("fn f(a) { a * 2 }\nsin(f(4))\n".to_string()).expect("should parse");
+
+        let graph_of = |ast| crate::lowerer::lower::lower_graph(&ast).expect("lower failed");
+        assert_eq!(graph_of(one_line).nodes, graph_of(braced).nodes);
     }
 
     /// The one argument list, parsed both ways at once.

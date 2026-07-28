@@ -5,11 +5,6 @@ import { STAGE_LABEL, type Diagnostic } from "./diagnostics";
 export type RunStatus = "idle" | "ok" | "error";
 
 interface ProblemsPanelProps {
-  open: boolean;
-  /** Pixels wide, as the drag handle has left it. */
-  width: number;
-  /** Grab handle for that drag, drawn along the panel's trailing edge. */
-  onResizeStart: (e: React.PointerEvent) => void;
   status: RunStatus;
   diagnostics: Diagnostic[];
   /** The tab the diagnostics came from, for the note below — the file being
@@ -100,75 +95,49 @@ function Problem({
  * The panel outlives the run — it keeps showing the last failure while it is
  * being fixed, and is only replaced by the next run's verdict. Like the
  * transport it stays mounted when hidden, so the hamburger is instant.
+ *
+ * This is one of the side panel's two tabs; the frame around it, including the
+ * count on the tab itself, belongs to `SidePanel`.
  */
 export function ProblemsPanel({
-  open,
-  width,
-  onResizeStart,
   status,
   diagnostics,
   sourceTitle,
   sourceIsActive,
   onReveal,
 }: ProblemsPanelProps) {
-  return (
-    <aside
-      style={{ width }}
-      className={
-        "relative shrink-0 flex-col border-r border-neutral-800 bg-neutral-950/40 " +
-        (open ? "flex" : "hidden")
-      }
-    >
-      <div className="flex items-baseline justify-between border-b border-neutral-800 px-4 py-2">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
-          Problems
-        </h2>
-        {diagnostics.length > 0 && (
-          <span className="font-mono text-xs text-red-400">{diagnostics.length}</span>
-        )}
-      </div>
-
-      <div className="min-h-0 flex-1 overflow-y-auto">
-        {diagnostics.length === 0 ? (
-          <div className="px-4 py-4 text-xs leading-relaxed text-neutral-500">
-            {status === "ok" ? (
-              <p className="text-emerald-500">Compiled. Nothing to report.</p>
-            ) : (
-              <p>
-                Nothing has failed yet. Run with{" "}
-                <span className="font-mono text-neutral-400">⌘,</span> and
-                anything the compiler refuses shows up here.
-              </p>
-            )}
-          </div>
+  if (diagnostics.length === 0) {
+    return (
+      <div className="px-4 py-4 text-xs leading-relaxed text-neutral-500">
+        {status === "ok" ? (
+          <p className="text-emerald-500">Compiled. Nothing to report.</p>
         ) : (
-          <>
-            {/* Which file failed only needs saying when it is not the one being
-                looked at — otherwise it is a label on the obvious. */}
-            {!sourceIsActive && sourceTitle !== null && (
-              <p className="border-b border-neutral-800 px-4 py-2 text-xs text-neutral-500">
-                from <span className="text-neutral-300">{sourceTitle}</span>
-              </p>
-            )}
-            {diagnostics.map((diagnostic, i) => (
-              <Problem
-                key={`${diagnostic.stage}-${diagnostic.line}-${i}`}
-                diagnostic={diagnostic}
-                onReveal={onReveal}
-              />
-            ))}
-          </>
+          <p>
+            Nothing has failed yet. Run with{" "}
+            <span className="font-mono text-neutral-400">⌘,</span> and anything
+            the compiler refuses shows up here.
+          </p>
         )}
       </div>
+    );
+  }
 
-      {/* Mirrors the transport's handle, on the edge that faces the editor. */}
-      <div
-        onPointerDown={onResizeStart}
-        title="Drag to resize"
-        role="separator"
-        aria-orientation="vertical"
-        className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize hover:bg-emerald-600/40 active:bg-emerald-600/60"
-      />
-    </aside>
+  return (
+    <>
+      {/* Which file failed only needs saying when it is not the one being
+          looked at — otherwise it is a label on the obvious. */}
+      {!sourceIsActive && sourceTitle !== null && (
+        <p className="border-b border-neutral-800 px-4 py-2 text-xs text-neutral-500">
+          from <span className="text-neutral-300">{sourceTitle}</span>
+        </p>
+      )}
+      {diagnostics.map((diagnostic, i) => (
+        <Problem
+          key={`${diagnostic.stage}-${diagnostic.line}-${i}`}
+          diagnostic={diagnostic}
+          onReveal={onReveal}
+        />
+      ))}
+    </>
   );
 }

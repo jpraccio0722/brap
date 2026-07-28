@@ -351,6 +351,33 @@ pub static UGENS: &[Ugen] = &[
         params: &["audio", "frequency", "q"],
         doc: "Constant-gain bandpass resonator.",
     },
+    // fundsp's reverbs are all stereo. scree's graph is mono end to end, so
+    // each one is wrapped: the signal feeds both inputs and the two outputs are
+    // averaged back down. They are wet-only — mix the dry signal yourself.
+    Ugen {
+        name: "reverb",
+        kind: NodeKind::Reverb,
+        params: &["audio", "room_size", "time", "damping"],
+        doc: "Reverb (32-channel FDN). `room_size` is in meters (10 is an average room), `time` is the decay to -60 dB in seconds, `damping` in 0..=1 rolls off the highs. Wet only: `x + reverb(x, 10, 3, 0.5) * 0.2`. All parameters except the audio input are constants.",
+    },
+    Ugen {
+        name: "reverb2",
+        kind: NodeKind::Reverb2,
+        params: &["audio", "room_size", "time", "diffusion", "modulation", "damping_cutoff"],
+        doc: "Hybrid FDN reverb — richer and more expensive than `reverb`. `room_size` is in meters and clamps to 10..=30, `diffusion` in 0..=1 thickens the tail, `modulation` around 1 adds movement (higher goes audibly Doppler), and `damping_cutoff` is the lowpass applied to each loop pass, in hertz. Wet only. All parameters except the audio input are constants.",
+    },
+    Ugen {
+        name: "reverb3",
+        kind: NodeKind::Reverb3,
+        params: &["audio", "time", "diffusion", "damping_cutoff"],
+        doc: "Allpass-loop reverb, with no room size — just `time` to -60 dB, `diffusion` in 0..=1, and a `damping_cutoff` in hertz applied to each loop pass. Wet only. All parameters except the audio input are constants.",
+    },
+    Ugen {
+        name: "reverb4",
+        kind: NodeKind::Reverb4,
+        params: &["audio", "room_size", "time"],
+        doc: "Reverb with a slow fade-in, for swells rather than rooms. `room_size` is in meters and is treated as at least 15; below that the delay times stop sounding like a space. Wet only. Both `room_size` and `time` are constants.",
+    },
     Ugen {
         name: "rossler",
         kind: NodeKind::Rossler,
@@ -658,6 +685,13 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
 /// is not a function at all — it is the note length, bound only inside a voice.
 pub static SPECIALS: &[ListBuiltin] = &[
     ListBuiltin {
+        name: "then",
+        params: &["play", "section"],
+        arities: &[2],
+        variadic: false,
+        doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called by the audio thread.",
+    },
+    ListBuiltin {
         name: "play",
         params: &["pattern", "instrument", "rate"],
         arities: &[2, 3],
@@ -677,6 +711,13 @@ pub static SPECIALS: &[ListBuiltin] = &[
         arities: &[3, 4],
         variadic: false,
         doc: "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two cycles. Lanes work as they do on `play`.",
+    },
+    ListBuiltin {
+        name: "play_all",
+        params: &["play"],
+        arities: &[1],
+        variadic: true,
+        doc: "Treat several plays that run at once as one section: `play_all(playn(verse, lead, 4), playn(bassline, bass, 4)).then(chorus)`. Every argument must be a `play_once`, `playn`, `play`, or another `play_all` — they all start together, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow.",
     },
     ListBuiltin {
         name: "dur",
@@ -879,7 +920,9 @@ mod tests {
             ("morph", 4), ("noise", 0), ("notch", 3), ("organ", 1),
             ("peak", 3), ("perc", 2), ("pink", 0), ("pinkpass", 1),
             ("pluck", 4), ("poly_pulse", 2), ("poly_saw", 1), ("poly_square", 1),
-            ("pulse", 2), ("ramp", 1), ("resonator", 3), ("rossler", 1),
+            ("pulse", 2), ("ramp", 1), ("resonator", 3),
+            ("reverb", 4), ("reverb2", 6), ("reverb3", 4), ("reverb4", 3),
+            ("rossler", 1),
             ("saw", 1), ("sin", 1), ("soft_saw", 1), ("square", 1),
             ("tap", 4), ("tick", 1), ("triangle", 1),
         ];
@@ -904,10 +947,15 @@ mod tests {
     fn the_table_and_the_lowerer_agree_on_the_play_family() {
         use crate::lowerer::lower::Lowerer;
         for b in SPECIALS {
+            // `dur` is a bound value rather than a call; `then` and `play_all`
+            // are intercepted on their own paths — everything else is a `play`.
+            let intercepted = Lowerer::is_play(b.name)
+                || Lowerer::is_then(b.name)
+                || Lowerer::is_play_all(b.name);
             assert_eq!(
-                Lowerer::is_play(b.name),
+                intercepted,
                 b.name != "dur",
-                "{} is a play to one of the two and not the other",
+                "{} is intercepted by one of the two and not the other",
                 b.name,
             );
         }

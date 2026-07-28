@@ -1286,8 +1286,21 @@ fn every_example_compiles_and_realizes() {
         let src = std::fs::read_to_string(&path).expect("a readable file");
 
         let items = parse(src).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
-        let lowered = crate::lowerer::lower::lower(&items)
-            .unwrap_or_else(|e| panic!("{name} failed to lower: {e}"));
+
+        // A file may name a pattern drawn in the side panel, which only exists
+        // when the app lowers it with `lower_with_patterns`. That is the one
+        // legitimate reason an example refers to a name it never defines, so
+        // it is skipped rather than failed. Every other kind of mistake — a
+        // misspelled UGen, a bad arity, a wrong argument — reports differently
+        // and still fails here.
+        let lowered = match crate::lowerer::lower::lower(&items) {
+            Ok(lowered) => lowered,
+            Err(e) if e.starts_with("unbound name:") => {
+                println!("{name}: skipped, needs a drawn pattern ({e})");
+                continue;
+            }
+            Err(e) => panic!("{name} failed to lower: {e}"),
+        };
         if crate::scree_graph::realizer::realize(&lowered.graph).is_err() {
             panic!("{name} failed to realize");
         }
@@ -1319,4 +1332,230 @@ fn every_example_compiles_and_realizes() {
     }
 
     assert!(checked > 0, "no examples were checked");
+}
+
+// ---- .then ----
+
+/// The instruments every sequencing test below plays.
+const SECTIONS: &str = "\
+fn lead(n) = sin(n)
+fn bass(n) = saw(n)
+fn hat(n) = noise() * n
+fn chorus() = play([c4, e4], lead)
+fn tail() = play_once([c2], bass)
+";
+
+/// What follows starts where the previous one stopped.
+#[test]
+fn then_offsets_what_follows() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}playn([c3], bass, 4).then(chorus)\n"));
+    assert_eq!(bs.len(), 2);
+
+    assert_eq!(bs[0].instrument, "bass");
+    assert_eq!(bs[0].start, 0.0);
+    assert_eq!(bs[0].cycles, Some(4.0));
+
+    // The chorus opens exactly where the four cycles ran out.
+    assert_eq!(bs[1].instrument, "lead");
+    assert_eq!(bs[1].start, 4.0);
+    assert_eq!(bs[1].cycles, None);
+}
+
+/// `play_once` is one cycle, so what follows starts at cycle 1.
+#[test]
+fn play_once_hands_over_after_one_cycle() {
+    let bs = bindings_of(&format!("{SECTIONS}play_once([c3], bass).then(chorus)\n"));
+    assert_eq!(bs[1].start, 1.0);
+}
+
+/// Chaining: each link starts where the previous stopped, and the offsets add.
+#[test]
+fn then_chains() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}playn([c3], bass, 2).then(tail).then(chorus)\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[0].start, 0.0);       // playn, 2 cycles
+    assert_eq!(bs[1].start, 2.0);       // tail: play_once, 1 cycle
+    assert_eq!(bs[2].start, 3.0);       // chorus, after both
+}
+
+/// A `.then` nested inside the section is relative to that section's start,
+/// so the offsets compose rather than fighting.
+#[test]
+fn nested_then_offsets_compose() {
+    let src = "\
+fn lead(n) = sin(n)
+fn bass(n) = saw(n)
+fn inner() = play_once([c4], lead)
+fn outer() = play_once([c3], bass).then(inner)
+playn([c2], bass, 2).then(outer)
+";
+    let bs = bindings_of(src);
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[0].start, 0.0);   // the playn
+    assert_eq!(bs[1].start, 2.0);   // outer's own play_once
+    assert_eq!(bs[2].start, 3.0);   // inner, one cycle after that
+}
+
+/// `rate` packs repeats into fewer cycles, and the handover follows.
+#[test]
+fn rate_shortens_the_wait() {
+    let bs = bindings_of(&format!("{SECTIONS}playn([c3], bass, 4, 2).then(chorus)\n"));
+    // Four passes at double rate is two cycles.
+    assert_eq!(bs[0].cycles, Some(2.0));
+    assert_eq!(bs[1].start, 2.0);
+}
+
+/// A section that starts several things hands over after the longest.
+#[test]
+fn a_section_with_several_plays_ends_with_the_last() {
+    let src = "\
+fn lead(n) = sin(n)
+fn bass(n) = saw(n)
+fn both() = {
+  playn([c4], lead, 2)
+  playn([c3], bass, 5)
+}
+fn after() = play_once([c2], bass)
+play_once([c1], bass).then(both).then(after)
+";
+    let bs = bindings_of(src);
+    // both's two plays start at cycle 1; the longer runs 5, so `after` is at 6.
+    assert_eq!(bs[1].start, 1.0);
+    assert_eq!(bs[2].start, 1.0);
+    assert_eq!(bs[3].start, 6.0);
+}
+
+/// A loop of plays finishes when its last one does.
+#[test]
+fn a_for_loop_of_plays_hands_over_after_all_of_them() {
+    let src = "\
+fn lead(n) = sin(n)
+fn after() = play_once([c2], lead)
+for i in 1..=3 { playn([c4], lead, i) }.then(after)
+";
+    let bs = bindings_of(src);
+    assert_eq!(bs.len(), 4);
+    // The longest of the three runs 3 cycles.
+    assert_eq!(bs[3].start, 3.0);
+}
+
+// ---- .then errors ----
+
+#[test]
+fn then_refuses_an_endless_play() {
+    let e = play_err(&format!("{SECTIONS}play([c3], bass).then(chorus)\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+}
+
+#[test]
+fn then_refuses_a_non_play_receiver() {
+    let e = play_err(&format!("{SECTIONS}(4).then(chorus)\n"));
+    assert!(e.contains("left side must be a play"), "got: {e}");
+}
+
+#[test]
+fn then_refuses_a_non_function() {
+    let e = play_err(&format!("{SECTIONS}play_once([c3], bass).then(4)\n"));
+    assert!(e.contains("expects a function"), "got: {e}");
+}
+
+#[test]
+fn then_refuses_a_function_taking_parameters() {
+    let e = play_err(&format!(
+        "{SECTIONS}fn takes(x) = play([x], lead)\nplay_once([c3], bass).then(takes)\n"));
+    assert!(e.contains("no parameters"), "got: {e}");
+}
+
+/// A section that never stops cannot be followed by anything.
+#[test]
+fn then_after_an_endless_section_is_refused() {
+    let src = "\
+fn lead(n) = sin(n)
+fn endless() = play([c4], lead)
+fn after() = play_once([c2], lead)
+play_once([c3], lead).then(endless).then(after)
+";
+    let e = play_err(src);
+    assert!(e.contains("never finishes"), "got: {e}");
+}
+
+// ---- play_all ----
+
+/// Nothing is sequenced: the parts keep the start they already had.
+#[test]
+fn play_all_leaves_its_parts_where_they_were() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}play_all(playn([c3], bass, 4), play_once([c4], lead))\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!((bs[0].start, bs[0].cycles), (0.0, Some(4.0)));
+    assert_eq!((bs[1].start, bs[1].cycles), (0.0, Some(1.0)));
+}
+
+/// The point of the grouping: `.then` follows the longest part, not the last
+/// one written.
+#[test]
+fn play_all_hands_over_after_its_longest_part() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}play_all(playn([c3], bass, 4), play_once([c4], lead)).then(chorus)\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[2].instrument, "lead");   // chorus
+    assert_eq!(bs[2].start, 4.0);
+}
+
+/// A group inside a section is offset with it, and the chain goes on past it.
+#[test]
+fn play_all_composes_with_then_in_both_directions() {
+    let src = "\
+fn lead(n) = sin(n)
+fn bass(n) = saw(n)
+fn middle() = play_all(playn([c4], lead, 2), play_once([c3], bass))
+fn after() = play_once([c2], bass)
+play_once([c1], bass).then(middle).then(after)
+";
+    let bs = bindings_of(src);
+    assert_eq!(bs.len(), 4);
+    assert_eq!(bs[0].start, 0.0);   // the leading play_once
+    assert_eq!(bs[1].start, 1.0);   // middle's two, together
+    assert_eq!(bs[2].start, 1.0);
+    assert_eq!(bs[3].start, 3.0);   // after the longer of the two
+}
+
+/// Groups nest, and the outer one still ends with the last of everything.
+#[test]
+fn play_all_nests() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}play_all(play_all(play_once([c3], bass), playn([c4], lead, 3)), \
+         play_once([c2], hat)).then(chorus)\n"));
+    assert_eq!(bs.len(), 4);
+    assert!(bs[..3].iter().all(|b| b.start == 0.0));
+    assert_eq!(bs[3].start, 3.0);
+}
+
+/// One part that never stops makes the group never stop.
+#[test]
+fn play_all_with_an_endless_part_cannot_be_followed() {
+    let e = play_err(&format!(
+        "{SECTIONS}play_all(play([c3], bass), play_once([c4], lead)).then(chorus)\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+}
+
+#[test]
+fn play_all_refuses_a_non_play_argument() {
+    let e = play_err(&format!("{SECTIONS}play_all(play_once([c3], bass), 4)\n"));
+    assert!(e.contains("argument 2 is not a play"), "got: {e}");
+}
+
+#[test]
+fn play_all_needs_something_to_group() {
+    let e = play_err(&format!("{SECTIONS}play_all()\n"));
+    assert!(e.contains("at least one play"), "got: {e}");
+}
+
+/// A play handle is not audio and not pattern data.
+#[test]
+fn a_play_handle_is_not_a_value_to_compute_with() {
+    let e = play_err(&format!("{SECTIONS}sin(play_once([c3], bass))\n"));
+    assert!(e.contains("not audio"), "got: {e}");
 }

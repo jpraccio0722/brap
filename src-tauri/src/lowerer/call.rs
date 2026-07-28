@@ -41,6 +41,19 @@ impl Lowerer {
                 "{}: named arguments only work on a user `fn`", func.0));
         }
 
+        // `then` needs its arguments evaluated — unlike `play`, which needs
+        // its instrument syntactically — so it is dispatched here rather than
+        // above.
+        if Lowerer::is_then(&func.0) {
+            return self.then(&arg_vals);
+        }
+
+        // Likewise `play_all`, which only gathers handles its arguments have
+        // already produced by being evaluated above.
+        if Lowerer::is_play_all(&func.0) {
+            return self.play_all(&arg_vals);
+        }
+
         if let Some(v) = self.list_builtin(&func.0, &arg_vals)? {
             return Ok(v);
         }

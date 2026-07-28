@@ -22,6 +22,10 @@ pub struct Binding {
     /// Structure, and the instrument's first parameter.
     pub pattern: Pattern,
     pub lanes: Vec<Lane>,
+    /// Cycles to wait after the origin's downbeat before this binding starts.
+    /// Zero for everything `play` writes directly; `.then` sets it so what
+    /// follows begins where the previous one stopped.
+    pub start: f64,
     /// How long this binding sounds for, in cycles, counted from the eval that
     /// published it. `None` is `play`: it loops for as long as it is playing.
     /// `play_once` and `playn` set it, and it is measured in cycles rather than
@@ -62,14 +66,9 @@ impl Patterns {
 
     pub fn query(&self, span: Span) -> Vec<BoundEvent> {
         self.bindings.iter().flat_map(|b| {
-            let span = match b.cycles {
-                None => span,
-                Some(cycles) => match self.window(cycles, span) {
-                    Some(s) => s,
-                    // Bounded, and this span is either before it opens or past
-                    // where it closed.
-                    None => return Vec::new(),
-                },
+            // Before it opens, or past where it closed.
+            let Some(span) = self.window(b.start, b.cycles, span) else {
+                return Vec::new();
             };
             b.pattern.query(span).into_iter().map(|mut event| {
                 let mut args = Vec::with_capacity(b.lanes.len());
@@ -99,14 +98,22 @@ impl Patterns {
     /// heard from its first step rather than joining halfway through. Playing
     /// from silence puts the origin a lead-in *before* cycle 0, which rounds up
     /// to 0 — the one-shot starts at once.
-    fn window(&self, cycles: f64, span: Span) -> Option<Span> {
-        // Also catches NaN, which would otherwise open a window nothing closes.
-        if !(cycles > 0.0) {
-            return None;
+    fn window(&self, start: f64, cycles: Option<f64>, span: Span) -> Option<Span> {
+        // Plain `play` with nothing before it joins the performance already in
+        // progress, so a re-eval mid-cycle does not gap until the next downbeat.
+        if start == 0.0 && cycles.is_none() {
+            return Some(span);
         }
-        let start = self.origin.ceil();
-        let begin = span.begin.max(start);
-        let end = span.end.min(start + cycles);
+
+        let opens = self.origin.ceil() + start;
+        let begin = span.begin.max(opens);
+        let end = match cycles {
+            None => span.end,
+            // Also catches NaN, which would otherwise open a window nothing
+            // closes.
+            Some(c) if c > 0.0 => span.end.min(opens + c),
+            Some(_) => return None,
+        };
         (end > begin).then(|| Span::new(begin, end))
     }
 }
@@ -122,12 +129,14 @@ mod tests {
                     instrument: "kick".into(),
                     pattern: Pattern::steps([Some(1.0), None]),
                     lanes: Vec::new(),
+                    start: 0.0,
                     cycles: None,
                 },
                 Binding {
                     instrument: "hat".into(),
                     pattern: Pattern::steps([Some(1.0), Some(1.0)]),
                     lanes: Vec::new(),
+                    start: 0.0,
                     cycles: None,
                 },
             ],
@@ -151,7 +160,7 @@ mod tests {
 
     fn bound(pattern: Pattern, lanes: Vec<Lane>) -> Vec<super::BoundEvent> {
         Patterns {
-            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, cycles: None }],
+            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None }],
             ..Default::default()
         }
         .query(Span::new(0.0, 1.0))
@@ -235,6 +244,7 @@ mod tests {
                 instrument: "i".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
+                start: 0.0,
                 cycles,
             }],
             origin,
@@ -311,12 +321,14 @@ mod tests {
                     instrument: "once".into(),
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
+                    start: 0.0,
                     cycles: Some(1.0),
                 },
                 Binding {
                     instrument: "loop".into(),
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
+                    start: 0.0,
                     cycles: None,
                 },
             ],
@@ -339,5 +351,78 @@ mod tests {
         );
 
         assert_eq!(evs[0].args, vec![("cut".into(), 400.0), ("amp".into(), 0.8)]);
+    }
+
+    // ---- sequenced bindings ----
+
+    fn started(start: f64, cycles: Option<f64>, span: Span) -> Vec<f64> {
+        Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::steps([Some(1.0), Some(2.0)]),
+                lanes: Vec::new(),
+                start,
+                cycles,
+            }],
+            origin: 0.0,
+        }
+        .query(span)
+        .iter()
+        .map(|e| e.event.begin)
+        .collect()
+    }
+
+    /// What `.then` writes: silent until its offset, then playing normally.
+    #[test]
+    fn a_started_binding_waits_for_its_offset() {
+        assert!(started(4.0, None, Span::new(0.0, 4.0)).is_empty());
+        assert_eq!(started(4.0, None, Span::new(0.0, 5.0)), vec![4.0, 4.5]);
+        assert_eq!(started(4.0, None, Span::new(9.0, 10.0)), vec![9.0, 9.5]);
+    }
+
+    /// An offset one-shot sounds for its own count, measured from its start.
+    #[test]
+    fn a_started_one_shot_runs_from_where_it_opens() {
+        assert!(started(2.0, Some(1.0), Span::new(0.0, 2.0)).is_empty());
+        assert_eq!(started(2.0, Some(1.0), Span::new(0.0, 8.0)), vec![2.0, 2.5]);
+    }
+
+    /// The scheduler queries in small spans; a sequenced binding has to be
+    /// assembled from pieces exactly as one big query would have it.
+    #[test]
+    fn a_sequenced_window_queried_in_pieces_matches_one_query() {
+        let whole = started(2.0, Some(2.0), Span::new(0.0, 8.0));
+
+        let mut pieced = Vec::new();
+        let mut t = 0.0;
+        while t < 8.0 {
+            pieced.extend(started(2.0, Some(2.0), Span::new(t, t + 0.13)));
+            t += 0.13;
+        }
+
+        assert_eq!(whole, pieced);
+    }
+
+    /// Sequencing counts from the origin's downbeat, like a one-shot does, so
+    /// a chain dropped into a running performance stays on the grid.
+    #[test]
+    fn an_offset_is_measured_from_the_downbeat() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::steps([Some(1.0)]),
+                lanes: Vec::new(),
+                start: 2.0,
+                cycles: Some(1.0),
+            }],
+            origin: 3.2,
+        };
+        // Origin 3.2 rounds up to 4, plus two cycles of waiting.
+        let onsets: Vec<f64> = pats
+            .query(Span::new(3.2, 9.0))
+            .iter()
+            .map(|e| e.event.begin)
+            .collect();
+        assert_eq!(onsets, vec![6.0]);
     }
 }

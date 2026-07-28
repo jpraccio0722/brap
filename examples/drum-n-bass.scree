@@ -1,0 +1,22 @@
+fn kick() = {
+  let sweep = 50 + 150 * perc(0.001, 0.05)
+  let click = noise() * perc(0.001, 0.006)
+  sin(sweep) * perc(0.002, 0.4) * 0.9 + click * 0.1
+}
+
+fn bass(f) {
+  (((square(f.m2h()) + (square(f.m2h()*2) * 0.4)) * 0.5) * env(0.1, 0.8, 0.2, 0.1, dur+0.3))  >> lowpass(400, 0.5) >> clip()
+}
+
+fn hat() = noise() * perc(0.001, 0.035) * 0.25 >> highpass(7000, 0.7)
+
+fn lead(f) {
+  let dry = triangle(f.m2h()) * env(0.01, 0.08, 0.6, 0.05, dur) * 1.2
+  dry + delay(dry, 0.15) >> highpass(1200, 0.9)
+} 
+
+play([\, `, `, \, \, `, \, `], kick)
+
+play(hhpat, hat, 2)
+play([df2, `, `, df3, `, df2, `, af2], bass)
+play([af4, bf4, `, cf5, `, bf4, gf4, `], lead)

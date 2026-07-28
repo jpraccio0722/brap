@@ -190,6 +190,63 @@ fn read_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// One entry in a project directory, as the project panel draws it.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Entry {
+    name: String,
+    /// Absolute, so a click can open it without knowing where it came from.
+    path: String,
+    is_dir: bool,
+}
+
+/// Where the project panel opens: the directory the app was launched from.
+///
+/// A project here is nothing more than a folder, so this is the whole of the
+/// default one. File ▸ New Project… replaces it with any other.
+#[tauri::command]
+fn project_root() -> Result<String, String> {
+    std::env::current_dir()
+        .map_err(|e| e.to_string())?
+        .into_os_string()
+        .into_string()
+        .map_err(|p| format!("{} is not valid UTF-8", p.to_string_lossy()))
+}
+
+/// List one directory, for the project tree.
+///
+/// One level deep on purpose: the tree asks again when a folder is opened, so
+/// a project with a `target/` or `node_modules/` in it costs nothing until
+/// somebody actually looks inside one.
+#[tauri::command]
+fn list_dir(path: String) -> Result<Vec<Entry>, String> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(&path).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let full = entry.path();
+        // Follows symlinks, so a link to a folder opens like the folder.
+        let is_dir = full.is_dir();
+        // A name or path that isn't text is one the editor could not open
+        // either, so it is left out rather than drawn as mojibake.
+        if let (Some(name), Some(path)) = (entry.file_name().to_str(), full.to_str()) {
+            entries.push(Entry {
+                name: name.to_string(),
+                path: path.to_string(),
+                is_dir,
+            });
+        }
+    }
+
+    // Folders first, then by name, the way a file browser reads.
+    entries.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(entries)
+}
+
 /// The language's callable surface, for the editor's highlighting, completion
 /// and signature help.
 ///
@@ -205,10 +262,11 @@ fn language_metadata() -> lang::LanguageMetadata {
 const MENU_NEW: &str = "file-new";
 const MENU_OPEN: &str = "file-open";
 const MENU_SAVE: &str = "file-save";
+const MENU_NEW_PROJECT: &str = "project-new";
 
 /// Every id the File menu can raise. The event handler forwards these and
 /// ignores anything else, so the platform's own items keep working.
-const FILE_ITEMS: [&str; 3] = [MENU_NEW, MENU_OPEN, MENU_SAVE];
+const FILE_ITEMS: [&str; 4] = [MENU_NEW, MENU_OPEN, MENU_SAVE, MENU_NEW_PROJECT];
 
 /// The platform's default menu with New, Open and Save added to the top of
 /// File. Each one carries the accelerator the toolbar buttons used to advertise.
@@ -221,12 +279,20 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let new_item = MenuItem::with_id(app, MENU_NEW, "New", true, Some("CmdOrCtrl+N"))?;
     let open_item = MenuItem::with_id(app, MENU_OPEN, "Open…", true, Some("CmdOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, MENU_SAVE, "Save", true, Some("CmdOrCtrl+S"))?;
+    // No accelerator: picking a project is a once-a-session act, and the
+    // obvious shortcuts are all spoken for by the file items above.
+    let new_project_item =
+        MenuItem::with_id(app, MENU_NEW_PROJECT, "New Project…", true, None::<&str>)?;
 
-    // Saving is a different kind of act from starting or fetching a file, and
-    // the trailing rule keeps all three off whatever the platform put in File.
-    let items: [&dyn IsMenuItem<tauri::Wry>; 5] = [
+    // Three groups, because there are three kinds of act here: making or
+    // fetching a file, choosing which folder the project panel shows, and
+    // saving. The trailing rule keeps all of it off whatever the platform put
+    // in File.
+    let items: [&dyn IsMenuItem<tauri::Wry>; 7] = [
         &new_item,
         &open_item,
+        &PredefinedMenuItem::separator(app)?,
+        &new_project_item,
         &PredefinedMenuItem::separator(app)?,
         &save_item,
         &PredefinedMenuItem::separator(app)?,
@@ -241,7 +307,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         Some(file) => file.insert_items(&items, 0)?,
         // No File submenu on this platform's default: make one. Nothing to sit
         // below it, so the trailing separator goes.
-        None => menu.append(&Submenu::with_items(app, "File", true, &items[..4])?)?,
+        None => menu.append(&Submenu::with_items(app, "File", true, &items[..6])?)?,
     }
 
     Ok(menu)
@@ -268,6 +334,8 @@ pub fn run() {
             set_master_volume,
             save_file,
             read_file,
+            project_root,
+            list_dir,
             language_metadata
         ])
         .setup(|app| {
