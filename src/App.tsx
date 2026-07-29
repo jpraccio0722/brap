@@ -17,7 +17,19 @@ import { ProjectPanel } from "./ProjectPanel";
 import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
-import { toWire, type GraphicalPattern } from "./patterns";
+import { fromWire, toWire, type GraphicalPattern, type WirePattern } from "./patterns";
+
+/** A project's drawn patterns, as `read_patterns` returns them. */
+interface PatternsFile {
+  /** Absolute path of the project's `patterns.scree`. */
+  path: string;
+  patterns: WirePattern[];
+}
+
+/** How long the panel waits before writing a change out. Long enough that
+ *  dragging across a row is one write, short enough to be over before anyone
+ *  reaches for the play key. */
+const PATTERN_SAVE_DELAY = 400;
 
 interface Tab {
   id: string;
@@ -118,9 +130,20 @@ function App() {
   // may well have moved to another file by the time they are read.
   const [sourceTabId, setSourceTabId] = useState<string | null>(null);
 
-  // Drawn patterns belong to the session rather than to any one tab: they are
-  // named bindings the program can reach for, like the transport is.
+  // Drawn patterns belong to the project rather than to any one tab: they live
+  // in its `patterns.scree`, which every file in the project can name without
+  // importing. The panel is that file's editor — it reads it when a project
+  // opens and writes it as you draw.
   const [patterns, setPatterns] = useState<GraphicalPattern[]>([]);
+  // Where that file is, as the backend composes it. Kept so the panel can
+  // recognise the file when it is opened as an ordinary tab.
+  const [patternsPath, setPatternsPath] = useState<string | null>(null);
+  // The project whose patterns the panel is currently holding, and what that
+  // project's file says. Together they are the guard on writing: the panel
+  // never writes to a project it has not successfully read, so a file it could
+  // not parse is left alone rather than overwritten with an empty grid.
+  const patternsFrom = useRef<string | null>(null);
+  const patternsOnDisk = useRef<string | null>(null);
 
   // A project is a folder and nothing else. It opens on the directory the app
   // was launched from and follows whatever File ▸ New Project… picks after
@@ -179,6 +202,71 @@ function App() {
       live = false;
     };
   }, []);
+
+  // Which project the panel's rows belong to, for the load below to check
+  // against when it finally answers: opening two projects quickly must not
+  // leave the first one's answer on screen.
+  const projectRootRef = useRef(projectRoot);
+  projectRootRef.current = projectRoot;
+
+  /**
+   * Read a project's drawn patterns into the panel.
+   *
+   * A project with no patterns file simply has none. A file that cannot be
+   * read is a failure worth showing, and it also stops the panel writing:
+   * showing an empty grid over a file we could not parse, and then saving that
+   * grid over it, is how somebody's work disappears.
+   */
+  const loadPatterns = useCallback(
+    async (root: string) => {
+      try {
+        const file = await invoke<PatternsFile>("read_patterns", { root });
+        if (projectRootRef.current !== root) return; // the project moved on
+        setPatternsPath(file.path);
+        setPatterns(fromWire(file.patterns));
+        patternsOnDisk.current = JSON.stringify(file.patterns);
+        patternsFrom.current = root;
+      } catch (e) {
+        if (projectRootRef.current !== root) return;
+        // Cleared rather than left showing: rows from another project would
+        // be played by this one, since an eval sends whatever the panel holds.
+        setPatterns([]);
+        patternsFrom.current = null;
+        report(toDiagnostic(e, "could not read this project's patterns"), null);
+      }
+    },
+    [report],
+  );
+
+  // On open, and again whenever the project tree is refreshed — which is the
+  // way to pick up a patterns file changed outside the app.
+  useEffect(() => {
+    if (projectRoot === null) return;
+    void loadPatterns(projectRoot);
+  }, [projectRoot, projectVersion, loadPatterns]);
+
+  // And back out again as the panel is drawn in. Debounced, because dragging
+  // across a row is a dozen state changes and one edit.
+  useEffect(() => {
+    if (projectRoot === null || patternsFrom.current !== projectRoot) return;
+
+    const wire = toWire(patterns);
+    const json = JSON.stringify(wire);
+    if (json === patternsOnDisk.current) return; // the file already says this
+
+    const timer = setTimeout(() => {
+      invoke<string>("write_patterns", { root: projectRoot, patterns: wire })
+        .then((path) => {
+          patternsOnDisk.current = json;
+          setPatternsPath(path);
+        })
+        // Left un-synced on purpose, so the next change tries again. The music
+        // is unaffected: an eval sends the panel's rows with the code.
+        .catch((e) => report(toDiagnostic(e, "could not save the patterns"), null));
+    }, PATTERN_SAVE_DELAY);
+
+    return () => clearTimeout(timer);
+  }, [patterns, projectRoot, report]);
 
   // The completion source reads the drawn patterns through a ref so a rename
   // in the panel shows up in the next completion without touching the
@@ -299,14 +387,26 @@ function App() {
     try {
       // The drawn patterns go with the code: they are bindings the program can
       // name, and an eval is the only moment they mean anything.
-      await invoke("run_code", { code: activeTab.content, patterns: toWire(patterns) });
+      //
+      // So does the workspace, for the same reason: a `use` resolves against
+      // the folder this tab is saved in. What it finds there is what is on
+      // disk, so a module edited in another tab is heard once it is saved.
+      await invoke("run_code", {
+        code: activeTab.content,
+        // Null while the panel has nothing to say about this project — before
+        // its file has been read, or after a read that failed. An empty panel
+        // that *has* read the project is an empty list, and means it: only
+        // that may hide a patterns file sitting on disk.
+        patterns: patternsFrom.current === projectRoot ? toWire(patterns) : null,
+        workspace: { path: activeTab.path, root: projectRoot },
+      });
       setDiagnostics([]);
       setRunStatus("ok");
       setSourceTabId(tabId);
     } catch (e) {
       report(toDiagnostic(e), tabId);
     }
-  }, [activeTab, patterns, report]);
+  }, [activeTab, patterns, projectRoot, report]);
 
   const stop = useCallback(async () => {
     try {
@@ -335,11 +435,18 @@ function App() {
             : t,
         ),
       );
+
+      // The patterns file has two editors — the panel and, since it is an
+      // ordinary scree file, a tab. Saving it in one updates the other, so
+      // they cannot drift apart without somebody watching it happen.
+      if (savedPath === patternsPath && projectRoot !== null) {
+        await loadPatterns(projectRoot);
+      }
     } catch (e) {
       // Left dirty on purpose: the tab still differs from what is on disk.
       report(toDiagnostic(e, `could not save ${tab.title}`), tab.id);
     }
-  }, [activeTab, report]);
+  }, [activeTab, patternsPath, projectRoot, loadPatterns, report]);
 
   // The File menu's items arrive as events. Their handlers take new identities
   // on every keystroke, so the listeners reach them through a ref and subscribe
@@ -370,9 +477,13 @@ function App() {
   const [editor, setEditor] = useState<{ tabId: string; view: EditorView } | null>(null);
   const activeView = editor && editor.tabId === activeId ? editor.view : null;
 
+  // Only the ones about the file that was run. A line number from an imported
+  // module means nothing in this buffer, and marking it would be pointing at
+  // innocent code.
   const errorLines = useMemo(
     () =>
       diagnostics
+        .filter((d) => d.file === null)
         .map((d) => d.line)
         .filter((line): line is number => line !== null),
     [diagnostics],
@@ -393,10 +504,18 @@ function App() {
 
   const revealDiagnostic = useCallback(
     (diagnostic: Diagnostic) => {
+      // A diagnostic from an imported module is about that file, so the click
+      // opens it. The jump waits for the open: until the tab exists there is
+      // no editor to move the cursor in, and moving it in the old one would
+      // put it on an unrelated line.
+      if (diagnostic.file !== null) {
+        void openPath(diagnostic.file).then(() => setPendingReveal(diagnostic));
+        return;
+      }
       if (sourceTabId && sourceTabId !== activeId) setActiveId(sourceTabId);
       setPendingReveal(diagnostic);
     },
-    [sourceTabId, activeId],
+    [openPath, sourceTabId, activeId],
   );
 
   useEffect(() => {
@@ -588,6 +707,7 @@ function App() {
           stop={stop}
           patterns={patterns}
           onPatternsChange={setPatterns}
+          patternsPath={patternsPath}
         />
       </div>
     </div>

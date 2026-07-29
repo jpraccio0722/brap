@@ -105,6 +105,17 @@ pub enum Token {
     #[token(")")]
     ParensClose,
 
+    /// The separator in a module path: `drums::kick`. Two characters, so it
+    /// wins over `:` by longest match and a named argument still lexes.
+    #[token("::")]
+    PathSep,
+
+    /// `use drums::*` — every name a module defines. Lexed whole rather than as
+    /// `::` then `*` so a line ending in one is recognisably over: a trailing
+    /// `*` otherwise reads as a multiplication waiting for its right side.
+    #[token("::*")]
+    PathGlob,
+
     /// A rest inside a pattern: `[220, `, 330, `]`.
     #[token("`")]
     Rest,
@@ -124,6 +135,9 @@ pub enum Token {
 
     #[token("-")]
     Sub,
+
+    #[token("use")]
+    Use,
 
     Term,
 }
@@ -166,12 +180,15 @@ impl fmt::Display for Token {
             Token::Num(n) => return write!(f, "{n}"),
             Token::ParensOpen => "(",
             Token::ParensClose => ")",
+            Token::PathSep => "::",
+            Token::PathGlob => "::*",
             Token::Rest => "`",
             Token::Trigger => "\\",
             Token::Percent => "%",
             Token::Semi => ";",
             Token::ShiftRight => ">>",
             Token::Sub => "-",
+            Token::Use => "use",
             // Never written down: the lexer inserts it at the end of a line
             // that stands on its own, so name it the way a reader would.
             Token::Term => "the end of the line",
@@ -192,7 +209,9 @@ pub fn insert_terminators(raw: Vec<(Token, Span)>) -> (Vec<Token>, Vec<Span>) {
     fn can_end(t: &Token) -> bool {
         matches!(t,
             Token::Ident(_) | Token::Num(_) | Token::Rest | Token::Trigger |
-            Token::BraceClose | Token::BracketClose | Token::ParensClose
+            Token::BraceClose | Token::BracketClose | Token::ParensClose |
+            // Only ever the last token of a `use`, and nothing can follow it.
+            Token::PathGlob
         )
     }
 
@@ -206,6 +225,7 @@ pub fn insert_terminators(raw: Vec<(Token, Span)>) -> (Vec<Token>, Vec<Span>) {
             Token::Comma | Token::Div | Token::Dot | Token::DotDotEq |
             Token::Else | Token::EqEq | Token::Ge | Token::Gt |
             Token::Le | Token::Lt | Token::Mul | Token::Ne |
+            Token::PathSep | Token::PathGlob |
             Token::Percent | Token::ShiftRight | Token::Sub
         )
     }

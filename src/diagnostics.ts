@@ -8,7 +8,13 @@
  */
 
 /** Which pass refused the program. */
-export type Stage = "lex" | "parse" | "lower" | "realize" | "engine";
+export type Stage =
+  | "lex"
+  | "parse"
+  | "import"
+  | "lower"
+  | "realize"
+  | "engine";
 
 export interface Diagnostic {
   stage: Stage;
@@ -19,9 +25,20 @@ export interface Diagnostic {
   column: number | null;
   /** The source line the position falls on, as it was when the run happened. */
   snippet: string | null;
+  /** The imported file the position is in, absolute. Null — which is every
+   *  diagnostic a program without imports can produce — means the file that
+   *  was run, which the editor is already showing. */
+  file: string | null;
 }
 
-const STAGES: Stage[] = ["lex", "parse", "lower", "realize", "engine"];
+const STAGES: Stage[] = [
+  "lex",
+  "parse",
+  "import",
+  "lower",
+  "realize",
+  "engine",
+];
 
 /**
  * The badge each stage wears in the panel.
@@ -33,6 +50,7 @@ const STAGES: Stage[] = ["lex", "parse", "lower", "realize", "engine"];
 export const STAGE_LABEL: Record<Stage, string> = {
   lex: "syntax",
   parse: "syntax",
+  import: "import",
   lower: "compile",
   realize: "audio graph",
   // Broader here than the backend's own name for it: this side also files a
@@ -82,6 +100,7 @@ export function toDiagnostic(error: unknown, fallback?: string): Diagnostic {
         ? raw.column
         : null,
       snippet: typeof raw.snippet === "string" ? raw.snippet : null,
+      file: typeof raw.file === "string" ? raw.file : null,
     };
   }
 
@@ -98,5 +117,6 @@ export function toDiagnostic(error: unknown, fallback?: string): Diagnostic {
     line: null,
     column: null,
     snippet: null,
+    file: null,
   };
 }

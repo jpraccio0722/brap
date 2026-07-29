@@ -29,6 +29,11 @@ function caretLine(snippet: string, column: number): string {
   return [...upto].map((ch) => (ch === "\t" ? "\t" : " ")).join("") + "^";
 }
 
+/** The file name from an absolute path, for a label that has to fit. */
+function basename(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
 function Problem({
   diagnostic,
   onReveal,
@@ -36,7 +41,9 @@ function Problem({
   diagnostic: Diagnostic;
   onReveal: (diagnostic: Diagnostic) => void;
 }) {
-  const { stage, message, line, column, snippet } = diagnostic;
+  const { stage, message, line, column, snippet, file } = diagnostic;
+  // A position in an imported file is still somewhere to go: the click opens
+  // that file rather than moving within this one.
   const locatable = line !== null;
 
   const body = (
@@ -45,6 +52,13 @@ function Problem({
         <span className="rounded bg-red-950 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-red-300">
           {STAGE_LABEL[stage]}
         </span>
+        {/* Only imported files are named. An unnamed diagnostic is in the file
+            that was run, which the panel already says at the top. */}
+        {file !== null && (
+          <span className="truncate font-mono text-xs text-neutral-300" title={file}>
+            {basename(file)}
+          </span>
+        )}
         {locatable && (
           <span className="font-mono text-xs text-neutral-400">
             line {line}
@@ -74,7 +88,7 @@ function Problem({
   return locatable ? (
     <button
       onClick={() => onReveal(diagnostic)}
-      title="Go to this line"
+      title={file === null ? "Go to this line" : `Open ${basename(file)} here`}
       className="w-full border-b border-neutral-800 px-4 py-3 text-left transition-colors hover:bg-neutral-900"
     >
       {body}

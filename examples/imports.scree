@@ -1,0 +1,25 @@
+// Imports — the same kit, borrowed three ways.
+//
+// A `use` path is a file next to this one: `kit` is `kit.scree`, and
+// `lib::kit` would be `lib/kit.scree`. Save this file somewhere before running
+// it — a `use` looks in the folder the file is in, so it needs one.
+
+// The whole module, under its own name.
+use kit
+
+// One name, unqualified — and one under another name, because `hat` is a
+// perfectly good thing to want to call something else.
+use kit::{snare, hat as tick}
+
+fn bass(n) = {
+  let hz = n.m2h
+  let osc = saw(hz) + saw(hz * 2) * 0.5
+  (osc * env(0.005, 0.3, 0.5, 0.06, dur)).lowpass(660, 0.7) * 0.5
+}
+
+// Qualified, plain, and renamed: three spellings, one kit.
+play([\, `, \, `], kit::kick)
+play([`, \], snare)
+play([\, \, \, \, \, \, \, \], tick, 1, open: [0, 0, 0, 1])
+
+play([a2, `, a2, `, e4, `, a2, g2, `], bass, 1.25)

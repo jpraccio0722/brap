@@ -14,6 +14,58 @@ npm install && npm run tauri dev
 ## Step by step tutorial
 
 
+## Imports
+
+A file can use another file's definitions. The spelling is Rust's:
+
+```rust
+use kit                      // the module, as kit::kick, kit::snare
+use kit as k                 // the same, as k::kick
+use kit::kick                // one name, on its own
+use kit::{kick, hat as tick} // several, renamed where you like
+use kit::*                   // everything the file defines
+```
+
+**A `use` does not run the file it names.** Its `fn`s and `let`s come across;
+Top level expressions and `play`s in the imported file do not run.
+
+Imports resolve relative to the file on disk, and read what is saved: save a
+module before playing a file that uses it.
+
+Everything else follows from names. An imported `fn` is an instrument like any
+other, qualified or not:
+
+```rust
+play([\, `, \, `], kit::kick)
+```
+
+
+## Drawn patterns
+
+The right-hand panel draws patterns on a grid: click a cell to walk it through
+rest → trigger → pitch. Each row has a name, and that name is what the editor
+plays:
+
+```rust
+play(hats, hat)
+```
+
+Rows are saved with the project, in a `patterns.scree` beside your files:
+
+```rust
+let hats = [\, `, \, `]
+let riff = [c4, e4, `, g4]
+```
+
+That file is folded into every program the project runs, so a drawn pattern
+needs no `use` — it is simply in scope.
+
+Being a real file, it goes both ways: open it in a tab, edit it by hand, save,
+and the panel redraws from what you wrote. Draw in the panel and the file is
+rewritten. Anything else you keep in that file is lost the next time a row
+changes.
+
+
 ## Function Reference
 
 - [List Functions](#fist-functions)
@@ -147,17 +199,9 @@ npm install && npm run tauri dev
 | `reverb3` | `(audio → time, diffusion, damping_cutoff)` — allpass loop, no room size. |
 | `reverb4` | `(audio → room_size, time)` — slow fade-in, for swells rather than rooms. `room_size` is treated as at least 15 m; below that the delay times stop sounding like a space. |
 
-The reverbs are **wet only** — mix the dry signal yourself:
+The reverbs and delays are **wet only** — mix the dry signal yourself:
 
 ```
 fn pad(n) = saw(n.m2h) * env(0.3, 0.2, 0.7, 0.4, dur)
 fn wet(x) = x + reverb(x, 10, 3, 0.5) * 0.3
 ```
-
-They are also the one place a bad parameter is rejected rather than merely
-sounding wrong: `time` and `room_size` must be above zero, because the feedback
-gain is derived from them and reaches 1 at the bottom of the range.
-
-fundsp's reverbs are all stereo, and scree's graph is mono end to end, so each
-one is wrapped — the signal feeds both inputs and the two outputs are averaged
-back down.

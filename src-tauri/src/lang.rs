@@ -40,7 +40,10 @@ pub struct ListBuiltin {
 /// Words the lexer reserves. `null` is deliberately absent: it is lexed
 /// (`parser::lex::Token::Null`) but no parser rule ever consumes it, so
 /// offering it as a completion would suggest something unusable.
-pub static KEYWORDS: &[&str] = &["fn", "let", "if", "else", "for", "in"];
+///
+/// `as` is here for the editor's sake rather than the lexer's — it is only a
+/// keyword inside a `use`, and reads as one wherever it is written.
+pub static KEYWORDS: &[&str] = &["fn", "let", "if", "else", "for", "in", "use", "as"];
 
 pub static UGENS: &[Ugen] = &[
     Ugen {

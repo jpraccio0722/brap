@@ -126,9 +126,23 @@ export interface WirePattern {
 }
 
 /** Everything the backend can bind. A pattern whose name it would refuse is
- *  left out, so a half-typed name cannot fail an otherwise good eval. */
+ *  left out, so a half-typed name cannot fail an otherwise good eval — and, for
+ *  the same reason, cannot reach the project's patterns file. */
 export function toWire(patterns: GraphicalPattern[]): WirePattern[] {
   return patterns
     .filter((p) => nameError(p, patterns) === null)
     .map((p) => ({ name: p.name, steps: p.steps }));
+}
+
+/**
+ * Rows read back from the project's `patterns.scree`.
+ *
+ * The ids are minted here because they never existed on disk: they are this
+ * side's handle on a row across a rename, and the file has no use for them.
+ */
+export function fromWire(wire: WirePattern[]): GraphicalPattern[] {
+  return wire.map((p) => {
+    counter += 1;
+    return { id: `gp-${counter}-${Date.now()}`, name: p.name, steps: p.steps };
+  });
 }

@@ -21,6 +21,9 @@ pub enum Stage {
     Lex,
     /// Reading tokens into a syntax tree.
     Parse,
+    /// Finding the files a program's `use` items name, and folding their
+    /// definitions into it.
+    Import,
     /// Turning the tree into a graph and pattern bindings.
     Lower,
     /// Building the audio graph the engine runs.
@@ -34,6 +37,7 @@ impl Stage {
     pub fn label(self) -> &'static str {
         match self {
             Stage::Lex | Stage::Parse => "syntax error",
+            Stage::Import => "import error",
             Stage::Lower => "compile error",
             Stage::Realize => "audio graph error",
             Stage::Engine => "engine error",
@@ -59,6 +63,10 @@ pub struct Diagnostic {
     /// complaining about without the frontend re-deriving it from a tab whose
     /// contents may have moved on since the run.
     pub snippet: Option<String>,
+    /// The file the position is in, absolute, when it is not the one that was
+    /// run. `None` means the program itself — which is every diagnostic a
+    /// program without imports can produce.
+    pub file: Option<String>,
 }
 
 /// One line, for Rust-side readers — test failures, logs. The editor renders
@@ -66,6 +74,9 @@ pub struct Diagnostic {
 impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.stage.label())?;
+        if let Some(file) = &self.file {
+            write!(f, " in {file}")?;
+        }
         if let (Some(line), Some(column)) = (self.line, self.column) {
             write!(f, " at line {line}, column {column}")?;
         }
@@ -76,7 +87,39 @@ impl fmt::Display for Diagnostic {
 impl Diagnostic {
     /// A diagnostic with no position, for the passes that have none.
     pub fn message(stage: Stage, message: impl Into<String>) -> Diagnostic {
-        Diagnostic { stage, message: message.into(), line: None, column: None, snippet: None }
+        Diagnostic {
+            stage,
+            message: message.into(),
+            line: None,
+            column: None,
+            snippet: None,
+            file: None,
+        }
+    }
+
+    /// Point a diagnostic at `offset` in `source`, unless it already knows a
+    /// better place.
+    ///
+    /// An error raised while resolving a `use` belongs on the `use`; one raised
+    /// by parsing the file that `use` names already belongs where it landed,
+    /// and must not be dragged back out of it.
+    pub fn or_at(self, source: &str, offset: usize) -> Diagnostic {
+        if self.line.is_some() {
+            return self;
+        }
+        let file = self.file;
+        Diagnostic { file, ..Diagnostic::at(self.stage, self.message, source, offset) }
+    }
+
+    /// Say which file a diagnostic is in, unless it already says.
+    ///
+    /// `None` is the file that was run, which the editor is already showing and
+    /// so never needs naming.
+    pub fn or_in(mut self, file: Option<&std::path::Path>) -> Diagnostic {
+        if self.file.is_none() {
+            self.file = file.map(|p| p.display().to_string());
+        }
+        self
     }
 
     /// A diagnostic pointing at a byte offset into `source`.
@@ -110,6 +153,7 @@ impl Diagnostic {
             line: Some(before.matches('\n').count() + 1),
             column: Some(source[line_start..offset].chars().count() + 1),
             snippet: Some(source[line_start..line_end].trim_end_matches('\r').to_string()),
+            file: None,
         }
     }
 }

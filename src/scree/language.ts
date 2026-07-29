@@ -51,7 +51,7 @@ const NOTE = /^[a-g][sf]?[0-9]$/;
  * correctly on the very first frame rather than rendering every keyword as a
  * plain variable. The backend list wins once loaded.
  */
-const FALLBACK_KEYWORDS = ["fn", "let", "if", "else", "for", "in"];
+const FALLBACK_KEYWORDS = ["fn", "let", "if", "else", "for", "in", "use", "as"];
 /** Longest first, so `..=` beats `.`, `>>` and `>=` beat `>`, `==` beats `=`. */
 const OPERATORS = [
   "..=",
@@ -134,6 +134,10 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
       state.afterFn = false;
 
       if (stream.match(/^[[\]{}()]/)) return "bracket";
+      // Before the single-character rule, and before the operators: `::*` and
+      // `::` are their own tokens in `lex.rs`, and `*` is not a multiplication
+      // when it follows one.
+      if (stream.match("::*") || stream.match("::")) return "punctuation";
       if (stream.match(/^[,;:]/)) return "punctuation";
 
       for (const op of OPERATORS) {

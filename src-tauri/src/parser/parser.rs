@@ -34,6 +34,47 @@ pub enum ScreeItem {
     Let { name: Ident, value: Expr },
     Call { func: Ident, args: Vec<Arg> },
     Expr(Expr),
+    /// `use drums::kick` — another file's definitions, named here.
+    ///
+    /// Nothing downstream ever sees one: `imports::expand` replaces every
+    /// `use` with the definitions it names before the program is lowered.
+    Use(Use),
+}
+
+/// One name brought in by a `use`, and what it is called here: `kick`, or
+/// `kick as thump`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UseName { pub name: Ident, pub alias: Option<Ident> }
+
+/// What a `use` takes from the path it names.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UseTree {
+    /// `use lib::drums` — whichever of the module or the single item the path
+    /// turns out to name; only the filesystem can say which. The `Ident` is an
+    /// `as` alias, if one was written.
+    Plain(Option<Ident>),
+    /// `use lib::drums::{kick, snare as clap}`.
+    Names(Vec<UseName>),
+    /// `use lib::drums::*` — everything the module defines.
+    Glob,
+}
+
+/// One `use` item.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Use {
+    /// The path as written, split on `::`.
+    pub path: Vec<Ident>,
+    pub tree: UseTree,
+    /// Byte offset of the `use` keyword, so a module that cannot be found is
+    /// reported on the line that asked for it.
+    pub at: usize,
+}
+
+impl Use {
+    /// The path as it was written, for messages.
+    pub fn written(&self) -> String {
+        self.path.iter().map(|s| s.0.as_str()).collect::<Vec<_>>().join("::")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -108,6 +149,45 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     select! { Token::Ident(s) => Ident(s) }.labelled("a name")
 }
 
+/// The `as` of `use drums as d`.
+///
+/// A name rather than a token of its own, so it is only a keyword where a
+/// keyword is what it looks like: `as` on its own is still an ordinary name,
+/// which some file somewhere is bound to be using.
+fn kw_as<'a, I>() -> impl Parser<'a, I, (), extra::Err<Rich<'a, Token>>> + Clone
+where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
+    select! { Token::Ident(name) if name == "as" => () }.labelled("`as`")
+}
+
+/// A name, qualified by the module it came from if it needs to be:
+/// `kick`, `drums::kick`.
+///
+/// The qualifier is kept in the `Ident` rather than beside it, because a
+/// qualified name is still just a name to everything downstream — `use`
+/// resolution rewrites it to the one the definition was filed under, and the
+/// lowerer looks it up like any other.
+fn name<'a, I>() -> impl Parser<'a, I, Ident, extra::Err<Rich<'a, Token>>> + Clone
+where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
+    ident()
+        .then(
+            just(Token::PathSep)
+                .ignore_then(ident())
+                .repeated()
+                .collect::<Vec<_>>(),
+        )
+        .map(|(head, rest)| {
+            if rest.is_empty() {
+                return head;
+            }
+            let mut joined = head.0;
+            for segment in rest {
+                joined.push_str("::");
+                joined.push_str(&segment.0);
+            }
+            Ident(joined)
+        })
+}
+
 /// `{ let a = f * 2\n sin(a) }` — statements, then the expression the block is
 /// worth.
 ///
@@ -172,7 +252,16 @@ pub fn parse(code: String) -> Result<Vec<ScreeItem>, Diagnostic> {
         .into_result()
         .map_err(|errs| parse_diagnostic(&errs, &spans, &code));
 
-    result
+    result.map(|mut items| {
+        // A `use` carried the index of its own token out of the parser, which
+        // is only a place in the file while the spans are still in scope.
+        for item in &mut items {
+            if let ScreeItem::Use(u) = item {
+                u.at = spans.get(u.at).map_or(0, |s| s.start);
+            }
+        }
+        items
+    })
 }
 
 /// The first parse error, as something worth reading.
@@ -243,7 +332,7 @@ fn pattern_name(pattern: &RichPattern<'_, Token>) -> (u8, String) {
                 Token::Comma | Token::Colon | Token::Assign | Token::Term => 1,
                 Token::ParensOpen | Token::BracketOpen | Token::BraceOpen => 2,
                 Token::Else | Token::For | Token::Function | Token::If
-                | Token::In | Token::Let => 2,
+                | Token::In | Token::Let | Token::Use => 2,
                 _ => 3,
             };
             (rank, format!("`{}`", &**token))
@@ -277,11 +366,60 @@ fn expected_list(names: &[String]) -> Option<String> {
     }
 }
 
+/// One `::`-separated piece of a `use` path: another name, or the braced list
+/// that can only come last.
+enum Segment {
+    Name(Ident),
+    Names(Vec<UseName>),
+}
+
+/// Assemble a `use` from its pieces, refusing the combinations that have no
+/// meaning — a braced list mid-path, or a `*` and an `as` on the same item.
+///
+/// `at` is a token index here; `parse` maps it back to a byte offset once the
+/// whole file has been read, which is the only place the spans still exist.
+fn build_use(
+    head: Ident,
+    segments: Vec<Segment>,
+    glob: bool,
+    alias: Option<Ident>,
+    at: usize,
+) -> Result<Use, String> {
+    let mut path = vec![head];
+    let mut names: Option<Vec<UseName>> = None;
+
+    let last = segments.len().saturating_sub(1);
+    for (i, segment) in segments.into_iter().enumerate() {
+        match segment {
+            Segment::Name(name) => path.push(name),
+            Segment::Names(_) if i != last => {
+                return Err("a `{…}` list has to be the last part of a `use`".to_string())
+            }
+            Segment::Names(list) => names = Some(list),
+        }
+    }
+
+    let tree = match (names, glob, alias) {
+        (Some(_), true, _) | (Some(_), _, Some(_)) => {
+            return Err("a `{…}` list already names what it takes".to_string())
+        }
+        (None, true, Some(_)) => {
+            return Err("`use …::*` takes every name as it is written, so there \
+                        is nothing for `as` to rename".to_string())
+        }
+        (Some(list), false, None) => UseTree::Names(list),
+        (None, true, None) => UseTree::Glob,
+        (None, false, alias) => UseTree::Plain(alias),
+    };
+
+    Ok(Use { path, tree, at })
+}
+
 fn expr<'a, I>() -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
 where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     recursive(|expr| {
         let int = select! { Token::Num(n) => Expr::Num(n) }.labelled("a number");
-        let var = ident().map(Expr::Var);
+        let var = name().map(Expr::Var);
         let paren = expr.clone()
             .delimited_by(just(Token::ParensOpen), just(Token::ParensClose));
 
@@ -307,7 +445,7 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .delimited_by(just(Token::BracketOpen), just(Token::BracketClose))
             .map(Expr::List);
 
-        let call = ident()
+        let call = name()
             .then(args.clone().delimited_by(just(Token::ParensOpen), just(Token::ParensClose)))
             .map(|(func, args)| Expr::Call { func, args });
 
@@ -365,7 +503,9 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         // produces — the two operators mean exactly the same thing and differ
         // only in binding. Nothing downstream needs to know `.` exists.
         let method = just(Token::Dot)
-            .ignore_then(ident())
+            // Qualified, so an imported function chains like any other:
+            // `n.m2h.drums::bass()`.
+            .ignore_then(name())
             .then(
                 args.clone()
                     .delimited_by(just(Token::ParensOpen), just(Token::ParensClose))
@@ -492,7 +632,42 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         .then(expr())
         .map(|(name, value)| ScreeItem::Let { name, value });
 
+    // `use lib::drums`, `use lib::drums as d`, `use lib::drums::kick`,
+    // `use lib::drums::{kick, snare as clap}`, `use lib::drums::*`.
+    //
+    // The path is read as one repetition rather than as "path, then optional
+    // suffix" so nothing ever has to be un-consumed: after each `::` the next
+    // thing is either another segment or the braced list that ends the item.
+    let use_name = ident()
+        .then(kw_as().ignore_then(ident()).or_not())
+        .map(|(name, alias)| UseName { name, alias });
+
+    let use_names = use_name
+        .separated_by(just(Token::Comma))
+        .allow_trailing()
+        .at_least(1)
+        .collect::<Vec<_>>()
+        .delimited_by(just(Token::BraceOpen), just(Token::BraceClose));
+
+    let segment = just(Token::PathSep).ignore_then(choice((
+        ident().map(Segment::Name),
+        use_names.map(Segment::Names),
+    )));
+
+    let use_item = just(Token::Use)
+        .ignore_then(ident())
+        .then(segment.repeated().collect::<Vec<_>>())
+        .then(just(Token::PathGlob).or_not())
+        .then(kw_as().ignore_then(ident()).or_not())
+        .try_map_with(|(((head, segments), glob), alias), e| {
+            let span: SimpleSpan = e.span();
+            build_use(head, segments, glob.is_some(), alias, span.start)
+                .map(ScreeItem::Use)
+                .map_err(|message| Rich::custom(span, message))
+        });
+
     let item = choice((
+        use_item,
         function,
         expr().map(ScreeItem::Expr),
         let_item,
@@ -705,6 +880,97 @@ mod tests {
     #[test]
     fn a_stray_bracket_is_an_error_rather_than_a_short_program() {
         parse("sin(440)\n]\n".to_string()).expect_err("a stray `]` should not parse");
+    }
+
+    // ---- use ----
+
+    fn uses(src: &str) -> Vec<Use> {
+        parse(src.to_string())
+            .unwrap_or_else(|e| panic!("{src} should parse: {e}"))
+            .into_iter()
+            .filter_map(|item| match item {
+                ScreeItem::Use(u) => Some(u),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn id(name: &str) -> Ident {
+        Ident(name.to_string())
+    }
+
+    /// The four shapes, and what each of them takes.
+    #[test]
+    fn parses_every_use_shape() {
+        let u = &uses("use drums\n")[0];
+        assert_eq!(u.path, vec![id("drums")]);
+        assert_eq!(u.tree, UseTree::Plain(None));
+
+        let u = &uses("use lib::drums as d\n")[0];
+        assert_eq!(u.path, vec![id("lib"), id("drums")]);
+        assert_eq!(u.tree, UseTree::Plain(Some(id("d"))));
+
+        let u = &uses("use lib::drums::{kick, snare as clap}\n")[0];
+        assert_eq!(u.path, vec![id("lib"), id("drums")]);
+        assert_eq!(
+            u.tree,
+            UseTree::Names(vec![
+                UseName { name: id("kick"), alias: None },
+                UseName { name: id("snare"), alias: Some(id("clap")) },
+            ])
+        );
+
+        let u = &uses("use lib::drums::*\n")[0];
+        assert_eq!(u.path, vec![id("lib"), id("drums")]);
+        assert_eq!(u.tree, UseTree::Glob);
+    }
+
+    /// `::*` is one token so the line it ends is over. Without that, the next
+    /// line reads as the right-hand side of a multiplication.
+    #[test]
+    fn a_glob_ends_its_line() {
+        let items = parse("use drums::*\nsin(220)\n".to_string()).expect("should parse");
+        assert_eq!(items.len(), 2);
+        assert!(matches!(items[1], ScreeItem::Expr(Expr::Call { .. })));
+    }
+
+    /// A `use` says where it is, so a module that cannot be found is reported
+    /// on the line that asked for it rather than at the top of the file.
+    #[test]
+    fn a_use_remembers_where_it_was_written() {
+        let src = "sin(220)\nuse drums\n";
+        let u = &uses(src)[0];
+        assert_eq!(&src[u.at..u.at + 3], "use");
+    }
+
+    /// Combinations with no meaning are refused where they are written, in the
+    /// parser's own words.
+    #[test]
+    fn nonsense_use_shapes_are_refused() {
+        let err = parse("use a::{b}::c\n".to_string()).expect_err("list mid-path");
+        assert!(err.message.contains("last part"), "got: {}", err.message);
+
+        let err = parse("use a::* as b\n".to_string()).expect_err("glob and alias");
+        assert!(err.message.contains("nothing for `as`"), "got: {}", err.message);
+    }
+
+    /// `as` is only a keyword in a `use`. Everywhere else it is a name like any
+    /// other, and some file somewhere is already using it as one.
+    #[test]
+    fn as_is_still_an_ordinary_name() {
+        let items = parse("let as = 1\nsin(as)\n".to_string()).expect("should parse");
+        assert_eq!(items.len(), 2);
+    }
+
+    /// A qualified name is one name, not two: everything downstream looks names
+    /// up by string, and `drums::kick` is the string it looks up.
+    #[test]
+    fn a_qualified_name_is_one_name() {
+        let items = parse("play([50], drums::kick)\n".to_string()).expect("should parse");
+        let Some(ScreeItem::Expr(Expr::Call { args, .. })) = items.first() else {
+            panic!("expected a call, got {items:?}");
+        };
+        assert_eq!(args[1].value, Expr::Var(id("drums::kick")));
     }
 
     /// A block that ends in a `let` fails with the parser's own words, which
