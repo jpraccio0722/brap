@@ -15,6 +15,39 @@ use serde::Serialize;
 
 use crate::scree_graph::ugen_nodes::NodeKind;
 
+/// What a name accepts in its first parameter — which is to say, what may be
+/// written to the left of the dot that calls it, since `a.f(b)` is `f(a, b)`.
+///
+/// The editor filters the method-position completions on this. It is declared
+/// rather than derived because "what the first parameter accepts" is not
+/// readable from the parameter's name: `perc(attack, release)` and
+/// `sin(frequency)` both take a number, but only one of them will also take a
+/// signal, and only the realizer knows it.
+///
+/// `every_builtin_receives_what_it_declares` holds this to the truth by
+/// compiling each name against a receiver of the kind it claims.
+#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum ValueKind {
+    /// Nothing at all: the name takes no arguments, so nothing may precede it.
+    /// Never a result — every callable name answers with something.
+    Nothing,
+    /// Not knowable from the table. Only ever a result: `sum` folds to a number
+    /// or to a signal depending on what the list holds, and `choice` answers
+    /// with whichever element it drew. Treated as "could be anything".
+    Any,
+    /// A node input — a signal, or a number folded to a constant.
+    Signal,
+    /// A compile-time number. A signal here is an error, not a modulation.
+    Number,
+    /// A list.
+    List,
+    /// A pattern: a list of steps, or a single step's worth of value.
+    Pattern,
+    /// A handle from `play`, `play_once`, `playn` or `play_all`.
+    Play,
+}
+
 /// A UGen builtin: a name that lowers to a graph node.
 ///
 /// Arity is `params.len()` — the two cannot disagree.
@@ -22,6 +55,9 @@ pub struct Ugen {
     pub name: &'static str,
     pub kind: NodeKind,
     pub params: &'static [&'static str],
+    pub receives: ValueKind,
+    /// What the name answers with, for the next dot in a chain.
+    pub returns: ValueKind,
     pub doc: &'static str,
 }
 
@@ -34,6 +70,9 @@ pub struct ListBuiltin {
     pub params: &'static [&'static str],
     pub arities: &'static [usize],
     pub variadic: bool,
+    pub receives: ValueKind,
+    /// What the name answers with, for the next dot in a chain.
+    pub returns: ValueKind,
     pub doc: &'static str,
 }
 
@@ -50,102 +89,136 @@ pub static UGENS: &[Ugen] = &[
         name: "adsr",
         kind: NodeKind::ADSR,
         params: &["gate", "attack", "decay", "sustain", "release"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1.",
     },
     Ugen {
         name: "afollow",
         kind: NodeKind::Afollow,
         params: &["signal", "attack", "release"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds).",
     },
     Ugen {
         name: "allpass",
         kind: NodeKind::Allpass,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Allpass filter. Passes all frequencies but shifts their phase around the center frequency.",
     },
     Ugen {
         name: "allpole",
         kind: NodeKind::Allpole,
         params: &["audio", "delay"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "First-order allpass filter with a configurable delay at DC, in samples (must be > 0).",
     },
     Ugen {
         name: "bandpass",
         kind: NodeKind::Bandpass,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bandpass filter. Keeps frequencies near the center, attenuating either side.",
     },
     Ugen {
         name: "bandrez",
         kind: NodeKind::Bandrez,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Resonant two-pole bandpass filter.",
     },
     Ugen {
         name: "bell",
         kind: NodeKind::Bell,
         params: &["audio", "frequency", "q", "gain"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bell equalizer. Boosts or cuts a band around the center frequency by `gain` (an amplitude multiplier, not dB).",
     },
     Ugen {
         name: "biquad",
         kind: NodeKind::Biquad,
         params: &["signal", "a1", "a2", "b0", "b1", "b2"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Arbitrary biquad filter with coefficients in normalized form. All five coefficients must be constants.",
     },
     Ugen {
         name: "brown",
         kind: NodeKind::Brown,
         params: &[],
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Signal,
         doc: "Brown noise: -6 dB per octave. Darker than pink.",
     },
     Ugen {
         name: "butterpass",
         kind: NodeKind::Butterpass,
         params: &["audio", "cutoff"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Second-order Butterworth lowpass. Maximally flat passband, no resonance control.",
     },
     Ugen {
         name: "chorus",
         kind: NodeKind::Chorus,
         params: &["audio", "seed", "separation", "variation", "mod_frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Five-voice mono chorus, mixed with the dry signal. Stack two with different seeds for stereo. All parameters except the audio input are constants.",
     },
     Ugen {
         name: "clip",
         kind: NodeKind::Clip,
         params: &["signal"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Hard-clip the signal to -1..=1.",
     },
     Ugen {
         name: "clip_to",
         kind: NodeKind::ClipTo,
         params: &["signal", "minimum", "maximum"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Hard-clip the signal to `minimum`..=`maximum`. Both bounds are constants.",
     },
     Ugen {
         name: "dcblock",
         kind: NodeKind::Dcblock,
         params: &["signal"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Remove DC offset, keeping the signal zero-centered. Cutoff is 10 Hz.",
     },
     Ugen {
         name: "declick",
         kind: NodeKind::Declick,
         params: &["signal"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Fade the signal in over 10 ms from time zero, suppressing the click at the start of a graph.",
     },
     Ugen {
         name: "delay",
         kind: NodeKind::Delay,
         params: &["signal", "time"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Fixed delay of `time` seconds, rounded to the nearest sample. The time is a constant — use `tap` for a modulatable delay.",
     },
     Ugen {
         name: "dsf_saw",
         kind: NodeKind::DsfSaw,
         params: &["frequency", "roughness"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Saw-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated.",
     },
     // Time-based envelopes. `env` needs the note length, which voices pre-bind
@@ -154,204 +227,272 @@ pub static UGENS: &[Ugen] = &[
         name: "env",
         kind: NodeKind::Env,
         params: &["attack", "decay", "sustain", "release", "duration"],
+        receives: ValueKind::Number,
+        returns: ValueKind::Signal,
         doc: "Time-based ADSR for one-shot voices, with the release landing exactly on `duration`. Pass the voice-bound `dur` as the duration. All arguments are constants.",
     },
     Ugen {
         name: "dsf_square",
         kind: NodeKind::DsfSquare,
         params: &["frequency", "roughness"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Square-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated.",
     },
     Ugen {
         name: "fir3",
         kind: NodeKind::Fir3,
         params: &["signal", "gain"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Three-point symmetric FIR filter, specified by its `gain` (>= 0) at the Nyquist frequency. A gain below 1 gives a gentle lowpass.",
     },
     Ugen {
         name: "follow",
         kind: NodeKind::Follow,
         params: &["signal", "response_time"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Parameter follower. Smooths the signal with the given halfway response time, in seconds.",
     },
     Ugen {
         name: "hammond",
         kind: NodeKind::Hammond,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Hammond organ wavetable oscillator. Emphasizes the first three partials.",
     },
     Ugen {
         name: "highpass",
         kind: NodeKind::Highpass,
         params: &["audio", "cutoff", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Resonant highpass filter.",
     },
     Ugen {
         name: "highpole",
         kind: NodeKind::Highpole,
         params: &["audio", "cutoff"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "First-order one-pole one-zero highpass. No resonance.",
     },
     Ugen {
         name: "highshelf",
         kind: NodeKind::Highshelf,
         params: &["audio", "frequency", "q", "gain"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "High shelf filter. Scales everything above the center frequency by `gain` (an amplitude multiplier).",
     },
     Ugen {
         name: "hold",
         kind: NodeKind::Hold,
         params: &["signal", "frequency", "variability"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Sample-and-hold. Samples the signal at `frequency` Hz; `variability` in 0..=1 jitters the sampling interval and is a constant.",
     },
     Ugen {
         name: "impulse",
         kind: NodeKind::Impulse,
         params: &[],
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Signal,
         doc: "A single one followed by silence. Useful for exciting `pluck` or measuring an impulse response.",
     },
     Ugen {
         name: "limiter",
         kind: NodeKind::Limiter,
         params: &["signal", "attack", "release"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Look-ahead limiter holding the signal to -1..=1. Look-ahead equals the attack time. Times are constants, in seconds.",
     },
     Ugen {
         name: "lorenz",
         kind: NodeKind::Lorenz,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Lorenz chaotic oscillator. The frequency input has only a slight effect on the output.",
     },
     Ugen {
         name: "lowpass",
         kind: NodeKind::Lowpass,
         params: &["audio", "cutoff", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Resonant lowpass filter.",
     },
     Ugen {
         name: "lowpole",
         kind: NodeKind::Lowpole,
         params: &["audio", "cutoff"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "First-order one-pole lowpass. No resonance.",
     },
     Ugen {
         name: "lowrez",
         kind: NodeKind::Lowrez,
         params: &["audio", "cutoff", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Resonant two-pole lowpass filter.",
     },
     Ugen {
         name: "lowshelf",
         kind: NodeKind::Lowshelf,
         params: &["audio", "frequency", "q", "gain"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Low shelf filter. Scales everything below the center frequency by `gain` (an amplitude multiplier).",
     },
     Ugen {
         name: "mls",
         kind: NodeKind::Mls,
         params: &[],
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Signal,
         doc: "Maximum length sequence noise: a repeating pseudorandom run of -1 and 1.",
     },
     Ugen {
         name: "mls_bits",
         kind: NodeKind::MlsBits,
         params: &["bits"],
+        receives: ValueKind::Number,
+        returns: ValueKind::Signal,
         doc: "Maximum length sequence noise from an n-bit sequence (1..=31). More bits means a longer period before it repeats. Constant.",
     },
     Ugen {
         name: "moog",
         kind: NodeKind::Moog,
         params: &["signal", "cutoff", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Moog-style resonant lowpass ladder filter.",
     },
     Ugen {
         name: "morph",
         kind: NodeKind::Morph,
         params: &["signal", "frequency", "q", "morph"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Filter that morphs continuously between modes: `morph` runs -1 (lowpass) to 0 (peak) to 1 (highpass).",
     },
     Ugen {
         name: "noise",
         kind: NodeKind::Noise,
         params: &[],
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Signal,
         doc: "White noise.",
     },
     Ugen {
         name: "notch",
         kind: NodeKind::Notch,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Notch filter. Removes a narrow band around the center frequency.",
     },
     Ugen {
         name: "organ",
         kind: NodeKind::Organ,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Organ wavetable oscillator. Emphasizes octave partials.",
     },
     Ugen {
         name: "peak",
         kind: NodeKind::Peak,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Peaking filter.",
     },
     Ugen {
         name: "perc",
         kind: NodeKind::Perc,
         params: &["attack", "release"],
+        receives: ValueKind::Number,
+        returns: ValueKind::Signal,
         doc: "Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph. Both times are constants.",
     },
     Ugen {
         name: "pink",
         kind: NodeKind::Pink,
         params: &[],
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Signal,
         doc: "Pink noise: -3 dB per octave.",
     },
     Ugen {
         name: "pinkpass",
         kind: NodeKind::Pinkpass,
         params: &["signal"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Pinking filter: -3 dB per octave. Turns white noise into pink.",
     },
     Ugen {
         name: "pluck",
         kind: NodeKind::Pluck,
         params: &["excitation", "frequency", "gain_per_second", "damping"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Karplus-Strong plucked string. Feed it a burst — `impulse()` or a short noise envelope — as the excitation. Frequency, gain and damping (0..=1) are constants.",
     },
     Ugen {
         name: "poly_pulse",
         kind: NodeKind::PolyPulse,
         params: &["frequency", "width"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "PolyBLEP pulse wave. Fast and fairly bandlimited; `width` in 0..=1 is the duty cycle.",
     },
     Ugen {
         name: "poly_saw",
         kind: NodeKind::PolySaw,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "PolyBLEP saw wave. Fast and fairly bandlimited.",
     },
     Ugen {
         name: "poly_square",
         kind: NodeKind::PolySquare,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "PolyBLEP square wave. Fast and fairly bandlimited.",
     },
     Ugen {
         name: "pulse",
         kind: NodeKind::Pulse,
         params: &["frequency", "width"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bandlimited pulse wave oscillator. `width` in 0..=1 is the duty cycle.",
     },
     Ugen {
         name: "ramp",
         kind: NodeKind::Ramp,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Rising ramp from 0 to 1 at the given repetition frequency. Not bandlimited — useful as a phasor, not as audio.",
     },
     Ugen {
         name: "resonator",
         kind: NodeKind::Resonator,
         params: &["audio", "frequency", "q"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Constant-gain bandpass resonator.",
     },
     // fundsp's reverbs are all stereo. scree's graph is mono end to end, so
@@ -361,72 +502,96 @@ pub static UGENS: &[Ugen] = &[
         name: "reverb",
         kind: NodeKind::Reverb,
         params: &["audio", "room_size", "time", "damping"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Reverb (32-channel FDN). `room_size` is in meters (10 is an average room), `time` is the decay to -60 dB in seconds, `damping` in 0..=1 rolls off the highs. Wet only: `x + reverb(x, 10, 3, 0.5) * 0.2`. All parameters except the audio input are constants.",
     },
     Ugen {
         name: "reverb2",
         kind: NodeKind::Reverb2,
         params: &["audio", "room_size", "time", "diffusion", "modulation", "damping_cutoff"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Hybrid FDN reverb — richer and more expensive than `reverb`. `room_size` is in meters and clamps to 10..=30, `diffusion` in 0..=1 thickens the tail, `modulation` around 1 adds movement (higher goes audibly Doppler), and `damping_cutoff` is the lowpass applied to each loop pass, in hertz. Wet only. All parameters except the audio input are constants.",
     },
     Ugen {
         name: "reverb3",
         kind: NodeKind::Reverb3,
         params: &["audio", "time", "diffusion", "damping_cutoff"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Allpass-loop reverb, with no room size — just `time` to -60 dB, `diffusion` in 0..=1, and a `damping_cutoff` in hertz applied to each loop pass. Wet only. All parameters except the audio input are constants.",
     },
     Ugen {
         name: "reverb4",
         kind: NodeKind::Reverb4,
         params: &["audio", "room_size", "time"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Reverb with a slow fade-in, for swells rather than rooms. `room_size` is in meters and is treated as at least 15; below that the delay times stop sounding like a space. Wet only. Both `room_size` and `time` are constants.",
     },
     Ugen {
         name: "rossler",
         kind: NodeKind::Rossler,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Rossler chaotic oscillator, with peaks at multiples of the frequency input.",
     },
     Ugen {
         name: "saw",
         kind: NodeKind::Saw,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bandlimited saw wavetable oscillator.",
     },
     Ugen {
         name: "sin",
         kind: NodeKind::Sin,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Sine oscillator.",
     },
     Ugen {
         name: "soft_saw",
         kind: NodeKind::SoftSaw,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Soft saw wavetable oscillator. Contains all partials but falls off like a triangle wave.",
     },
     Ugen {
         name: "square",
         kind: NodeKind::Square,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bandlimited square wavetable oscillator.",
     },
     Ugen {
         name: "tap",
         kind: NodeKind::Tap,
         params: &["signal", "delay", "min_delay", "max_delay"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Tapped delay line with cubic interpolation. Unlike `delay`, the delay time is a signal, so it can be modulated — it must stay within the constant `min_delay`..=`max_delay` bounds, in seconds.",
     },
     Ugen {
         name: "tick",
         kind: NodeKind::Tick,
         params: &["signal"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Single-sample delay. The building block for feedback and comb filters.",
     },
     Ugen {
         name: "triangle",
         kind: NodeKind::Triangle,
         params: &["frequency"],
+        receives: ValueKind::Signal,
+        returns: ValueKind::Signal,
         doc: "Bandlimited triangle wavetable oscillator.",
     },
 ];
@@ -437,6 +602,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::Number,
         doc: "The number of elements in the list.",
     },
     ListBuiltin {
@@ -444,6 +611,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: true,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "Pair elements positionally: `zip([1, 2], [3, 4])` is `[[1, 3], [2, 4]]`. Every argument must be a list, and all must be the same length.",
     },
     ListBuiltin {
@@ -451,6 +620,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "The list, back to front.",
     },
     ListBuiltin {
@@ -458,6 +629,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "The list followed by its mirror: `[a, b, c]` becomes `[a, b, c, c, b, a]`.",
     },
     ListBuiltin {
@@ -465,6 +638,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list", "amount"],
         arities: &[1, 2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "Rotate left, wrapping. `amount` defaults to 1; a negative amount rotates right.",
     },
     ListBuiltin {
@@ -472,6 +647,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list", "amount"],
         arities: &[1, 2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "Rotate right, wrapping. `amount` defaults to 1; a negative amount rotates left.",
     },
     ListBuiltin {
@@ -479,6 +656,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list", "value"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "A new list with `value` appended. Lists are immutable — the original is unchanged.",
     },
     ListBuiltin {
@@ -486,6 +665,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "A new list without its last element. Index the list to read that element.",
     },
     ListBuiltin {
@@ -493,6 +674,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "The list sorted ascending. Every element must be a compile-time number.",
     },
     ListBuiltin {
@@ -500,6 +683,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::Any,
         doc: "Add every element together. Folds numbers at compile time and emits mixing nodes for signals, so a list of oscillators sums into the graph.",
     },
     ListBuiltin {
@@ -507,6 +692,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list", "size"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "Break the list into chunks of `size`. A short final chunk is kept.",
     },
     ListBuiltin {
@@ -514,6 +701,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::Any,
         doc: "One element picked at random. Re-rolled on every eval.",
     },
     ListBuiltin {
@@ -521,6 +710,8 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["values", "weights"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::Any,
         doc: "One element picked at random, weighted. The two lists run in parallel; weights must be finite and >= 0.",
     },
     ListBuiltin {
@@ -528,13 +719,26 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         params: &["list"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "The list shuffled. Re-rolled on every eval.",
+    },
+    ListBuiltin {
+        name: "map",
+        params: &["list", "transform"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
+        doc: "Apply a function to every element: `riff.map(up)`. The transform is an ordinary user `fn` of one argument, and may answer with anything — mapping to oscillators is the only way to hold several voices apart, since a `for` over audio sums instead of collecting.",
     },
     ListBuiltin {
         name: "filter",
         params: &["list", "predicate"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
         doc: "Keep the elements the predicate answers non-zero for. The predicate is an ordinary user `fn` of one argument.",
     },
 ];
@@ -551,6 +755,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["note"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "MIDI note number to frequency in hertz: `69.m2h` is 440. Equal temperament, A4 = 440 Hz.",
     },
     ListBuiltin {
@@ -558,6 +764,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["hz"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Frequency in hertz to MIDI note number, the inverse of `m2h`: `440.h2m` is 69. The result may be fractional.",
     },
     ListBuiltin {
@@ -565,6 +773,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["decibels"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Decibels to a linear amplitude: `0.db` is 1, `-6.db` is about 0.5. Use it to write gains the way you hear them.",
     },
     ListBuiltin {
@@ -572,6 +782,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["amplitude"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Linear amplitude to decibels, the inverse of `db`: `1.amp` is 0. The amplitude must be above zero.",
     },
     ListBuiltin {
@@ -579,6 +791,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["hz", "cents"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Detune a frequency by cents, 1/100 of a semitone: `440.cents(-14)` flattens A4 slightly.",
     },
     ListBuiltin {
@@ -586,6 +800,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["beats"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Beats per minute to cycles per second, taking one cycle as four beats: `120.bpm` is 0.5, which is the default tempo.",
     },
     // --- pitch arithmetic ---
@@ -594,6 +810,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["note", "octaves"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Transpose a MIDI note by whole octaves: `60.oct(-1)` is 48.",
     },
     ListBuiltin {
@@ -601,6 +819,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["note", "semitones"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Transpose a MIDI note by semitones: `60.semi(7)` is 67.",
     },
     ListBuiltin {
@@ -608,6 +828,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["note", "scale"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Snap a MIDI note to the nearest tone of a scale, given as semitone offsets within an octave: `61.scale([0, 2, 4, 5, 7, 9, 11])` is 60. Ties snap down.",
     },
     // --- ranges and shaping ---
@@ -616,6 +838,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x", "lo", "hi"],
         arities: &[3],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Constrain a number to `lo..=hi`.",
     },
     ListBuiltin {
@@ -623,6 +847,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x", "lo", "hi"],
         arities: &[3],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Map 0..1 onto `lo..hi`. Values outside 0..1 extrapolate; `clamp` first if you do not want that.",
     },
     ListBuiltin {
@@ -630,6 +856,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x", "lo", "hi"],
         arities: &[3],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Fold a number back into `lo..hi`, wrapping around rather than clamping. Useful for modular pitch.",
     },
     ListBuiltin {
@@ -637,6 +865,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Nearest whole number, halves away from zero.",
     },
     ListBuiltin {
@@ -644,6 +874,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Largest whole number at or below `x`.",
     },
     ListBuiltin {
@@ -651,6 +883,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Smallest whole number at or above `x`.",
     },
     ListBuiltin {
@@ -658,6 +892,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Magnitude, dropping the sign.",
     },
     ListBuiltin {
@@ -665,6 +901,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x", "exponent"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "`x` raised to a power: `2.pow(10)` is 1024. Good for exponential curve shaping.",
     },
     ListBuiltin {
@@ -672,6 +910,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Square root. `x` must not be negative.",
     },
     ListBuiltin {
@@ -679,6 +919,8 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         params: &["x"],
         arities: &[1],
         variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
         doc: "Base-2 logarithm. `x` must be above zero.",
     },
 ];
@@ -692,6 +934,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["play", "section"],
         arities: &[2],
         variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
         doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called by the audio thread.",
     },
     ListBuiltin {
@@ -699,6 +943,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["pattern", "instrument", "rate"],
         arities: &[2, 3],
         variadic: false,
+        receives: ValueKind::Pattern,
+        returns: ValueKind::Play,
         doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. `legato:` scales the note's length instead of being passed.",
     },
     ListBuiltin {
@@ -706,6 +952,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["pattern", "instrument", "rate"],
         arities: &[2, 3],
         variadic: false,
+        receives: ValueKind::Pattern,
+        returns: ValueKind::Play,
         doc: "`play`, stopping after one pass of the pattern: `[60, 64, 67] >> play_once(stab)`. Started while something is already playing it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again.",
     },
     ListBuiltin {
@@ -713,6 +961,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["pattern", "instrument", "times", "rate"],
         arities: &[3, 4],
         variadic: false,
+        receives: ValueKind::Pattern,
+        returns: ValueKind::Play,
         doc: "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two cycles. Lanes work as they do on `play`.",
     },
     ListBuiltin {
@@ -720,6 +970,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &["play"],
         arities: &[1],
         variadic: true,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
         doc: "Treat several plays that run at once as one section: `play_all(playn(verse, lead, 4), playn(bassline, bass, 4)).then(chorus)`. Every argument must be a `play_once`, `playn`, `play`, or another `play_all` — they all start together, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow.",
     },
     ListBuiltin {
@@ -727,6 +979,8 @@ pub static SPECIALS: &[ListBuiltin] = &[
         params: &[],
         arities: &[],
         variadic: false,
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Number,
         doc: "The current note's length in seconds. Bound only inside a voice — pass it to `env`.",
     },
 ];
@@ -828,8 +1082,15 @@ pub struct BuiltinInfo {
     pub arities: Vec<usize>,
     /// True when any count above the largest listed arity is also accepted.
     pub variadic: bool,
-    /// `"ugen"`, `"list"` or `"special"` — the editor colours and ranks by this.
+    /// `"ugen"`, `"list"`, `"math"` or `"special"` — the editor colours and
+    /// ranks by this.
     pub category: &'static str,
+    /// What may be written to the left of the dot that calls this name. The
+    /// editor offers a name in method position only when the receiver it can
+    /// see suits this.
+    pub receives: ValueKind,
+    /// What the name answers with, for the next dot in a chain.
+    pub returns: ValueKind,
     pub doc: &'static str,
 }
 
@@ -848,6 +1109,8 @@ pub fn metadata() -> LanguageMetadata {
         arities: vec![u.params.len()],
         variadic: false,
         category: "ugen",
+        receives: u.receives,
+        returns: u.returns,
         doc: u.doc,
     });
 
@@ -857,6 +1120,8 @@ pub fn metadata() -> LanguageMetadata {
         arities: b.arities.to_vec(),
         variadic: b.variadic,
         category: "list",
+        receives: b.receives,
+        returns: b.returns,
         doc: b.doc,
     });
 
@@ -866,6 +1131,8 @@ pub fn metadata() -> LanguageMetadata {
         arities: b.arities.to_vec(),
         variadic: b.variadic,
         category: "math",
+        receives: b.receives,
+        returns: b.returns,
         doc: b.doc,
     });
 
@@ -875,6 +1142,8 @@ pub fn metadata() -> LanguageMetadata {
         arities: b.arities.to_vec(),
         variadic: b.variadic,
         category: "special",
+        receives: b.receives,
+        returns: b.returns,
         doc: b.doc,
     });
 
@@ -1040,6 +1309,219 @@ mod tests {
             .chain(SPECIALS.iter().map(|b| (b.name, b.doc)))
         {
             assert!(!doc.trim().is_empty(), "{name} has no documentation");
+        }
+    }
+}
+
+#[cfg(test)]
+mod receives_tests {
+    use super::*;
+
+    /// Instruments and predicates for the arguments the receiver does not fill.
+    const PREAMBLE: &str = "fn inst(n) = sin(n)\nfn pred(x) = 1\nfn section() = play([60], inst)\n";
+
+    /// One value of each kind that can stand to the left of a dot.
+    const RECEIVERS: [(ValueKind, &str); 4] = [
+        (ValueKind::Number, "1"),
+        (ValueKind::Signal, "sin(220)"),
+        (ValueKind::List, "[1, 2, 3]"),
+        (ValueKind::Play, "playn([60, 63], inst, 2)"),
+    ];
+
+    /// Whether a receiver of kind `receiver` may be written to the left of a
+    /// name declaring `receives`. This is the rule the editor filters on; the
+    /// test below is what makes it true rather than merely intended.
+    pub fn accepts(receives: ValueKind, receiver: ValueKind) -> bool {
+        // A result the table cannot pin down rules nothing out, so everything
+        // stays on offer after it.
+        if receiver == ValueKind::Any {
+            return true;
+        }
+        match receives {
+            // Only ever a result, never a parameter.
+            ValueKind::Any => false,
+            // A constant is a node input like any other, so a number reads here.
+            ValueKind::Signal => matches!(receiver, ValueKind::Signal | ValueKind::Number),
+            ValueKind::Number => receiver == ValueKind::Number,
+            ValueKind::List => receiver == ValueKind::List,
+            // A bare value is a one-step pattern: `60.play(inst)` sounds once.
+            ValueKind::Pattern => matches!(receiver, ValueKind::List | ValueKind::Number),
+            ValueKind::Play => receiver == ValueKind::Play,
+            ValueKind::Nothing => false,
+        }
+    }
+
+    /// A plausible argument for a parameter the receiver does not fill. Keyed by
+    /// name, so a domain error cannot be mistaken for a type error.
+    fn filler(param: &str) -> &'static str {
+        match param {
+            "predicate" | "transform" => "pred",
+            "instrument" => "inst",
+            "section" => "section",
+            "weights" => "[1, 2, 3]",
+            "scale" => "[0, 2, 4, 5, 7, 9, 11]",
+            "bits" => "10",
+            "room_size" => "15",
+            "hi" | "maximum" => "2",
+            "times" => "2",
+            _ => "1",
+        }
+    }
+
+    /// Does `receiver.name(...)` survive lowering *and* realization?
+    ///
+    /// Both halves matter: `perc` and `env` bake their first argument in at
+    /// construction, so a signal there lowers cleanly and only fails when the
+    /// graph is built. Lowering alone would call them signal-taking.
+    fn compiles(receiver: &str, name: &str, params: &[&str], arity: usize) -> bool {
+        let args: Vec<&str> = params[1..arity.max(1)].iter().map(|p| filler(p)).collect();
+        let call = if args.is_empty() {
+            format!("{receiver}.{name}")
+        } else {
+            format!("{receiver}.{name}({})", args.join(", "))
+        };
+        let Ok(items) = crate::parser::parser::parse(format!("{PREAMBLE}{call}\n")) else {
+            return false;
+        };
+        match crate::lowerer::lower::lower(&items) {
+            Err(_) => false,
+            Ok(l) => crate::scree_graph::realizer::realize(&l.graph).is_ok(),
+        }
+    }
+
+    /// One name from the tables, flattened to what these tests need.
+    struct Entry {
+        name: &'static str,
+        params: &'static [&'static str],
+        /// The fewest arguments it can be called with.
+        arity: usize,
+        /// False for `dur`, which is a binding rather than a function and so
+        /// has no call form to probe.
+        callable: bool,
+        receives: ValueKind,
+        returns: ValueKind,
+    }
+
+    fn callables() -> Vec<Entry> {
+        UGENS
+            .iter()
+            .map(|u| Entry {
+                name: u.name,
+                params: u.params,
+                arity: u.params.len(),
+                callable: true,
+                receives: u.receives,
+                returns: u.returns,
+            })
+            .chain(LIST_BUILTINS.iter().chain(MATH_BUILTINS).chain(SPECIALS).map(|b| Entry {
+                name: b.name,
+                params: b.params,
+                arity: b.arities.iter().min().copied().unwrap_or(0),
+                callable: !b.arities.is_empty(),
+                receives: b.receives,
+                returns: b.returns,
+            }))
+            .collect()
+    }
+
+    /// The table says what each name takes on its left; this compiles every
+    /// name against every kind of receiver and insists the two agree.
+    ///
+    /// A disagreement in one direction means the editor hides a name that
+    /// works; in the other, that it offers one that cannot compile. Both are
+    /// the bug this field exists to prevent.
+    #[test]
+    fn every_builtin_receives_what_it_declares() {
+        for Entry { name, params, arity, receives, .. } in callables() {
+            if receives == ValueKind::Nothing {
+                continue;
+            }
+            for (receiver, src) in RECEIVERS {
+                let declared = accepts(receives, receiver);
+                let actual = compiles(src, name, params, arity);
+                assert_eq!(
+                    declared, actual,
+                    "{name} declares {receives:?}, so `{src}.{name}(..)` should {}, \
+                     but it does not",
+                    if declared { "compile" } else { "be rejected" }
+                );
+            }
+        }
+    }
+
+    /// A minimal call of `name`, usable as the receiver of the next dot.
+    fn minimal_call(name: &str, params: &[&str], arity: usize) -> String {
+        let args: Vec<&str> = params[..arity].iter().map(|p| filler(p)).collect();
+        // The first parameter is filled here like any other, since nothing
+        // precedes this call.
+        let args = if params.is_empty() {
+            Vec::new()
+        } else {
+            let mut a = args;
+            a[0] = match params[0] {
+                "list" | "values" => "[1, 2, 3]",
+                "pattern" => "[60, 63]",
+                "play" => "playn([60, 63], inst, 2)",
+                _ => "1",
+            };
+            a
+        };
+        format!("{name}({})", args.join(", "))
+    }
+
+    /// One name per kind that accepts that kind and no other, so which of them
+    /// compiles identifies what the receiver was.
+    const PROBES: [(ValueKind, &str); 4] = [
+        (ValueKind::List, "len"),
+        (ValueKind::Play, "play_all"),
+        // `m2h` takes a number and refuses a signal; `clip` takes either. So a
+        // receiver both accept is a number, and one only `clip` accepts is a
+        // signal. Order matters: the narrower probe is asked first.
+        (ValueKind::Number, "m2h"),
+        (ValueKind::Signal, "clip"),
+    ];
+
+    /// The declared result must be the one the probes actually identify.
+    ///
+    /// This is what makes chaining work: in `riff.rev.push(72)` the receiver of
+    /// the second dot is whatever `rev` answers with, and the editor has only
+    /// this field to tell it.
+    #[test]
+    fn every_builtin_returns_what_it_declares() {
+        for Entry { name, params, arity, callable, returns, .. } in callables() {
+            // `Any` is the honest answer where the result follows the input;
+            // there is nothing single-valued to check it against. A name that
+            // is not a function has no call to probe at all.
+            if returns == ValueKind::Any || !callable {
+                continue;
+            }
+            let call = minimal_call(name, params, arity);
+            let found = PROBES.iter().find(|(_, probe)| {
+                let src = format!("{PREAMBLE}{call}.{probe}\n");
+                let Ok(items) = crate::parser::parser::parse(src) else { return false };
+                match crate::lowerer::lower::lower(&items) {
+                    Err(_) => false,
+                    Ok(l) => crate::scree_graph::realizer::realize(&l.graph).is_ok(),
+                }
+            });
+            assert_eq!(
+                found.map(|(k, _)| *k),
+                Some(returns),
+                "{name} declares it returns {returns:?}, but `{call}` does not behave like one"
+            );
+        }
+    }
+
+    /// A name taking no arguments takes no receiver either — `x.noise` is an
+    /// arity error, which is why the editor drops these in method position.
+    #[test]
+    fn only_zero_argument_names_receive_nothing() {
+        for Entry { name, params, receives, .. } in callables() {
+            assert_eq!(
+                params.is_empty(),
+                receives == ValueKind::Nothing,
+                "{name}: params {params:?} disagrees with {receives:?}"
+            );
         }
     }
 }

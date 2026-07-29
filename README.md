@@ -78,6 +78,16 @@ changes.
 
 ### List Functions
 
+```rust
+let riff = [60, 63, 67]
+play(riff.rev.rotl(2), bass)
+play(riff.push(72).scramble, bass)
+riff.rev.play(bass)             // `play` takes a pattern, so it chains too
+```
+
+Lists are immutable. List functions generate a new list and leave the existing list intact.
+
+
 | Name | Signature | Notes |
 | --- | --- | --- |
 | `len` | `len(list) -> number` | Works on list literals and ranges. Errors on non-lists and on wrong arity. |
@@ -199,7 +209,7 @@ changes.
 | `reverb3` | `(audio → time, diffusion, damping_cutoff)` — allpass loop, no room size. |
 | `reverb4` | `(audio → room_size, time)` — slow fade-in, for swells rather than rooms. `room_size` is treated as at least 15 m; below that the delay times stop sounding like a space. |
 
-The reverbs and delays are **wet only** — mix the dry signal yourself:
+The reverbs and delays are wet only:
 
 ```
 fn pad(n) = saw(n.m2h) * env(0.3, 0.2, 0.7, 0.4, dur)

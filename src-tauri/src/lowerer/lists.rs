@@ -290,6 +290,27 @@ impl Lowerer {
                 list(out)
             }
 
+            // `map(list, transform)` — the function applied to every element.
+            //
+            // Unlike `filter` nothing is asked of what comes back, so a list of
+            // oscillators is as good as a list of numbers. That is the whole of
+            // what this adds over `for`, which collects the same way but sums
+            // instead as soon as its body is audio — leaving no other way to
+            // hold several voices apart before mixing them.
+            "map" => {
+                arity(func, args)?;
+                let items = as_list(func, &args[0])?;
+                let Value::Function(def) = &args[1] else {
+                    return Err("map: the second argument must be a function".into());
+                };
+
+                let mut out = Vec::with_capacity(items.len());
+                for v in items.iter() {
+                    out.push(self.apply("map", def.clone(), vec![v.clone()])?);
+                }
+                list(out)
+            }
+
             // `filter(list, predicate)` — keeps elements the predicate answers
             // non-zero for. The predicate is an ordinary user `fn`.
             "filter" => {

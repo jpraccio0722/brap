@@ -6,11 +6,14 @@ import type {
 } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
 import {
+  buildIndex,
   isCallable,
   requiredArgs,
   signature,
   type Builtin,
+  type BuiltinIndex,
   type LanguageMetadata,
+  type ValueKind,
 } from "./metadata";
 
 /**
@@ -23,7 +26,9 @@ import {
  */
 
 const FN = /\bfn\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)/g;
-const LET = /\blet\s+([a-zA-Z_]\w*)/g;
+/** A `let`, with as much of its value as fits on the line — enough to guess
+ *  whether the name holds a list. */
+const LET = /\blet\s+([a-zA-Z_]\w*)\s*(?:=\s*([^\n]*))?/g;
 const FOR = /\bfor\s+([a-zA-Z_]\w*)\s+in\b/g;
 /**
  * A `use`, split into its path and whatever follows it.
@@ -47,6 +52,14 @@ interface LocalSymbol {
   name: string;
   detail: string;
   type: "function" | "variable";
+  /** A `fn`'s parameter names. Absent for anything that is not one. */
+  params?: string[];
+  /** True for a name a `use` introduced. It may be a function or a module, and
+   *  both are writable after a `.`, so the two cases are not worth splitting. */
+  imported?: boolean;
+  /** A `let`'s value, as written. Resolved on demand to work out what a dot on
+   *  this name may reach — `let riff = [60, 63]` makes `riff.` a list. */
+  value?: string;
 }
 
 function scrapeLocals(doc: string): LocalSymbol[] {
@@ -62,6 +75,7 @@ function scrapeLocals(doc: string): LocalSymbol[] {
       name,
       detail: `${name}(${params.join(", ")})`,
       type: "function",
+      params,
     });
 
     // A function's own parameters are worth offering while writing its body.
@@ -72,18 +86,25 @@ function scrapeLocals(doc: string): LocalSymbol[] {
     }
   }
 
-  for (const re of [LET, FOR]) {
-    for (const [, name] of text.matchAll(re)) {
-      if (!found.has(name)) {
-        found.set(name, { name, detail: re === FOR ? "loop variable" : "binding", type: "variable" });
-      }
+  for (const [, name, value] of text.matchAll(LET)) {
+    if (!found.has(name)) {
+      found.set(name, { name, detail: "binding", type: "variable", value });
+    }
+  }
+
+  // A loop variable holds one element, so it is not the list being walked.
+  for (const [, name] of text.matchAll(FOR)) {
+    if (!found.has(name)) {
+      found.set(name, { name, detail: "loop variable", type: "variable" });
     }
   }
 
   for (const name of importedNames(text)) {
     // A module's name completes as a variable: what follows it is `::`, not
     // `(`, so inserting a call would be inserting the wrong thing.
-    if (!found.has(name)) found.set(name, { name, detail: "imported", type: "variable" });
+    if (!found.has(name)) {
+      found.set(name, { name, detail: "imported", type: "variable", imported: true });
+    }
   }
 
   return [...found.values()];
@@ -142,8 +163,203 @@ function builtinCompletion(b: Builtin): Completion {
   return option;
 }
 
+// ---------------------------------------------------------------------------
+// Method position.
+//
+// `a.f(b)` is the parser's spelling of `a >> f(b)`, which is the spelling of
+// `f(a, b)` — the receiver fills the first parameter. So what may follow a `.`
+// is every function of at least one argument, and what should be offered is
+// that function minus the parameter already filled: `push(list, value)` reads
+// `.push(value)` here, and `rev(list)` needs no parentheses at all.
+// ---------------------------------------------------------------------------
+
+/**
+ * After a `.` the file's usual local-first order is inverted for the functions
+ * that exactly suit the receiver. A list in front of the dot means `push` and
+ * `rev` are what is being reached for, whereas a scree file's own `fn`s are
+ * instruments — played with `play(pattern, kick)` rather than called on a list.
+ */
+const METHOD_BOOST = { suited: 3, local: 2, other: 1 } as const;
+
+/** `c4`, `af3`, `gs9` — a note name, which is a number everywhere downstream. */
+const NOTE = /^[a-g][sf]?\d$/;
+
+/**
+ * Whether a receiver of kind `receiver` may be written to the left of a name
+ * declaring `receives`.
+ *
+ * This mirrors `accepts` in `lang.rs` exactly. That function is the one under
+ * test — `every_builtin_receives_what_it_declares` compiles all 103 names
+ * against every kind of receiver — so any disagreement here is this file's bug.
+ */
+function accepts(receives: ValueKind, receiver: ValueKind): boolean {
+  // A receiver the tables cannot pin down rules nothing out.
+  if (receiver === "any") return true;
+  switch (receives) {
+    case "signal":
+      // A constant is a node input like any other, so a number reads here.
+      return receiver === "signal" || receiver === "number";
+    case "number":
+      return receiver === "number";
+    case "list":
+      return receiver === "list";
+    case "pattern":
+      // A bare value is a one-step pattern: `60.play(inst)` sounds once.
+      return receiver === "list" || receiver === "number";
+    case "play":
+      return receiver === "play";
+    default:
+      // "nothing" takes no argument at all; "any" is only ever a result.
+      return false;
+  }
+}
+
+/** The context an expression's kind is resolved against. */
+interface Scope {
+  index: BuiltinIndex;
+  locals: Map<string, LocalSymbol>;
+  patterns: Set<string>;
+}
+
+/** The index of the bracket matching the one `text` ends with, or null. */
+function matchingOpen(text: string, open: string, close: string): number | null {
+  let depth = 0;
+  for (let i = text.length - 1; i >= 0; i--) {
+    if (text[i] === close) depth++;
+    else if (text[i] === open && --depth === 0) return i;
+  }
+  return null;
+}
+
+/**
+ * What kind of value an expression produces, read from its last few characters.
+ *
+ * Like the rest of this file this reads text rather than a tree: the expression
+ * is half-written by definition, and the real parser would reject it. So it
+ * recognises the shapes that carry their kind on their surface and answers
+ * `"any"` — which rules nothing out — to everything else.
+ *
+ * `depth` bounds the walk through `let` bindings, so a file where two names
+ * refer to each other cannot spin.
+ */
+function kindOf(expr: string, scope: Scope, depth = 4): ValueKind {
+  const text = expr.trimEnd();
+  if (depth <= 0 || text === "") return "any";
+
+  // `rev([1, 2])` — a call, whose kind is whatever the name answers with.
+  if (text.endsWith(")")) {
+    const open = matchingOpen(text, "(", ")");
+    if (open === null) return "any";
+    const name = text.slice(0, open).trimEnd().match(/[a-zA-Z_]\w*$/)?.[0];
+    return name === undefined ? "any" : (scope.index.get(name)?.returns ?? "any");
+  }
+
+  // `[1, 2, 3]` is a list; `xs[0]` is one element of one, of no known kind.
+  // They differ only in whether something indexable sits before the bracket.
+  if (text.endsWith("]")) {
+    const open = matchingOpen(text, "[", "]");
+    if (open === null) return "any";
+    return /[a-zA-Z0-9_)\]]$/.test(text.slice(0, open)) ? "any" : "list";
+  }
+
+  // `0..=7` is a list of steps, like the literal it stands in for. A range
+  // inside brackets or a call was already consumed above, so a `..=` still
+  // visible here spans the whole expression.
+  if (text.includes("..=")) return "list";
+
+  const word = text.match(/[a-zA-Z_]\w*$/)?.[0];
+  if (word === undefined) {
+    // `60.m2h`, and `0.5.db`.
+    return /\d$/.test(text) ? "number" : "any";
+  }
+
+  // A name written after a dot is a call with its arguments omitted, so it is
+  // that name's result: in `riff.rev.push(72)`, `rev` is what `push` receives.
+  const before = text.slice(0, text.length - word.length);
+  if (before.endsWith(".") && !before.endsWith("..")) {
+    return scope.index.get(word)?.returns ?? "any";
+  }
+
+  // A bare builtin name is that name too — `dur` is the one that matters.
+  const builtin = scope.index.get(word);
+  if (builtin && !scope.locals.has(word)) return builtin.returns;
+
+  if (scope.patterns.has(word)) return "list";
+
+  const local = scope.locals.get(word);
+  if (local?.value !== undefined) return kindOf(local.value, scope, depth - 1);
+  // A `for` variable holds one element, and a parameter could be anything.
+  if (local !== undefined) return "any";
+
+  if (NOTE.test(word)) return "number";
+  return "any";
+}
+
+/**
+ * The offset of the `.` a name is being written after, or null when the cursor
+ * is not in method position.
+ *
+ * A range's `..=` is the one other place two of these characters meet, and its
+ * second dot is followed by `=` rather than by a name — but a range is written
+ * one character at a time, so `1..` is a state the completer really sees.
+ */
+function methodDot(doc: string, from: number): number | null {
+  const dot = from - 1;
+  if (doc[dot] !== "." || doc[dot - 1] === ".") return null;
+  return dot;
+}
+
+/**
+ * Insert a method: bare when the receiver fills every parameter that must be
+ * filled — `xs.rev`, `60.m2h` — and `name()` with the cursor between the
+ * parentheses when something is still owed.
+ */
+function applyMethod(name: string, takesArgs: boolean) {
+  return (view: EditorView, _completion: Completion, from: number, to: number) => {
+    const insert = takesArgs ? `${name}()` : name;
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + insert.length - (takesArgs ? 1 : 0) },
+    });
+  };
+}
+
+/** `push(list, value)` as it reads after a dot: `.push(value)`. */
+function methodCompletion(b: Builtin, boost: number): Completion {
+  // One fewer of each: the receiver has filled the first parameter.
+  const rest = b.params.slice(1);
+  const required = Math.max(requiredArgs(b) - 1, 0);
+  const parts = rest.map((p, i) => (i < required ? p : `${p}?`));
+  if (b.variadic) parts.push("...");
+
+  return {
+    label: b.name,
+    detail: parts.length ? `.${b.name}(${parts.join(", ")})` : `.${b.name}`,
+    info: b.doc,
+    type: "method",
+    boost,
+    apply: applyMethod(b.name, required > 0 || b.variadic),
+  };
+}
+
+/** The same, for a `fn` in the buffer or a name a `use` brought in. */
+function localMethodCompletion(s: LocalSymbol): Completion {
+  // An imported name may be a module, whose `::` the user writes themselves.
+  if (s.params === undefined) {
+    return { label: s.name, detail: s.detail, type: "variable", boost: METHOD_BOOST.local };
+  }
+  const rest = s.params.slice(1);
+  return {
+    label: s.name,
+    detail: rest.length ? `.${s.name}(${rest.join(", ")})` : `.${s.name}`,
+    type: "method",
+    boost: METHOD_BOOST.local,
+    apply: applyMethod(s.name, rest.length > 0),
+  };
+}
+
 /** Exposed for tests; not part of the extension's public surface. */
-export const __test = { scrapeLocals };
+export const __test = { scrapeLocals, methodDot, kindOf, accepts };
 
 /**
  * @param patternNames The drawn patterns' names, read at completion time
@@ -161,11 +377,22 @@ export function screeCompletions(
     boost: BOOST.keyword,
   }));
 
+  /** Callable at all, and with a first parameter for a receiver to fill. */
+  const methods = meta.builtins.filter((b) => isCallable(b) && b.params.length > 0);
+  const index = buildIndex(meta);
+
   return (context: CompletionContext): CompletionResult | null => {
+    const doc = context.state.doc.toString();
     const word = context.matchBefore(/[a-zA-Z_]\w*/);
-    // An explicit invocation on empty space should still list everything.
-    if (!word && !context.explicit) return null;
-    if (word?.from === word?.to && !context.explicit) return null;
+    const dot = methodDot(doc, word?.from ?? context.pos);
+
+    // A `.` is worth completing on its own: it is the one character after
+    // which the set of writable names is both small and hard to remember.
+    if (dot === null) {
+      // An explicit invocation on empty space should still list everything.
+      if (!word && !context.explicit) return null;
+      if (word?.from === word?.to && !context.explicit) return null;
+    }
 
     const patterns: Completion[] = patternNames().map((name) => ({
       label: name,
@@ -185,24 +412,69 @@ export function screeCompletions(
       // name, and the drawn one already says where to go and change it.
       ...patterns.map((p) => p.label),
     ]);
-    const locals = scrapeLocals(context.state.doc.toString())
-      .filter((s) => !taken.has(s.name))
-      .map(
-        (s): Completion => ({
-          label: s.name,
-          detail: s.detail,
-          type: s.type,
-          boost: BOOST.local,
-          apply: s.type === "function" ? applyCall(s.name, true) : undefined,
-        }),
-      );
+    const scraped = scrapeLocals(doc);
+    const visible = scraped.filter((s) => !taken.has(s.name));
 
-    const options = [...patterns, ...locals, ...keywords, ...builtins];
+    const options =
+      dot === null
+        ? [
+            ...patterns,
+            ...visible.map(
+              (s): Completion => ({
+                label: s.name,
+                detail: s.detail,
+                type: s.type,
+                boost: BOOST.local,
+                apply: s.type === "function" ? applyCall(s.name, true) : undefined,
+              }),
+            ),
+            ...keywords,
+            ...builtins,
+          ]
+        : methodOptions(dot);
 
     return {
       from: word?.from ?? context.pos,
       options,
       validFor: /^\w*$/,
     };
+
+    /**
+     * What may be written after the `.` at `dot`.
+     *
+     * Keywords, patterns and plain bindings are all absent: none of them is a
+     * function, so none can take the receiver. Of the functions, only those
+     * whose first parameter accepts what is in front of the dot survive — on a
+     * list that drops the 58 UGens and the arithmetic, every one of which would
+     * be a compile error rather than merely an unlikely thing to write.
+     *
+     * A receiver this cannot identify reads as `"any"`, which accepts
+     * everything: an unrecognised expression must not hide working names.
+     */
+    function methodOptions(dot: number): Completion[] {
+      const scope: Scope = {
+        index,
+        locals: new Map(scraped.map((s) => [s.name, s])),
+        patterns: new Set(patternNames()),
+      };
+      const receiver = kindOf(doc.slice(0, dot), scope);
+
+      const fromBuiltins = methods
+        .filter((b) => accepts(b.receives, receiver))
+        .map((b) =>
+          methodCompletion(
+            b,
+            // An exact match ranks above one that merely accepts: a list takes
+            // both `push` and `play`, and `push` is the likelier next word.
+            b.receives === receiver ? METHOD_BOOST.suited : METHOD_BOOST.other,
+          ),
+        );
+      // A user `fn` has no declared parameter kinds, so it is always offered.
+      const fromLocals = visible
+        .filter((s) => (s.params?.length ?? 0) > 0 || s.imported)
+        .map(localMethodCompletion);
+
+      return [...fromLocals, ...fromBuiltins];
+    }
   };
 }
