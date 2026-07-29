@@ -72,11 +72,14 @@ function callAt(text: string, pos: number): CallSite | null {
       const name = text.slice(j + 1, end);
       if (!name || /^[0-9]/.test(name)) return null;
 
-      // `lhs >> f(a)` passes lhs as f's first argument, so what the user is
-      // typing after the paren is really the second parameter.
+      // `lhs >> f(a)` and its tighter-binding twin `lhs.f(a)` both pass lhs as
+      // f's first argument, so what the user is typing after the paren is
+      // really the second parameter.
       let k = j;
       while (k >= 0 && /\s/.test(text[k])) k--;
-      const piped = k >= 1 && text[k - 1] === ">" && text[k] === ">";
+      const piped =
+        (k >= 1 && text[k - 1] === ">" && text[k] === ">") ||
+        (text[k] === "." && text[k - 1] !== ".");
 
       return { name, argIndex: commas + (piped ? 1 : 0) };
     } else if (c === "," && depth === 0) {

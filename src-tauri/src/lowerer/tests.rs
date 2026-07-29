@@ -1078,6 +1078,49 @@ fn split_chunks() {
 }
 
 #[test]
+fn map_applies_the_transform_to_every_element() {
+    let src = "fn up(n) = n + 12\n";
+    let g = lower_src(&format!("{src}sin(len(map([60, 63], up)))\n")).unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(2.0)])]);
+
+    let g = lower_src(&format!("{src}sin(map([60, 63], up)[0])\n")).unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(72.0)])]);
+
+    let g = lower_src(&format!("{src}sin(map([60, 63], up)[1])\n")).unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(75.0)])]);
+}
+
+#[test]
+fn map_reads_through_the_dot() {
+    let g = lower_src("fn up(n) = n + 12\nsin([60, 63].map(up)[0])\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(72.0)])]);
+}
+
+#[test]
+fn mapping_an_empty_list_is_empty() {
+    let g = lower_src("fn up(n) = n + 12\nsin(len(map([], up)))\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(0.0)])]);
+}
+
+/// The reason `map` earns its place beside `for`: a `for` whose body is audio
+/// sums, so the voices are gone by the time it answers. `map` keeps them apart.
+#[test]
+fn map_can_build_a_list_of_signals() {
+    let g = lower_src("fn voice(n) = sin(n)\nmap([110, 220], voice)[1]\n").unwrap();
+    let sines: Vec<_> = g.nodes.iter().filter(|n| n.kind == NodeKind::Sin).collect();
+    assert_eq!(sines.len(), 2, "both voices should still be in the graph");
+    assert_eq!(sines[1].inputs, vec![Const(220.0)]);
+    // Indexing picked one out, so nothing summed them.
+    assert!(!g.nodes.iter().any(|n| n.kind == NodeKind::Add));
+}
+
+#[test]
+fn map_rejects_a_non_function() {
+    let err = lower_src("sin(len(map([1, 2], 3)))\n").unwrap_err();
+    assert!(err.contains("function"), "got: {err}");
+}
+
+#[test]
 fn filter_keeps_matching_elements() {
     let src = "fn big(x) = x > 2\n";
     let g = lower_src(&format!("{src}sin(len(filter([1, 2, 3, 4], big)))\n")).unwrap();

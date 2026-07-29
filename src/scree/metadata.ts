@@ -6,7 +6,22 @@ import { invoke } from "@tauri-apps/api/core";
  * hand-maintained on this side: adding a UGen in Rust adds it to the editor.
  */
 
-export type BuiltinCategory = "ugen" | "list" | "special";
+export type BuiltinCategory = "ugen" | "list" | "math" | "special";
+
+/**
+ * A kind of value, as `lang::ValueKind` in the backend defines it. Both sides
+ * must read these the same way: `accepts` in `complete.ts` mirrors `accepts` in
+ * `lang.rs`, and the Rust test `every_builtin_receives_what_it_declares`
+ * compiles every name against every kind to keep the rule honest.
+ */
+export type ValueKind =
+  | "nothing"
+  | "any"
+  | "signal"
+  | "number"
+  | "list"
+  | "pattern"
+  | "play";
 
 export interface Builtin {
   name: string;
@@ -17,6 +32,10 @@ export interface Builtin {
   /** True when any count above the largest arity is also accepted. */
   variadic: boolean;
   category: BuiltinCategory;
+  /** What the first parameter accepts — so, what may be written before the dot. */
+  receives: ValueKind;
+  /** What the name answers with, for the next dot in a chain. */
+  returns: ValueKind;
   doc: string;
 }
 
