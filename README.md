@@ -68,13 +68,38 @@ changes.
 
 ## Function Reference
 
-- [List Functions](#fist-functions)
+- [Patterns and Playback](#patterns-and-playback)
+- [List Functions](#list-functions)
 - [Math Functions](#math-functions)
-- [Oscilators and Sources](#oscilators-and-sources)
+- [Oscillators and Sources](#oscillators-and-sources)
 - [Noise and Chaos](#noise-and-chaos)
 - [Filters](#filters)
-- [Envelopes and dynamics](#envelopes-and-dynamics)
+- [Envelopes and Dynamics](#envelopes-and-dynamics)
 - [Delays and Effects](#delays-and-effects)
+
+Every name here takes its first argument on the left of a dot, so `f(a, b)`,
+`a >> f(b)` and `a.f(b)` are three spellings of one call. The editor offers only
+the names that suit whatever is in front of the dot.
+
+In the UGen tables an **`→` separates ports from constants**. Everything to its
+left is a wired input and may be modulated by another signal; everything to its
+right is baked in when the graph is built and must be a compile-time number. So
+`tap(signal, delay → min_delay, max_delay)` follows a moving `delay`, while
+`delay(signal → time)` will not.
+
+### Patterns and Playback
+
+These are what turn a list into sound. `play` and its variants take the pattern
+first, so they chain off one like anything else: `riff.rev.play(bass)`.
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned **by name** — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. `legato:` scales the note's length instead of being passed. |
+| `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
+| `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
+| `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
+| `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called from the audio thread. |
+| `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
 
 ### List Functions
 
@@ -91,16 +116,18 @@ Lists are immutable. List functions generate a new list and leave the existing l
 | Name | Signature | Notes |
 | --- | --- | --- |
 | `len` | `len(list) -> number` | Works on list literals and ranges. Errors on non-lists and on wrong arity. |
-| `zip` | `zip(a, b, …) -> list of lists` | Variadic. Pairs positionally into rows `[[a0,b0], [a1,b1], …]`. **All arguments must be lists of equal length** — a mismatch is an error, not a silent truncation. Rows carry whatever `Value`s went in, including signals. |
+| `zip` | `zip(list, ...) -> list` | Variadic. Pairs positionally into rows `[[a0,b0], [a1,b1], …]`. **All arguments must be lists of equal length** — a mismatch is an error, not a silent truncation. Rows carry whatever `Value`s went in, including signals. |
 | `rev` | `rev(list) -> list` | Reversed. |
 | `palindrome` | `palindrome(list) -> list` | The sequence then its mirror: `[1,2,3]` → `[1,2,3,3,2,1]`. |
-| `rotl` / `rotr` | `rotl(list, n = 1) -> list` | Rotate left / right. The amount wraps, so `rotl(l, len(l))` is the identity, and a negative amount rotates the other way. An empty list is returned unchanged. |
+| `rotl` | `rotl(list, amount?) -> list` | Rotate left, wrapping. `amount` defaults to 1, and a negative amount rotates the other way — `rotl(l, -1)` is `rotr(l, 1)`. Rotating by the length is the identity. An empty list is returned unchanged. |
+| `rotr` | `rotr(list, amount?) -> list` | Rotate right, wrapping. The mirror of `rotl` in every respect. |
 | `push` | `push(list, value) -> list` | Appends. Returns a new list; the original is untouched. |
 | `pop` | `pop(list) -> list` | Drops the **last** element. Nothing is returned "off the top" — index the list for that. Errors on an empty list. |
 | `sort` | `sort(list) -> list` | Ascending. Every element must be a compile-time number. |
-| `sum` | `sum(list) -> number | signal` | Folds through the same `combine` the arithmetic operators use, so numbers fold to a constant and **signals emit `Add` nodes** — `sum([sin(110), sin(220)])` is additive synthesis without a `for`. Empty list → `0`. |
-| `split` | `split(list, n) -> list of lists` | Chunks of `n` (not split-at-index). A short final chunk is kept. `n` must be a whole number ≥ 1. |
-| `filter` | `filter(list, fn) -> list` | Keeps elements the predicate answers non-zero for. The predicate is an ordinary user `fn`; it must return a compile-time number. |
+| `sum` | `sum(list) -> value` | Folds through the same `combine` the arithmetic operators use, so numbers fold to a constant and **signals emit `Add` nodes** — `sum([sin(110), sin(220)])` is additive synthesis without a `for`. Empty list → `0`. |
+| `split` | `split(list, size) -> list` | Chunks of `size` (not split-at-index). A short final chunk is kept. `size` must be a whole number ≥ 1. |
+| `map` | `map(list, transform) -> list` | The function applied to every element. It is an ordinary user `fn` of one argument and may answer with anything, so `map` is also the only way to build a **list of signals** — a `for` over audio sums instead of collecting. |
+| `filter` | `filter(list, predicate) -> list` | Keeps elements the predicate answers non-zero for. The predicate is an ordinary user `fn`; it must return a compile-time number. |
 | `choice` | `choice(list) -> value` | One random element. Errors on an empty list. |
 | `wchoice` | `wchoice(values, weights) -> value` | Weighted random pick. Parallel lists of equal length, like `zip`. Weights must be finite and ≥ 0, and not all zero. |
 | `scramble` | `scramble(list) -> list` | Fisher-Yates shuffle. |
@@ -108,106 +135,109 @@ Lists are immutable. List functions generate a new list and leave the existing l
 ### Math Functions
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `m2h` | `m2h(note)` | MIDI note to hertz. `69.m2h` is 440, `60.m2h` is 261.63. Equal temperament, A4 = 440. Fractional notes work — that is how you get glides. |
-| `h2m` | `h2m(hz)` | The inverse. `440.h2m` is 69; the result may be fractional. Frequency must be above zero. |
-| `db` | `db(decibels)` | Decibels to linear amplitude. `0.db` is 1, `(-6).db` is about 0.5. |
-| `amp` | `amp(amplitude)` | The inverse. `1.amp` is 0. Amplitude must be above zero. |
-| `cents` | `cents(hz, cents)` | Detune a frequency by hundredths of a semitone. `440.cents(1200)` is 880. |
-| `bpm` | `bpm(beats)` | Beats per minute to cycles per second, **taking one cycle as four beats**. `120.bpm` is 0.5 — exactly `DEFAULT_CPS`. |
-| `oct` | `oct(note, octaves)` | Transpose by whole octaves. `60.oct(-1)` is 48. |
-| `semi` | `semi(note, semitones)` | Transpose by semitones. `60.semi(7)` is 67. |
-| `scale` | `scale(note, scale)` | Snap to the **nearest** tone of a scale given as semitone offsets within an octave. `61.scale([0,2,4,5,7,9,11])` is 60. Neighbouring octaves are candidates, so 59 against `[0,4,7]` rises to 60 rather than falling a seventh. Ties snap down. |
-| `clamp` | `clamp(x, lo, hi)` | Constrain to `lo..=hi`. An empty range is an error. |
-| `norm` | `norm(x, lo, hi)` | Map 0..1 onto `lo..hi`. Values outside 0..1 **extrapolate** — `clamp` first if that is not what you want. |
-| `wrap` | `wrap(x, lo, hi)` | Fold back into the range rather than clamping. `13.wrap(0, 12)` is 1. Useful for modular pitch. |
-| `round` / `floor` / `ceil` / `abs` | `round(x)` | The obvious ones. `round` takes halves away from zero. |
-| `pow` | `pow(x, exponent)` | `2.pow(10)` is 1024. For exponential curve shaping. |
-| `sqrt` | `sqrt(x)` | `x` must not be negative. |
-| `log2` | `log2(x)` | `x` must be above zero. |
+| `m2h` | `m2h(note) -> number` | MIDI note to hertz. `69.m2h` is 440, `60.m2h` is 261.63. Equal temperament, A4 = 440. Fractional notes work — that is how you get glides. |
+| `h2m` | `h2m(hz) -> number` | The inverse. `440.h2m` is 69; the result may be fractional. Frequency must be above zero. |
+| `db` | `db(decibels) -> number` | Decibels to linear amplitude. `0.db` is 1, `(-6).db` is about 0.5. |
+| `amp` | `amp(amplitude) -> number` | The inverse. `1.amp` is 0. Amplitude must be above zero. |
+| `cents` | `cents(hz, cents) -> number` | Detune a frequency by hundredths of a semitone. `440.cents(1200)` is 880. |
+| `bpm` | `bpm(beats) -> number` | Beats per minute to cycles per second, **taking one cycle as four beats**. `120.bpm` is 0.5 — exactly `DEFAULT_CPS`. |
+| `oct` | `oct(note, octaves) -> number` | Transpose by whole octaves. `60.oct(-1)` is 48. |
+| `semi` | `semi(note, semitones) -> number` | Transpose by semitones. `60.semi(7)` is 67. |
+| `scale` | `scale(note, scale) -> number` | Snap to the **nearest** tone of a scale given as semitone offsets within an octave. `61.scale([0,2,4,5,7,9,11])` is 60. Neighbouring octaves are candidates, so 59 against `[0,4,7]` rises to 60 rather than falling a seventh. Ties snap down. |
+| `clamp` | `clamp(x, lo, hi) -> number` | Constrain to `lo..=hi`. An empty range is an error. |
+| `norm` | `norm(x, lo, hi) -> number` | Map 0..1 onto `lo..hi`. Values outside 0..1 **extrapolate** — `clamp` first if that is not what you want. |
+| `wrap` | `wrap(x, lo, hi) -> number` | Fold back into the range rather than clamping. `13.wrap(0, 12)` is 1. Useful for modular pitch. |
+| `round` | `round(x) -> number` | Nearest whole number, halves away from zero. |
+| `floor` | `floor(x) -> number` | Round down. |
+| `ceil` | `ceil(x) -> number` | Round up. |
+| `abs` | `abs(x) -> number` | Magnitude, sign discarded. |
+| `pow` | `pow(x, exponent) -> number` | `2.pow(10)` is 1024. For exponential curve shaping. |
+| `sqrt` | `sqrt(x) -> number` | `x` must not be negative. |
+| `log2` | `log2(x) -> number` | `x` must be above zero. |
 
-### Oscilators and Sources
+### Oscillators and Sources
 
-| Function  | Arguments |
-| --- | --- |
-| `sin` | `(freq)` |
-| `saw` | `(freq)` |
-| `square` | `(freq)` |
-| `triangle` |  `(freq)` |
-| `soft_saw` | `(freq)` |
-| `hammond` |  `(freq)` |
-| `organ` | `(freq)` |
-| `ramp` | `(freq)` |
-| `poly_saw` | `(freq)` — band-limited |
-| `poly_square` | `(freq)` — band-limited |
-| `poly_pulse` | `(freq, duty)` — band-limited |
-| `pulse` | `(freq, duty)` |
-| `dsf_saw` | `(freq, roughness)` |
-| `dsf_square` | `(freq, roughness)` |
-| `impulse` | `()` — single-sample impulse |
+| Name | Arguments | Notes |
+| --- | --- | --- |
+| `sin` | `(frequency)` | Sine oscillator. |
+| `saw` | `(frequency)` | Bandlimited saw wavetable oscillator. |
+| `square` | `(frequency)` | Bandlimited square wavetable oscillator. |
+| `triangle` | `(frequency)` | Bandlimited triangle wavetable oscillator. |
+| `soft_saw` | `(frequency)` | Soft saw wavetable oscillator. Contains all partials but falls off like a triangle wave. |
+| `hammond` | `(frequency)` | Hammond organ wavetable oscillator. Emphasizes the first three partials. |
+| `organ` | `(frequency)` | Organ wavetable oscillator. Emphasizes octave partials. |
+| `ramp` | `(frequency)` | Rising ramp from 0 to 1 at the given repetition frequency. Not bandlimited — useful as a phasor, not as audio. |
+| `poly_saw` | `(frequency)` | PolyBLEP saw wave. Fast and fairly bandlimited. |
+| `poly_square` | `(frequency)` | PolyBLEP square wave. Fast and fairly bandlimited. |
+| `poly_pulse` | `(frequency, width)` | PolyBLEP pulse wave. Fast and fairly bandlimited; `width` in 0..=1 is the duty cycle. |
+| `pulse` | `(frequency, width)` | Bandlimited pulse wave oscillator. `width` in 0..=1 is the duty cycle. |
+| `dsf_saw` | `(frequency, roughness)` | Saw-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated. |
+| `dsf_square` | `(frequency, roughness)` | Square-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated. |
+| `impulse` | `()` | A single one followed by silence. Useful for exciting `pluck` or measuring an impulse response. |
 
 ### Noise and Chaos
-| Builtin | Arguments |
-| --- | --- |
-| `noise` | `()` — white |
-| `pink` | `()` |
-| `brown` | `()` |
-| `mls` | `()` — maximum-length sequence |
-| `mls_bits` | `(→ bits)` — **param only**, no ports |
-| `lorenz` | `(freq)` — chaotic attractor |
-| `rossler` | `(freq)` — chaotic attractor |
+| Name | Arguments | Notes |
+| --- | --- | --- |
+| `noise` | `()` | White noise. |
+| `pink` | `()` | Pink noise: -3 dB per octave. |
+| `brown` | `()` | Brown noise: -6 dB per octave. Darker than pink. |
+| `mls` | `()` | Maximum length sequence noise: a repeating pseudorandom run of -1 and 1. |
+| `mls_bits` | `(→ bits)` | Maximum length sequence noise from an n-bit sequence (1..=31). More bits means a longer period before it repeats. Constant. |
+| `lorenz` | `(frequency)` | Lorenz chaotic oscillator. The frequency input has only a slight effect on the output. |
+| `rossler` | `(frequency)` | Rossler chaotic oscillator, with peaks at multiples of the frequency input. |
 
 ### Filters
-| Builtin | Arguments |
-| --- | --- |
-| `lowpass` | `(audio, cutoff, Q)` |
-| `highpass` | `(audio, cutoff, Q)` |
-| `bandpass` | `(audio, center, Q)` |
-| `notch` | `(audio, center, Q)` |
-| `peak` | `(audio, center, Q)` |
-| `allpass` |`(audio, center, Q)` |
-| `lowrez` | `(audio, cutoff, Q)` |
-| `bandrez` | `(audio, center, Q)` |
-| `moog` | `(audio, cutoff, Q)` — Moog ladder |
-| `resonator` |  `(audio, center, bandwidth)` |
-| `bell` | `(audio, center, Q, gain)` |
-| `lowshelf` | `(audio, cutoff, Q, gain)` |
-| `highshelf` | `(audio, cutoff, Q, gain)` |
-| `morph` | `(audio, cutoff, Q, morph)` |
-| `lowpole` | `(audio, cutoff)` — 1-pole |
-| `highpole` | `(audio, cutoff)` — 1-pole |
-| `allpole` | `(audio, cutoff)` — 1-pole |
-| `butterpass` | `(audio, cutoff)` — Butterworth lowpass |
-| `pinkpass` | `(audio)` — pinking filter |
-| `dcblock` | `(audio)` |
-| `biquad` | `(audio → a1, a2, b0, b1, b2)` — raw coefficients, all params |
-| `fir3` | `(audio → gain)` |
+| Name | Arguments | Notes |
+| --- | --- | --- |
+| `lowpass` | `(audio, cutoff, q)` | Resonant lowpass filter. |
+| `highpass` | `(audio, cutoff, q)` | Resonant highpass filter. |
+| `bandpass` | `(audio, frequency, q)` | Bandpass filter. Keeps frequencies near the center, attenuating either side. |
+| `notch` | `(audio, frequency, q)` | Notch filter. Removes a narrow band around the center frequency. |
+| `peak` | `(audio, frequency, q)` | Peaking filter. |
+| `allpass` | `(audio, frequency, q)` | Allpass filter. Passes all frequencies but shifts their phase around the center frequency. |
+| `lowrez` | `(audio, cutoff, q)` | Resonant two-pole lowpass filter. |
+| `bandrez` | `(audio, frequency, q)` | Resonant two-pole bandpass filter. |
+| `moog` | `(signal, cutoff, q)` | Moog-style resonant lowpass ladder filter. |
+| `resonator` | `(audio, frequency, q)` | Constant-gain bandpass resonator. |
+| `bell` | `(audio, frequency, q, gain)` | Bell equalizer. Boosts or cuts a band around the center frequency by `gain` (an amplitude multiplier, not dB). |
+| `lowshelf` | `(audio, frequency, q, gain)` | Low shelf filter. Scales everything below the center frequency by `gain` (an amplitude multiplier). |
+| `highshelf` | `(audio, frequency, q, gain)` | High shelf filter. Scales everything above the center frequency by `gain` (an amplitude multiplier). |
+| `morph` | `(signal, frequency, q, morph)` | Filter that morphs continuously between modes: `morph` runs -1 (lowpass) to 0 (peak) to 1 (highpass). |
+| `lowpole` | `(audio, cutoff)` | First-order one-pole lowpass. No resonance. |
+| `highpole` | `(audio, cutoff)` | First-order one-pole one-zero highpass. No resonance. |
+| `allpole` | `(audio, delay)` | First-order allpass filter with a configurable delay at DC, in samples (must be > 0). |
+| `butterpass` | `(audio, cutoff)` | Second-order Butterworth lowpass. Maximally flat passband, no resonance control. |
+| `pinkpass` | `(signal)` | Pinking filter: -3 dB per octave. Turns white noise into pink. |
+| `dcblock` | `(signal)` | Remove DC offset, keeping the signal zero-centered. Cutoff is 10 Hz. |
+| `biquad` | `(signal → a1, a2, b0, b1, b2)` | Arbitrary biquad filter with coefficients in normalized form. All five coefficients must be constants. |
+| `fir3` | `(signal → gain)` | Three-point symmetric FIR filter, specified by its `gain` (>= 0) at the Nyquist frequency. A gain below 1 gives a gentle lowpass. |
 
-### Envelopes and dynamics
-| Builtin | Arguments |
-| --- | --- |
-| `perc` |`(→ attack, release)` — **params only, no ports.** Self-contained percussive shape: rise over `attack`, fall over `release`, silence after. Needs no note length, so it works in a voice **or** the persistent graph. |
-| `env` | `(→ attack, decay, sustain, release, dur)` — **params only, no ports.** Time-based ADSR whose release lands exactly on `dur`, so it fits inside the sequencer event. `sustain` is a **level** (clamped to 0..=1), not a time. Voice-only in practice, since `dur` is only bound there. |
-| `adsr` | `(gate → attack, decay, sustain, release)` — **gate-driven**, for the persistent graph. ⚠️ It swallows its first trigger: the underlying `adsr_live` starts in the "note already in progress" state, so a gate that is high from t=0 never fires an attack. It needs a full off→on edge first. Prefer `perc` / `env` in instruments. |
-| `follow` | `(audio → response_time)` — smoothing follower |
-| `afollow` | `(audio → attack, release)` — asymmetric follower |
-| `limiter` | `(audio → attack, release)` |
-| `clip` | `(audio)` — clip to ±1 |
-| `clip_to` | `(audio → min, max)` |
-| `declick` | `(audio)` — fade in at start |
+### Envelopes and Dynamics
+| Name | Arguments | Notes |
+| --- | --- | --- |
+| `perc` | `(→ attack, release)` | Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph. Both times are constants. |
+| `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices, with the release landing exactly on `duration`. Pass the voice-bound `dur` as the duration. All arguments are constants. |
+| `adsr` | `(gate → attack, decay, sustain, release)` | Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1. |
+| `follow` | `(signal → response_time)` | Parameter follower. Smooths the signal with the given halfway response time, in seconds. |
+| `afollow` | `(signal → attack, release)` | Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds). |
+| `limiter` | `(signal → attack, release)` | Look-ahead limiter holding the signal to -1..=1. Look-ahead equals the attack time. Times are constants, in seconds. |
+| `clip` | `(signal)` | Hard-clip the signal to -1..=1. |
+| `clip_to` | `(signal → minimum, maximum)` | Hard-clip the signal to `minimum`..=`maximum`. Both bounds are constants. |
+| `declick` | `(signal)` | Fade the signal in over 10 ms from time zero, suppressing the click at the start of a graph. |
 
 ### Delays and Effects
-| Builtin | Arguments |
-| --- | --- |
-| `delay` | `(audio → time)` — fixed delay in seconds |
-| `tap` | `(audio, delay_time → min_delay, max_delay)` — modulatable tap |
-| `tick` | `(audio)` — one-sample delay |
-| `hold` | `(audio, freq → variability)` — sample & hold |
-| `chorus` | `(audio → seed, separation, variation, mod_freq)` |
-| `pluck` | `(excitation → freq, gain_per_second, damping)` — Karplus-Strong |
-| `reverb` | `(audio → room_size, time, damping)` — 32-channel FDN. `room_size` in meters (10 is average), `time` is decay to -60 dB, `damping` in 0..=1 rolls off the highs. |
-| `reverb2` | `(audio → room_size, time, diffusion, modulation, damping_cutoff)` — hybrid FDN, richer and more expensive. `room_size` clamps to 10..=30 m, `diffusion` in 0..=1 thickens the tail, `modulation` near 1 adds movement (higher goes audibly Doppler), `damping_cutoff` is a lowpass in hertz applied on each loop pass. |
-| `reverb3` | `(audio → time, diffusion, damping_cutoff)` — allpass loop, no room size. |
-| `reverb4` | `(audio → room_size, time)` — slow fade-in, for swells rather than rooms. `room_size` is treated as at least 15 m; below that the delay times stop sounding like a space. |
+| Name | Arguments | Notes |
+| --- | --- | --- |
+| `delay` | `(signal → time)` | Fixed delay of `time` seconds, rounded to the nearest sample. The time is a constant — use `tap` for a modulatable delay. |
+| `tap` | `(signal, delay → min_delay, max_delay)` | Tapped delay line with cubic interpolation. Unlike `delay`, the delay time is a signal, so it can be modulated — it must stay within the constant `min_delay`..=`max_delay` bounds, in seconds. |
+| `tick` | `(signal)` | Single-sample delay. The building block for feedback and comb filters. |
+| `hold` | `(signal, frequency → variability)` | Sample-and-hold. Samples the signal at `frequency` Hz; `variability` in 0..=1 jitters the sampling interval and is a constant. |
+| `chorus` | `(audio → seed, separation, variation, mod_frequency)` | Five-voice mono chorus, mixed with the dry signal. Stack two with different seeds for stereo. All parameters except the audio input are constants. |
+| `pluck` | `(excitation → frequency, gain_per_second, damping)` | Karplus-Strong plucked string. Feed it a burst — `impulse()` or a short noise envelope — as the excitation. Frequency, gain and damping (0..=1) are constants. |
+| `reverb` | `(audio → room_size, time, damping)` | Reverb (32-channel FDN). `room_size` is in meters (10 is an average room), `time` is the decay to -60 dB in seconds, `damping` in 0..=1 rolls off the highs. Wet only: `x + reverb(x, 10, 3, 0.5) * 0.2`. All parameters except the audio input are constants. |
+| `reverb2` | `(audio → room_size, time, diffusion, modulation, damping_cutoff)` | Hybrid FDN reverb — richer and more expensive than `reverb`. `room_size` is in meters and clamps to 10..=30, `diffusion` in 0..=1 thickens the tail, `modulation` around 1 adds movement (higher goes audibly Doppler), and `damping_cutoff` is the lowpass applied to each loop pass, in hertz. Wet only. All parameters except the audio input are constants. |
+| `reverb3` | `(audio → time, diffusion, damping_cutoff)` | Allpass-loop reverb, with no room size — just `time` to -60 dB, `diffusion` in 0..=1, and a `damping_cutoff` in hertz applied to each loop pass. Wet only. All parameters except the audio input are constants. |
+| `reverb4` | `(audio → room_size, time)` | Reverb with a slow fade-in, for swells rather than rooms. `room_size` is in meters and is treated as at least 15; below that the delay times stop sounding like a space. Wet only. Both `room_size` and `time` are constants. |
 
 The reverbs and delays are wet only:
 
