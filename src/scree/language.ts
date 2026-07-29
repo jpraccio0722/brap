@@ -16,11 +16,12 @@ import type { BuiltinIndex, LanguageMetadata } from "./metadata";
  * A stream tokenizer rather than a Lezer grammar: scree's lexical structure is
  * flat enough that a generated parser would buy nothing but a build step.
  *
- * The one rule worth stating explicitly — **scree has no string literal, and no
- * escape sequences**. The JavaScript mode this replaces treated the backtick
- * rest token as the start of a template literal, which swallowed the remainder
- * of the file, and would read a backslash trigger as escaping the next
- * character. Both are ordinary one-character tokens here.
+ * The one rule worth stating explicitly — **scree's only string is the path in
+ * `load("...")`, and it has no escape sequences**. The JavaScript mode this
+ * replaces treated the backtick rest token as the start of a template literal,
+ * which swallowed the remainder of the file, and would read a backslash trigger
+ * as escaping the next character. Both are ordinary one-character tokens here,
+ * and a string runs to the next `"` or the end of the line — never past it.
  */
 
 /** The rest token: `` ` `` inside a pattern. Its own tag, because it is the
@@ -38,6 +39,12 @@ export const noteTag = Tag.define();
 
 /** Matches `lex.rs`'s number regex, anchored for `StringStream.match`. */
 const NUMBER = /^(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?/;
+/**
+ * Mirrors `lex.rs`'s string regex: double quotes, no escapes, and no newline
+ * inside — so an unclosed quote colours to the end of its line rather than
+ * swallowing the rest of the file.
+ */
+const STRING = /^"[^"\n]*"?/;
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*/;
 /**
  * Mirrors `lang::note`. Whole-string, and the octave is required — that is
@@ -96,6 +103,14 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
       if (stream.match(NUMBER)) {
         state.afterFn = false;
         return "number";
+      }
+
+      // The path in a `load`. Matched before the trigger branch so the
+      // backslash in a Windows-style path is part of the string rather than a
+      // pattern step.
+      if (stream.match(STRING)) {
+        state.afterFn = false;
+        return "string";
       }
 
       // The two pattern literals. Neither can start an identifier, so their
@@ -182,6 +197,9 @@ export const screeHighlightStyle = HighlightStyle.define([
   // to the base tag, and fallback runs specific -> general, never the reverse.
   { tag: t.comment, color: "#6b7280", fontStyle: "italic" },
   { tag: t.number, color: "#f0abfc" },
+  // A path is data on disk rather than a value in the program, so it is given
+  // the calm green strings usually get and left out of the pattern palette.
+  { tag: t.string, color: "#86efac" },
   { tag: t.keyword, color: "#c084fc" },
   { tag: builtinTag, color: "#5eead4" },
   // Rose: warm like a pitch, and clear of the fuchsia numbers, the amber

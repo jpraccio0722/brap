@@ -358,6 +358,7 @@ mod tests {
             bindings: Vec::new(),
             play_start: 0.0,
             rng: 0x9E37_79B9_7F4A_7C15,
+            samples: Default::default(),
         }
     }
 

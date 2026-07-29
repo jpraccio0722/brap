@@ -4,6 +4,7 @@ use crate::scree_graph::graph::ScreeGraph;
 use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::parser::parser::ScreeItem;
 use crate::pattern::patterns::Binding;
+use crate::samples::Samples;
 
 pub struct Lowerer {
     pub env: Env,
@@ -17,6 +18,10 @@ pub struct Lowerer {
     pub play_start: f64,
     /// Seeded per eval, so `choice` and `scramble` differ each time.
     pub rng: u64,
+    /// The buffers this program's `load` calls name, decoded before lowering
+    /// began. Empty for a program that names no file — and for every caller
+    /// that has no business reading one.
+    pub samples: Samples,
 }
 
 /// One eval produces two artifacts: the persistent graph, which is crossfaded
@@ -36,8 +41,25 @@ fn seed_from_clock() -> u64 {
         | 1
 }
 
+/// Lower a program that names no audio files.
+///
+/// Only tests reach this: the app always has a sample cache to hand and goes
+/// through `lower_with_samples`, passing an empty set when the program names
+/// no file. Kept because most of what there is to test about lowering has
+/// nothing to do with buffers, and threading an empty one through every case
+/// would say otherwise.
+#[cfg(test)]
 pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
-    lower_inner(items, None)
+    lower_inner(items, None, Samples::default())
+}
+
+/// Lower a program, with the buffers its `load` calls name already decoded.
+///
+/// Separate from `lower` rather than a parameter on it because most callers —
+/// every test, and the editor's own compile-to-check-for-errors — have no
+/// filesystem behind them and nothing to pass.
+pub fn lower_with_samples(items: &Vec<ScreeItem>, samples: Samples) -> Result<Lowered, String> {
+    lower_inner(items, None, samples)
 }
 
 /// Lower a single scheduler voice.
@@ -45,11 +67,22 @@ pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
 /// `dur` (the note length in seconds) is pre-bound as an ordinary number, so an
 /// instrument can shape itself against the note it is playing — `env(a, d, s,
 /// r, dur)`. Outside a voice the name is simply unbound.
-pub fn lower_voice(items: &Vec<ScreeItem>, dur: f64) -> Result<Lowered, String> {
-    lower_inner(items, Some(dur))
+///
+/// `samples` comes from the eval that published the instruments, so an
+/// instrument that reads a buffer builds here without touching a disk.
+pub fn lower_voice(
+    items: &Vec<ScreeItem>,
+    dur: f64,
+    samples: Samples,
+) -> Result<Lowered, String> {
+    lower_inner(items, Some(dur), samples)
 }
 
-fn lower_inner(items: &Vec<ScreeItem>, dur: Option<f64>) -> Result<Lowered, String> {
+fn lower_inner(
+    items: &Vec<ScreeItem>,
+    dur: Option<f64>,
+    samples: Samples,
+) -> Result<Lowered, String> {
     let mut lw = Lowerer {
         env: Env::new(),
         graph: ScreeGraph::default(),
@@ -57,6 +90,7 @@ fn lower_inner(items: &Vec<ScreeItem>, dur: Option<f64>) -> Result<Lowered, Stri
         bindings: Vec::new(),
         play_start: 0.0,
         rng: seed_from_clock(),
+        samples,
     };
 
     if let Some(dur) = dur {

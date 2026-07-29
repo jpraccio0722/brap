@@ -46,6 +46,12 @@ pub enum ValueKind {
     Pattern,
     /// A handle from `play`, `play_once`, `playn` or `play_all`.
     Play,
+    /// A loaded audio file, from `load`.
+    Buffer,
+    /// A double-quoted string. Only `load` takes one, and only written out —
+    /// so nothing ever *answers* with text, and nothing can be chained into a
+    /// name that wants it.
+    Text,
 }
 
 /// A UGen builtin: a name that lowers to a graph node.
@@ -485,7 +491,7 @@ pub static UGENS: &[Ugen] = &[
         params: &["frequency"],
         receives: ValueKind::Signal,
         returns: ValueKind::Signal,
-        doc: "Rising ramp from 0 to 1 at the given repetition frequency. Not bandlimited — useful as a phasor, not as audio.",
+        doc: "Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of the cycle, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end.",
     },
     Ugen {
         name: "resonator",
@@ -945,7 +951,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. `legato:` scales the note's length instead of being passed.",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
     },
     ListBuiltin {
         name: "play_once",
@@ -982,6 +988,42 @@ pub static SPECIALS: &[ListBuiltin] = &[
         receives: ValueKind::Nothing,
         returns: ValueKind::Number,
         doc: "The current note's length in seconds. Bound only inside a voice — pass it to `env`.",
+    },
+    ListBuiltin {
+        name: "load",
+        params: &["path"],
+        arities: &[1],
+        variadic: false,
+        receives: ValueKind::Text,
+        returns: ValueKind::Buffer,
+        doc: "Read an audio file into a buffer: `let amen = load(\"breaks/amen.wav\")`. The path is relative to the file it is written in, the same way a `use` path is, and must be written out rather than computed — every file is decoded once, before the program runs, so no note ever waits on a disk. Any format symphonia reads: wav, mp3, flac, ogg. Nothing comes out of a buffer until `sample` reads it.",
+    },
+    ListBuiltin {
+        name: "sample",
+        params: &["buffer", "position", "channel"],
+        arities: &[2, 3],
+        variadic: false,
+        receives: ValueKind::Buffer,
+        returns: ValueKind::Signal,
+        doc: "Read a buffer at a position: 0 is the start, 1 is the end, and anything outside that is silence. `position` is a signal, which is where speed, direction and chopping all come from — `sample(b, ramp(1 / b.secs))` plays it forwards, `1 - ramp(...)` backwards, `ramp(...) * 0.25` reads the first quarter. Cubic interpolation, so it holds up away from its own speed. `channel` defaults to 0 and wraps if the buffer has fewer.",
+    },
+    ListBuiltin {
+        name: "secs",
+        params: &["buffer"],
+        arities: &[1],
+        variadic: false,
+        receives: ValueKind::Buffer,
+        returns: ValueKind::Number,
+        doc: "How long a buffer is, in seconds. A compile-time number, so it divides into a `ramp` frequency: `ramp(1 / amen.secs)` is a phasor that reads the whole buffer once at its own speed.",
+    },
+    ListBuiltin {
+        name: "channels",
+        params: &["buffer"],
+        arities: &[1],
+        variadic: false,
+        receives: ValueKind::Buffer,
+        returns: ValueKind::Number,
+        doc: "How many channels a buffer has — 1 for mono, 2 for a stereo file. Useful for deciding whether a second `sample` on channel 1 would say anything different.",
     },
 ];
 
@@ -1211,23 +1253,27 @@ mod tests {
         }
     }
 
-    /// `dur` aside, every special is one of the `play` family — and the lowerer
-    /// has to intercept exactly those. A name in the table the lowerer does not
-    /// know is completable but not callable; one it knows that is missing here
-    /// is callable but invisible to the editor.
+    /// `dur` aside, every special is a name `lowerer::call` picks off its own
+    /// path rather than finding in a table — and it has to intercept exactly
+    /// those. A name in the table the lowerer does not know is completable but
+    /// not callable; one it knows that is missing here is callable but
+    /// invisible to the editor.
     #[test]
-    fn the_table_and_the_lowerer_agree_on_the_play_family() {
+    fn the_table_and_the_lowerer_agree_on_the_specials() {
         use crate::lowerer::lower::Lowerer;
         for b in SPECIALS {
-            // `dur` is a bound value rather than a call; `then` and `play_all`
-            // are intercepted on their own paths — everything else is a `play`.
+            // `dur` is a bound value rather than a call. Everything else is
+            // intercepted somewhere: the `play` family, `then`, `play_all`,
+            // `load`, and the three that begin from a buffer.
             let intercepted = Lowerer::is_play(b.name)
                 || Lowerer::is_then(b.name)
-                || Lowerer::is_play_all(b.name);
+                || Lowerer::is_play_all(b.name)
+                || Lowerer::is_load(b.name)
+                || Lowerer::is_buffer_builtin(b.name);
             assert_eq!(
                 intercepted,
                 b.name != "dur",
-                "{} is intercepted by one of the two and not the other",
+                "{} is in the table but nothing intercepts it (or the reverse)",
                 b.name,
             );
         }
@@ -1321,12 +1367,31 @@ mod receives_tests {
     const PREAMBLE: &str = "fn inst(n) = sin(n)\nfn pred(x) = 1\nfn section() = play([60], inst)\n";
 
     /// One value of each kind that can stand to the left of a dot.
-    const RECEIVERS: [(ValueKind, &str); 4] = [
+    ///
+    /// There is no `Text` receiver: a string is only ever written out as
+    /// `load`'s argument, so no expression answers with one and nothing can be
+    /// chained from it.
+    const RECEIVERS: [(ValueKind, &str); 5] = [
         (ValueKind::Number, "1"),
         (ValueKind::Signal, "sin(220)"),
         (ValueKind::List, "[1, 2, 3]"),
         (ValueKind::Play, "playn([60, 63], inst, 2)"),
+        (ValueKind::Buffer, "load(\"test.wav\")"),
     ];
+
+    /// The one buffer these tests know about, under the path they all write.
+    ///
+    /// Synthesized rather than read from disk: what is in it never matters
+    /// here, only that `load("test.wav")` answers with a buffer so the kinds
+    /// can be probed.
+    fn test_samples() -> crate::samples::Samples {
+        use std::sync::Arc;
+        let mut wave = fundsp::wave::Wave::new(1, 44100.0);
+        for i in 0..64 {
+            wave.push(i as f32 / 64.0);
+        }
+        crate::samples::Samples::from_pairs([("test.wav".to_string(), Arc::new(wave))])
+    }
 
     /// Whether a receiver of kind `receiver` may be written to the left of a
     /// name declaring `receives`. This is the rule the editor filters on; the
@@ -1347,6 +1412,10 @@ mod receives_tests {
             // A bare value is a one-step pattern: `60.play(inst)` sounds once.
             ValueKind::Pattern => matches!(receiver, ValueKind::List | ValueKind::Number),
             ValueKind::Play => receiver == ValueKind::Play,
+            ValueKind::Buffer => receiver == ValueKind::Buffer,
+            // Written out at the call, never produced — so nothing stands to
+            // the left of a name that wants one.
+            ValueKind::Text => false,
             ValueKind::Nothing => false,
         }
     }
@@ -1364,6 +1433,9 @@ mod receives_tests {
             "room_size" => "15",
             "hi" | "maximum" => "2",
             "times" => "2",
+            "buffer" => "load(\"test.wav\")",
+            "path" => "\"test.wav\"",
+            "channel" => "0",
             _ => "1",
         }
     }
@@ -1383,7 +1455,7 @@ mod receives_tests {
         let Ok(items) = crate::parser::parser::parse(format!("{PREAMBLE}{call}\n")) else {
             return false;
         };
-        match crate::lowerer::lower::lower(&items) {
+        match crate::lowerer::lower::lower_with_samples(&items, test_samples()) {
             Err(_) => false,
             Ok(l) => crate::scree_graph::realizer::realize(&l.graph).is_ok(),
         }
@@ -1462,6 +1534,8 @@ mod receives_tests {
                 "list" | "values" => "[1, 2, 3]",
                 "pattern" => "[60, 63]",
                 "play" => "playn([60, 63], inst, 2)",
+                "buffer" => "load(\"test.wav\")",
+                "path" => "\"test.wav\"",
                 _ => "1",
             };
             a
@@ -1471,9 +1545,11 @@ mod receives_tests {
 
     /// One name per kind that accepts that kind and no other, so which of them
     /// compiles identifies what the receiver was.
-    const PROBES: [(ValueKind, &str); 4] = [
+    const PROBES: [(ValueKind, &str); 5] = [
         (ValueKind::List, "len"),
         (ValueKind::Play, "play_all"),
+        // Nothing but a buffer has a length in seconds.
+        (ValueKind::Buffer, "secs"),
         // `m2h` takes a number and refuses a signal; `clip` takes either. So a
         // receiver both accept is a number, and one only `clip` accepts is a
         // signal. Order matters: the narrower probe is asked first.
@@ -1499,7 +1575,7 @@ mod receives_tests {
             let found = PROBES.iter().find(|(_, probe)| {
                 let src = format!("{PREAMBLE}{call}.{probe}\n");
                 let Ok(items) = crate::parser::parser::parse(src) else { return false };
-                match crate::lowerer::lower::lower(&items) {
+                match crate::lowerer::lower::lower_with_samples(&items, test_samples()) {
                     Err(_) => false,
                     Ok(l) => crate::scree_graph::realizer::realize(&l.graph).is_ok(),
                 }

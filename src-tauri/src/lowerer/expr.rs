@@ -175,6 +175,13 @@ impl Lowerer {
             
             Expr::Num(n) => Ok(Value::Number(*n)),
 
+            // `load` takes its path syntactically — see `lowerer::sample` — so
+            // a string that reaches here is one written somewhere a string
+            // cannot go.
+            Expr::Str(s) => Err(format!(
+                "a string is only meaningful as the path in `{}(\"...\")`, and \"{s}\" \
+                 is somewhere else", crate::samples::LOAD)),
+
             Expr::Rest => Ok(Value::Rest),
 
             Expr::Trigger => Ok(Value::Trigger),
@@ -262,6 +269,9 @@ impl Lowerer {
             Value::Signal(id) => Ok(NodeInput::Node(id)),
             Value::Function(_) => Err("cannot use a function as a signal".into()),
             Value::List(_) => Err("cannot use a list as a signal (iterate it with `for`)".into()),
+            Value::Buffer(_) => Err(
+                "cannot use a buffer as a signal — read it at a position with \
+                 `sample(buffer, position)`".into()),
             Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
             Value::Trigger => Err("cannot use a trigger as a signal (triggers belong in patterns)".into()),
             Value::Play { .. } => Err(

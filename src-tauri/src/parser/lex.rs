@@ -130,6 +130,16 @@ pub enum Token {
     #[token(";")]
     Semi,
 
+    /// A double-quoted string: the path in `load("break.wav")`, and nothing
+    /// else so far. No escapes — a path with a `"` in it cannot be written,
+    /// which is a trade for a rule that fits on one line and a lexer that
+    /// cannot run off the end of a file looking for a closing quote.
+    #[regex(r#""[^"\n]*""#, |lex| {
+        let s = lex.slice();
+        s[1..s.len() - 1].to_string()
+    })]
+    Str(String),
+
     #[token(">>")]
     ShiftRight,
 
@@ -186,6 +196,7 @@ impl fmt::Display for Token {
             Token::Trigger => "\\",
             Token::Percent => "%",
             Token::Semi => ";",
+            Token::Str(s) => return write!(f, "\"{s}\""),
             Token::ShiftRight => ">>",
             Token::Sub => "-",
             Token::Use => "use",

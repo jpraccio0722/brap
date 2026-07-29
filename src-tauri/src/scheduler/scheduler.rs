@@ -455,6 +455,45 @@ mod pass_tests {
         assert!(short < 0.01, "legato should have cut it short, got {short}");
     }
 
+    /// A pan lane rides through the binding as an ordinary lane value and is
+    /// spent on the voice at the far end of the pipeline, so the only proof
+    /// that all of it is wired together is source in and two channels out.
+    #[test]
+    fn a_pan_lane_reaches_the_stereo_output() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let render = |src: &str| {
+            let ast = parse(src.to_string()).unwrap();
+            let lowered = lower(&ast).expect("lower failed");
+            let state = SchedulerState::new();
+            *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+            *state.patterns.lock().unwrap() =
+                Patterns { bindings: lowered.bindings, ..Default::default() };
+
+            let clock = Clock::with_cps(44100.0, 1.0);
+            let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+            seq.set_sample_rate(44100.0);
+            pass(&mut seq, &clock, &state, None);
+
+            // Past the voice's own fade-in, so this measures the placement
+            // rather than the ramp towards it.
+            let frames: Vec<(f32, f32)> = (0..4410).map(|_| seq.get_stereo()).collect();
+            frames[2205..].iter().fold((0.0f32, 0.0f32), |(l, r), (a, b)| {
+                (l.max(a.abs()), r.max(b.abs()))
+            })
+        };
+
+        let (left, right) = render("fn tone(n) = sin(n)\nplay([220], tone, pan: -1)\n");
+        assert!(left > 0.9, "the voice should be in the left channel, got {left}");
+        assert!(right < 1e-4, "the right channel should be empty, got {right}");
+
+        // The same program without the lane is centred, which is what says the
+        // lane did it rather than the pipeline being lopsided all along.
+        let (left, right) = render("fn tone(n) = sin(n)\nplay([220], tone)\n");
+        assert!((left - right).abs() < 1e-4, "unpanned should be centred: {left} vs {right}");
+    }
+
     /// Re-running with no clock movement must not re-schedule the same notes.
     #[test]
     fn repeated_passes_do_not_double_trigger() {

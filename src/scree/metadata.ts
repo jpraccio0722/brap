@@ -21,7 +21,12 @@ export type ValueKind =
   | "number"
   | "list"
   | "pattern"
-  | "play";
+  | "play"
+  /** A loaded audio file, from `load`. */
+  | "buffer"
+  /** A double-quoted string. Only `load` takes one, and only written out, so
+   *  nothing ever answers with text and nothing chains into a name wanting it. */
+  | "text";
 
 export interface Builtin {
   name: string;

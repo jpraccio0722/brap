@@ -1,6 +1,10 @@
 use fundsp::prelude64::*;
 
-use crate::scree_graph::{graph::ScreeGraph, ugen_nodes::{NodeInput, NodeKind, UGenNode}};
+use crate::scree_graph::{
+    graph::ScreeGraph,
+    sample_reader::SampleReader,
+    ugen_nodes::{NodeInput, NodeKind, UGenNode},
+};
 
 /// How often a time-based envelope samples its shape. `Envelope` linearly
 /// interpolates between samples, and these shapes are piecewise linear, so
@@ -214,7 +218,14 @@ pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
             NodeKind::PolySaw => (Box::new(poly_saw()), 1),
             NodeKind::PolySquare => (Box::new(poly_square()), 1),
             NodeKind::Pulse => (Box::new(pulse()), 2),
-            NodeKind::Ramp => (Box::new(ramp()), 1),
+            // Explicitly from zero. fundsp's `ramp()` seeds its phase from the
+            // node's hash, so a bare one starts partway up and lands somewhere
+            // different every time the graph is rebuilt — which is every note,
+            // for a voice. A phasor whose zero is not the beginning cannot
+            // drive `sample`: the chop would start at an arbitrary point in the
+            // buffer, differently each time. The name says "rising ramp from
+            // 0", and this is what makes that true.
+            NodeKind::Ramp => (Box::new(An(Ramp::<f64>::with_phase(0.0))), 1),
             NodeKind::Resonator => (Box::new(resonator()), 3),
             NodeKind::Reverb => (
                 mono(reverb_stereo(
@@ -250,6 +261,27 @@ pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
                 1,
             ),
             NodeKind::Rossler => (Box::new(rossler()), 1),
+            NodeKind::Sample => {
+                // The buffer is named by index into the graph's own table —
+                // the one construction-time parameter that is not a number the
+                // program wrote, so it is checked here rather than trusted.
+                let index = const_param(n, 1, "sample buffer")? as usize;
+                let Some(wave) = graph.samples.get(index) else {
+                    return Err(format!(
+                        "sample: buffer {index} is not in this graph (it has {})",
+                        graph.samples.len()
+                    ));
+                };
+                let channel = const_param(n, 2, "sample channel")?;
+                if channel < 0.0 || channel.fract() != 0.0 {
+                    return Err(format!(
+                        "sample: channel must be a whole number from 0, got {channel}"));
+                }
+                (
+                    Box::new(An(SampleReader::new(wave.clone(), channel as usize))),
+                    1,
+                )
+            }
             NodeKind::Saw => (Box::new(saw()), 1),
             NodeKind::Sin => (Box::new(sine()), 1),
             NodeKind::SoftSaw => (Box::new(soft_saw()), 1),
@@ -358,6 +390,7 @@ mod tests {
                 },
             ],
             output: Some(NodeId(1)),
+            ..Default::default()
         };
 
         let mut net = realize(&graph).unwrap();
@@ -395,6 +428,7 @@ mod tests {
                 },
             ],
             output: Some(NodeId(1)),
+            ..Default::default()
         };
 
         let err = match realize(&graph) {
@@ -418,7 +452,7 @@ mod envelope_tests {
     /// Render `src` as a voice with note length `dur` and return its samples.
     fn render_voice(src: &str, dur: f64, secs: f64) -> Vec<f32> {
         let items = parse(src.to_string()).expect("parse failed");
-        let lowered = lower_voice(&items, dur).expect("lower failed");
+        let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
         let mut net = realize(&lowered.graph).expect("realize failed");
         net.check();
         net.set_sample_rate(SR);
@@ -520,6 +554,7 @@ mod envelope_tests {
                 },
             ],
             output: Some(NodeId(1)),
+            ..Default::default()
         };
         let err = match realize(&graph) {
             Err(e) => e,
@@ -621,5 +656,113 @@ mod reverb_tests {
             Ok(_) => panic!("expected a signal-valued reverb time to be an error"),
         };
         assert!(err.contains("must be a constant"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod sample_tests {
+    use super::*;
+    use crate::lowerer::lower::lower_with_samples;
+    use crate::parser::parser::parse;
+    use std::sync::Arc;
+
+    /// Lower and realize a program that reads one buffer: a one-second ramp
+    /// from -1 to 1, so the output says where it was read from.
+    fn render(src: &str, frames: usize) -> Vec<f32> {
+        let mut wave = fundsp::wave::Wave::new(1, 1000.0);
+        for i in 0..1000 {
+            wave.push(i as f32 / 500.0 - 1.0);
+        }
+        let samples =
+            crate::samples::Samples::from_pairs([("b.wav".to_string(), Arc::new(wave))]);
+
+        let items = parse(src.to_string()).expect("parse failed");
+        let lowered = lower_with_samples(&items, samples).expect("lower failed");
+        let mut net = realize(&lowered.graph).expect("realize failed");
+        net.check();
+        net.set_sample_rate(44100.0);
+        (0..frames).map(|_| net.get_mono()).collect()
+    }
+
+    /// The buffer really reaches the audio: a phasor across it renders the
+    /// ramp that is in it, rising from about -1 to about 1.
+    #[test]
+    fn a_phasor_across_a_buffer_renders_what_is_in_it() {
+        // 1 Hz over one second of buffer: one pass, in one second of audio.
+        let s = render("sample(load(\"b.wav\"), ramp(1))\n", 44100);
+
+        assert!(s.iter().all(|v| v.is_finite()));
+        assert!(s[100] < -0.8, "should start near -1, got {}", s[100]);
+        assert!(s[22050].abs() < 0.1, "should cross zero halfway, got {}", s[22050]);
+        assert!(s[44000] > 0.8, "should end near 1, got {}", s[44000]);
+    }
+
+    /// And backwards, from the same buffer, with only the position changed.
+    #[test]
+    fn a_mirrored_phasor_renders_it_backwards() {
+        let s = render("sample(load(\"b.wav\"), 1 - ramp(1))\n", 44100);
+
+        assert!(s[100] > 0.8, "should start near 1, got {}", s[100]);
+        assert!(s[44000] < -0.8, "should end near -1, got {}", s[44000]);
+    }
+
+    /// A position that never enters 0..1 is silence rather than a held edge.
+    #[test]
+    fn a_position_outside_the_buffer_is_silent() {
+        let s = render("sample(load(\"b.wav\"), 2)\n", 4410);
+        assert!(s.iter().all(|v| *v == 0.0), "should be silent");
+    }
+}
+
+#[cfg(test)]
+mod ramp_phase_tests {
+    use super::*;
+    use crate::lowerer::lower::lower;
+    use crate::parser::parser::parse;
+
+    fn render(src: &str, frames: usize) -> Vec<f32> {
+        let items = parse(src.to_string()).expect("parse failed");
+        let graph = lower(&items).expect("lower failed").graph;
+        let mut net = realize(&graph).expect("realize failed");
+        net.set_sample_rate(44100.0);
+        (0..frames).map(|_| net.get_mono()).collect()
+    }
+
+    /// `ramp` must start at zero.
+    ///
+    /// fundsp seeds a bare `Ramp`'s phase from the node's hash, which makes it
+    /// start partway up — and somewhere different each time the graph is built.
+    /// Everything `sample` can do rests on a phasor whose zero is the start of
+    /// the buffer, so this is load-bearing rather than cosmetic.
+    #[test]
+    fn a_ramp_starts_at_zero() {
+        let s = render("ramp(1)\n", 10);
+        assert!(s[0].abs() < 1e-6, "a ramp should begin at 0, got {}", s[0]);
+        assert!(s[1] > s[0], "and rise from there");
+    }
+
+    /// And keeps starting there, however many nodes are around it to change
+    /// the hash it would otherwise have taken its phase from.
+    #[test]
+    fn a_ramp_starts_at_zero_wherever_it_sits() {
+        for src in [
+            "ramp(2)\n",
+            "sin(220) * 0 + ramp(2)\n",
+            "let a = ramp(2)\nlet b = ramp(3)\na * 0 + b * 0 + ramp(2)\n",
+        ] {
+            let s = render(src, 4);
+            assert!(s[0].abs() < 1e-6, "{src} began at {}", s[0]);
+        }
+    }
+
+    /// A ramp really is a rising 0..1 phasor over its period, which is what
+    /// makes `ramp(1 / buffer.secs)` read a buffer once end to end.
+    #[test]
+    fn a_ramp_rises_across_its_period() {
+        // 1 Hz at 44100: one full pass per second.
+        let s = render("ramp(1)\n", 44100);
+        assert!(s[11025] > 0.24 && s[11025] < 0.26, "a quarter in, got {}", s[11025]);
+        assert!(s[22050] > 0.49 && s[22050] < 0.51, "halfway, got {}", s[22050]);
+        assert!(s[44099] > 0.99, "and nearly 1 at the end, got {}", s[44099]);
     }
 }

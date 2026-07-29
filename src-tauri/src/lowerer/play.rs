@@ -19,7 +19,7 @@ use crate::scree_graph::environment::Value;
 use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{Arg, Expr, Ident};
 use crate::pattern::pattern::{Pattern, Step};
-use crate::pattern::patterns::{Binding, Lane, LEGATO};
+use crate::pattern::patterns::{Binding, Lane, RESERVED};
 
 /// The one-shot: `play`, stopping after a single pass of the pattern.
 pub const PLAY_ONCE: &str = "play_once";
@@ -121,19 +121,24 @@ impl Lowerer {
         let mut lanes = Vec::with_capacity(named.len());
         for arg in named {
             let lane = arg.name.as_ref().expect("partitioned on name").0.clone();
-            if lane != LEGATO {
-                match def.params.iter().position(|p| p.name.0 == lane) {
+            match RESERVED.iter().find(|(reserved, _)| *reserved == lane) {
+                // A reserved lane is never passed on, so the instrument must
+                // not be expecting it under that name.
+                Some((_, effect)) => {
+                    if def.params.iter().any(|p| p.name.0 == lane) {
+                        return Err(format!(
+                            "{name}: '{lane}' {effect}, so {instrument} cannot take a \
+                             parameter of that name"));
+                    }
+                }
+                None => match def.params.iter().position(|p| p.name.0 == lane) {
                     None => return Err(format!(
                         "{name}: {instrument} has no parameter named '{lane}'")),
                     Some(0) => return Err(format!(
                         "{name}: '{lane}' is {instrument}'s first parameter, which the \
                          pattern itself fills")),
                     Some(_) => {}
-                }
-            } else if def.params.iter().any(|p| p.name.0 == LEGATO) {
-                return Err(format!(
-                    "{name}: '{LEGATO}' sets the note's length, so {instrument} cannot \
-                     take a parameter of that name"));
+                },
             }
             if lanes.iter().any(|l: &Lane| l.name == lane) {
                 return Err(format!("{name}: lane '{lane}' given twice"));
@@ -192,6 +197,9 @@ pub fn to_pattern(v: &Value) -> Result<Pattern, String> {
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())
         }
+        Value::Buffer(_) => Err(
+            "a pattern cannot contain a buffer (a pattern says when, an instrument \
+             says what)".to_string()),
         Value::Function(_) => Err("a pattern cannot contain a function".to_string()),
         Value::Play { .. } => Err("a pattern cannot contain a play".to_string()),
     }
@@ -208,6 +216,9 @@ fn to_step(v: &Value) -> Result<Step, String> {
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())
         }
+        Value::Buffer(_) => Err(
+            "a pattern cannot contain a buffer (a pattern says when, an instrument \
+             says what)".to_string()),
         Value::Function(_) => Err("a pattern cannot contain a function".to_string()),
         Value::Play { .. } => Err("a pattern cannot contain a play".to_string()),
     }

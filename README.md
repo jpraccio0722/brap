@@ -66,9 +66,91 @@ rewritten. Anything else you keep in that file is lost the next time a row
 changes.
 
 
+## Samples
+
+`load` reads an audio file into a buffer. The path is relative to the file it is
+written in, exactly like a `use` path, and any format symphonia reads will do —
+wav, mp3, flac, ogg:
+
+```rust
+let amen = load("breaks/amen.wav")
+```
+
+A buffer is not audio. Nothing comes out of it until `sample` reads it **at a
+position**, where 0 is the start of the buffer and 1 is the end:
+
+```rust
+sample(amen, ramp(1 / amen.secs))       // forwards, at its own speed
+```
+
+That is the whole interface. There is no play, no stop, no rate and no reverse,
+because a position is a signal and everything those would do is arithmetic on
+it:
+
+```rust
+sample(amen, 1 - ramp(1 / amen.secs))       // backwards
+sample(amen, ramp(2 / amen.secs))           // twice as fast, an octave up
+sample(amen, ramp(0.5 / amen.secs))         // half speed
+sample(amen, ramp(4 / amen.secs) * 0.25)    // the first quarter, looping four times a pass
+sample(amen, 0.5 + ramp(4 / amen.secs) * 0.25)  // the third quarter
+sample(amen, ramp(1 / amen.secs) >> hold(16, 0))  // stuttered into sixteen steps
+```
+
+`ramp(f)` is the phasor: a rising 0 to 1, `f` times a second. `secs` is how long
+the buffer is, so `1 / amen.secs` is the frequency that reads it exactly once —
+and any multiple of that is a speed. Reading outside 0..1 is silence rather than
+a held edge, so a position that overshoots goes quiet instead of clicking.
+
+Chopping from a pattern is the same arithmetic with the slice as a lane:
+
+```rust
+// Sixteenths of the break, played as a pattern. `at` is where in the buffer
+// this note starts; the phasor covers one sixteenth from there.
+fn chop(n, at = 0) =
+  sample(load("breaks/amen.wav"), at + ramp(n) * 0.0625) * perc(0.001, 0.2)
+
+play([\, \, \, \, \, \, \, \], chop, 1,
+     at: [0, 0.25, 0.5, 0.0625, 0.75, 0.5, 0.125, 0.875])
+```
+
+**An instrument names its own file.** A `fn` sees only other `fn`s — a top-level
+`let` is the persistent graph's, not a voice's — so `let amen = load(...)` above
+a `fn` that reads `amen` will not compile. Write the `load` inside the
+instrument, as above. It costs nothing: one path is one buffer however many
+`load`s name it, so the inline spelling shares the same audio as everything
+else that reads that file.
+
+Three more things worth knowing:
+
+- **Every file is decoded once, before the program runs.** A path is found by
+  reading the program, not by running it, which is why it has to be written out
+  rather than assembled — `load(name)` will not compile. It also means no note
+  ever waits on a disk, and re-evaluating costs nothing however long the file
+  is.
+- **A buffer is stored once** however many times it is read, so chopping a break
+  sixteen ways is sixteen readers over one copy of the audio.
+- **Reading interpolates** (cubic), so a break holds up away from its own speed
+  rather than aliasing.
+
+`channels` says how many channels a file has, and `sample`'s optional third
+argument picks one — it defaults to 0 and wraps, so asking a mono file for
+channel 1 gives you the mono back rather than an error:
+
+```rust
+let stereo = load("pad.wav")
+let pos = ramp(1 / stereo.secs)
+
+// Both channels of a stereo file, summed. An instrument is mono, so this is
+// where a stereo file stops being stereo — use `pan:` on the `play` to place
+// the voice.
+(sample(stereo, pos, 0) + sample(stereo, pos, 1)) * 0.5
+```
+
+
 ## Function Reference
 
 - [Patterns and Playback](#patterns-and-playback)
+- [Samples](#sample-functions)
 - [List Functions](#list-functions)
 - [Math Functions](#math-functions)
 - [Oscillators and Sources](#oscillators-and-sources)
@@ -97,14 +179,47 @@ right is baked in when the graph is built and must be a compile-time number. So
 These are what turn a list into sound. `play` and its variants take the pattern
 first, so they chain off one like anything else: `riff.rev.play(bass)`.
 
+An instrument is written in mono. Where it sits is `play`'s business, not the
+instrument's, so `pan:` is a lane like any other — read a value per note,
+wrapping when it runs out, and free to be a different length from the pattern:
+
+```rust
+play([\, `, \, `, \, `, \, `], hat, pan: [-0.8, 0.8])   // alternating, note by note
+play([c2, e2, g2], bass, pan: 0)                        // pinned to the centre
+```
+
+-1 is hard left, 0 the centre, 1 hard right; anything further clamps. The law is
+equal-power, scaled so that the centre is where an unpanned voice already sat —
+adding `pan: 0` to a line that was playing changes nothing about how loud it is.
+The 3 dB that buys is paid at the extremes instead, where one channel is silent
+and the other is a little louder than the instrument wrote, so a hard-panned
+voice is worth checking against a limiter.
+
+A pan is sampled once, at the note's onset, and holds for that note. Sweeping
+one *within* a note is a different thing and is not in the language yet: the
+signal graph an instrument builds is mono throughout, and stereo begins after
+it.
+
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. `legato:` scales the note's length instead of being passed. |
+| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
 | `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
 | `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
 | `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called from the audio thread. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
+
+### Sample Functions
+
+Reading an audio file. See [Samples](#samples) above for what these are for; the
+table is the signatures.
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `load` | `load(path) -> buffer` | Read an audio file into a buffer. The path is relative to the file it is written in, the same way a `use` path is, and must be written out rather than computed — every file is decoded once, before the program runs, so no note ever waits on a disk. Any format symphonia reads: wav, mp3, flac, ogg. Nothing comes out of a buffer until `sample` reads it. |
+| `sample` | `sample(buffer, position, channel?) -> signal` | Read a buffer at a position: 0 is the start, 1 is the end, and anything outside that is silence. `position` is a signal, which is where speed, direction and chopping all come from. Cubic interpolation, so it holds up away from its own speed. `channel` defaults to 0 and wraps if the buffer has fewer; it picks which reader is built, so it must be a compile-time number. |
+| `secs` | `secs(buffer) -> number` | How long a buffer is, in seconds. A compile-time number, so it divides into a `ramp` frequency: `ramp(1 / amen.secs)` reads the whole buffer once at its own speed. |
+| `channels` | `channels(buffer) -> number` | How many channels a buffer has — 1 for mono, 2 for a stereo file. |
 
 ### List Functions
 
@@ -170,7 +285,7 @@ Lists are immutable. List functions generate a new list and leave the existing l
 | `soft_saw` | `(frequency)` | Soft saw wavetable oscillator. Contains all partials but falls off like a triangle wave. |
 | `hammond` | `(frequency)` | Hammond organ wavetable oscillator. Emphasizes the first three partials. |
 | `organ` | `(frequency)` | Organ wavetable oscillator. Emphasizes octave partials. |
-| `ramp` | `(frequency)` | Rising ramp from 0 to 1 at the given repetition frequency. Not bandlimited — useful as a phasor, not as audio. |
+| `ramp` | `(frequency)` | Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of the cycle, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end. |
 | `poly_saw` | `(frequency)` | PolyBLEP saw wave. Fast and fairly bandlimited. |
 | `poly_square` | `(frequency)` | PolyBLEP square wave. Fast and fairly bandlimited. |
 | `poly_pulse` | `(frequency, width)` | PolyBLEP pulse wave. Fast and fairly bandlimited; `width` in 0..=1 is the duty cycle. |

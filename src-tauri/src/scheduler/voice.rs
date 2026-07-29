@@ -6,14 +6,20 @@ use fundsp::net::Net;
 use crate::scree_graph::realizer::realize;
 use crate::lowerer::lower::lower_voice;
 use crate::parser::parser::{Arg, ScreeItem, Expr, Ident};
+use crate::pattern::patterns::PAN;
+use crate::samples::Samples;
 
 /// The instrument definitions from the most recent eval.
 ///
 /// These are the `fn` items of the program, kept verbatim so a voice can be
 /// lowered on demand. An eval replaces this wholesale, exactly like `Patterns`.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Default)]
 pub struct Instruments {
     pub defs: Vec<ScreeItem>,
+    /// The buffers the eval loaded, so an instrument that reads one can be
+    /// lowered here — on the scheduler thread, per note, where opening a file
+    /// is not an option.
+    pub samples: Samples,
 }
 
 impl Instruments {
@@ -26,7 +32,18 @@ impl Instruments {
                 .filter(|i| matches!(i, ScreeItem::Function { .. }))
                 .cloned()
                 .collect(),
+            samples: Samples::default(),
         }
+    }
+
+    /// The same instruments, able to read the buffers an eval loaded.
+    ///
+    /// A separate step rather than a second parameter on `from_program` because
+    /// the great majority of callers — every test that does not sample — have
+    /// no buffers and nothing to say about them.
+    pub fn with_samples(mut self, samples: Samples) -> Instruments {
+        self.samples = samples;
+        self
     }
 
     pub fn has(&self, name: &str) -> bool {
@@ -44,6 +61,15 @@ impl Instruments {
     }
 }
 
+/// A voice is written in mono and fanned to both channels, so the centre of
+/// the stereo field is unity in each. fundsp's panner is equal-power — its two
+/// gains are the cosine and sine of a quarter turn — which puts 1/√2 in each
+/// channel at the centre, 3 dB below where an unpanned voice sits. Scaling the
+/// whole law back up by √2 restores that: `pan: 0` leaves a voice exactly where
+/// it was, and the price is paid at the extremes instead, where one channel
+/// takes 3 dB of gain and the other is silent.
+const CENTRE_UNITY: f32 = std::f32::consts::SQRT_2;
+
 /// Lower and realize `instrument(value, name: v, ...)` into a playable
 /// 0-in / 2-out network.
 ///
@@ -52,6 +78,9 @@ impl Instruments {
 /// are passed by name for the same reason: a parameter no lane filled then
 /// falls to its own default, evaluated in the callee's scope where the earlier
 /// parameters are already bound.
+///
+/// `pan` is the exception: it is taken off the lanes rather than passed on, and
+/// spent on where the finished voice sits rather than on how it sounds.
 pub fn build_voice(
     instruments: &Instruments,
     instrument: &str,
@@ -66,7 +95,11 @@ pub fn build_voice(
     // An instrument that declares no parameters is called with none — the
     // event's value is simply unused, which is what `\` in a pattern means.
     let mut args = if params == 0 { vec![] } else { vec![Arg::positional(Expr::Num(value))] };
-    args.extend(lanes.iter().map(|(name, v)| Arg::named(name, Expr::Num(*v))));
+    args.extend(
+        lanes.iter()
+            .filter(|(name, _)| name != PAN)
+            .map(|(name, v)| Arg::named(name, Expr::Num(*v))),
+    );
 
     let mut items = instruments.defs.clone();
     items.push(ScreeItem::Expr(Expr::Call {
@@ -74,8 +107,39 @@ pub fn build_voice(
         args,
     }));
 
-    let lowered = lower_voice(&items, dur_secs)?;
-    realize(&lowered.graph)
+    let lowered = lower_voice(&items, dur_secs, instruments.samples.clone())?;
+    let voice = realize(&lowered.graph)?;
+
+    // `play` refuses a lane given twice, so at most one of these exists.
+    let pan = lanes.iter().find(|(name, _)| name == PAN).map(|(_, v)| *v);
+    Ok(place(voice, pan.unwrap_or(0.0)))
+}
+
+/// Put a finished voice somewhere in the stereo field.
+///
+/// A voice arrives 0-in / 2-out with the same mono signal on both channels, so
+/// either one of them is the mono the panner wants; the other is left dangling,
+/// which costs nothing — the inner network renders its chain once whatever we
+/// read from it.
+///
+/// A position that is not a number leaves the voice centred, the same way a
+/// nonsense `legato` leaves a note its natural length: a lane is data, and one
+/// bad value in it should cost a note its placement rather than its existence.
+fn place(voice: Net, pan: f64) -> Net {
+    // Centre is what a voice does already, to the last bit — and nothing is as
+    // certainly untouched as a graph that was not touched.
+    if !pan.is_finite() || pan == 0.0 {
+        return voice;
+    }
+
+    let mut placed = Net::new(0, 2);
+    let mono = placed.push(Box::new(voice));
+    let panner = placed.push(Box::new(fundsp::prelude::pan(pan as f32) * CENTRE_UNITY));
+
+    placed.connect(mono, 0, panner, 0);
+    placed.connect_output(panner, 0, 0);
+    placed.connect_output(panner, 1, 1);
+    placed
 }
 
 #[cfg(test)]
@@ -205,6 +269,206 @@ mod tests {
     fn a_default_may_read_the_event_value() {
         let ins = instruments("fn tone(n, hz = n * 2, mul = 1) = sin(hz * mul)\n");
         assert!((rising_crossings(&ins, &[("mul".to_string(), 1.0)]) as i64 - 220).abs() <= 1);
+    }
+
+    // ---- pan ----
+
+    fn pan_lane(v: f64) -> Vec<(String, f64)> {
+        vec![(PAN.to_string(), v)]
+    }
+
+    /// Peak level in each channel over a tenth of a second. A voice is two
+    /// channels of the same signal until it is panned, so `get_mono` would
+    /// hide the whole feature.
+    fn peaks(lanes: &[(String, f64)]) -> (f32, f32) {
+        let ins = instruments("fn tone(n) = sin(n)\n");
+        let mut net = build_voice(&ins, "tone", 110.0, lanes, 1.0).expect("should build");
+        net.set_sample_rate(44100.0);
+
+        let mut frame = [0.0f32; 2];
+        let (mut left, mut right) = (0.0f32, 0.0f32);
+        for _ in 0..4410 {
+            net.tick(&[], &mut frame);
+            left = left.max(frame[0].abs());
+            right = right.max(frame[1].abs());
+        }
+        (left, right)
+    }
+
+    /// The property the whole gain law was chosen for: adding `pan: 0` to a
+    /// line that was playing must not change how loud it is.
+    #[test]
+    fn the_centre_is_where_an_unpanned_voice_already_was() {
+        let (unpanned_l, unpanned_r) = peaks(&[]);
+        let (centred_l, centred_r) = peaks(&pan_lane(0.0));
+
+        assert!((unpanned_l - unpanned_r).abs() < 1e-6, "a bare voice is centred");
+        assert!((centred_l - unpanned_l).abs() < 1e-3, "{centred_l} vs {unpanned_l}");
+        assert!((centred_r - unpanned_r).abs() < 1e-3, "{centred_r} vs {unpanned_r}");
+    }
+
+    #[test]
+    fn hard_left_empties_the_right_channel() {
+        let (left, right) = peaks(&pan_lane(-1.0));
+        assert!(left > 0.9, "left should carry the voice, got {left}");
+        assert!(right < 1e-6, "right should be silent, got {right}");
+    }
+
+    #[test]
+    fn hard_right_empties_the_left_channel() {
+        let (left, right) = peaks(&pan_lane(1.0));
+        assert!(left < 1e-6, "left should be silent, got {left}");
+        assert!(right > 0.9, "right should carry the voice, got {right}");
+    }
+
+    /// Halfway leans without abandoning the other side — the audible difference
+    /// between a pan and a mute.
+    #[test]
+    fn a_partial_pan_leans() {
+        let (left, right) = peaks(&pan_lane(0.5));
+        assert!(right > left, "should lean right: {left} vs {right}");
+        assert!(left > 0.1, "the left channel should still be there, got {left}");
+    }
+
+    /// Equal power: the two gains square to the same total wherever the voice
+    /// sits, so sweeping a pan lane across a phrase does not swell or dip.
+    #[test]
+    fn the_law_holds_its_power_across_the_field() {
+        let power = |p: f64| {
+            let (l, r) = peaks(&pan_lane(p));
+            l * l + r * r
+        };
+        let centre = power(0.0);
+        for p in [-1.0, -0.75, -0.3, 0.3, 0.75, 1.0] {
+            let here = power(p);
+            assert!(
+                (here - centre).abs() < 0.05 * centre,
+                "power at {p} was {here}, centre is {centre}"
+            );
+        }
+    }
+
+    /// Beyond the ends is still an end, rather than a gain of its own.
+    #[test]
+    fn a_pan_past_the_ends_clamps() {
+        let (left, right) = peaks(&pan_lane(-4.0));
+        let (hard_l, hard_r) = peaks(&pan_lane(-1.0));
+        assert!((left - hard_l).abs() < 1e-6 && (right - hard_r).abs() < 1e-6);
+    }
+
+    /// A lane is data. One bad value should cost a note its placement, not its
+    /// existence — and must never put a NaN into the audio thread.
+    #[test]
+    fn a_bad_pan_value_leaves_the_voice_centred() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let (left, right) = peaks(&pan_lane(bad));
+            assert!(left > 0.9 && right > 0.9, "pan {bad} silenced the voice");
+            assert!((left - right).abs() < 1e-6, "pan {bad} moved the voice");
+        }
+    }
+
+    /// `pan` is spent on the voice, so it must not also be handed to the
+    /// instrument — which has no parameter of that name and would refuse it.
+    #[test]
+    fn pan_does_not_reach_the_instrument() {
+        let ins = instruments("fn tone(n) = sin(n)\n");
+        assert!(build_voice(&ins, "tone", 110.0, &pan_lane(-1.0), 1.0).is_ok());
+    }
+
+    /// And taking it off the lanes must not disturb the ones that remain.
+    #[test]
+    fn pan_sits_alongside_ordinary_lanes() {
+        let ins = instruments("fn tone(n, mul = 1) = sin(n * mul)\n");
+        let lanes = vec![(PAN.to_string(), -1.0), ("mul".to_string(), 2.0)];
+        assert!((rising_crossings(&ins, &lanes) as i64 - 220).abs() <= 1);
+    }
+
+    // ---- sampling ----
+
+    /// Instruments that can read one buffer, named `break.wav`: a ramp from
+    /// -1 to 1 over one second, so what a voice renders says where in the
+    /// buffer it read.
+    fn sampling_instruments(src: &str) -> Instruments {
+        use std::sync::Arc;
+        let mut wave = fundsp::wave::Wave::new(1, 1000.0);
+        for i in 0..1000 {
+            wave.push(i as f32 / 500.0 - 1.0);
+        }
+        let samples = crate::samples::Samples::from_pairs(
+            [("break.wav".to_string(), Arc::new(wave))]);
+        instruments(src).with_samples(samples)
+    }
+
+    /// An instrument sees only `fn`s, so a buffer bound by a top-level `let` is
+    /// out of its reach — it has to name the file itself.
+    ///
+    /// That costs nothing: one path is one buffer however many `load`s write
+    /// it, so the inline spelling shares the audio with everything else that
+    /// reads the same file.
+    #[test]
+    fn an_instrument_names_its_own_file_rather_than_a_top_level_let() {
+        let bound = sampling_instruments(
+            "let amen = load(\"break.wav\")\nfn chop(n) = sample(amen, ramp(n))\n");
+        let err = match build_voice(&bound, "chop", 1.0, &[], 1.0) {
+            Err(e) => e,
+            Ok(_) => panic!("a top-level `let` should not be visible in a voice"),
+        };
+        assert!(err.contains("unbound name: amen"), "got: {err}");
+
+        // The spelling that works, and the one the reference gives.
+        let inline = sampling_instruments(
+            "fn chop(n) = sample(load(\"break.wav\"), ramp(n))\n");
+        assert!(build_voice(&inline, "chop", 1.0, &[], 1.0).is_ok());
+    }
+
+    /// The point of carrying `Samples` on `Instruments`: a voice is lowered
+    /// here, per note, on the scheduler thread — so the buffer has to be in
+    /// hand already. Without it this call fails rather than reading a disk.
+    #[test]
+    fn a_sampling_instrument_builds_into_a_voice() {
+        let ins = sampling_instruments(
+            "fn chop(n) = sample(load(\"break.wav\"), ramp(n))\n");
+
+        let mut net = build_voice(&ins, "chop", 1.0, &[], 1.0).expect("should build");
+        assert_eq!(net.outputs(), 2);
+        net.set_sample_rate(44100.0);
+
+        let s: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+        assert!(s.iter().all(|v| v.is_finite()), "no NaNs may reach the output");
+        let peak = s.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 0.5, "the buffer should be audible, peak {peak}");
+    }
+
+    /// Instruments built without buffers must not silently read one — the
+    /// error belongs at build time, where it is logged, rather than as silence.
+    #[test]
+    fn an_instrument_whose_buffer_was_never_loaded_fails_to_build() {
+        let ins = instruments("fn chop(n) = sample(load(\"break.wav\"), ramp(n))\n");
+        let err = match build_voice(&ins, "chop", 1.0, &[], 1.0) {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error without the buffer"),
+        };
+        assert!(err.contains("was not loaded"), "got: {err}");
+    }
+
+    /// A per-note lane choosing where in the buffer to read: the whole chopping
+    /// idiom, driven from a pattern.
+    #[test]
+    fn a_lane_can_choose_which_part_of_a_buffer_a_note_reads() {
+        let ins = sampling_instruments(
+            "fn chop(n, at = 0) = sample(load(\"break.wav\"), at + ramp(n) * 0.25)\n");
+
+        let render = |at: f64| {
+            let lanes = vec![("at".to_string(), at)];
+            let mut net = build_voice(&ins, "chop", 1.0, &lanes, 1.0).expect("should build");
+            net.set_sample_rate(44100.0);
+            // A tenth of a second in, well inside the quarter being read.
+            (0..4410).map(|_| net.get_mono()).last().expect("a sample")
+        };
+
+        // The buffer rises steadily, so a later slice reads a higher value.
+        let (early, late) = (render(0.0), render(0.75));
+        assert!(late > early, "0.75 should read later than 0.0: {early} vs {late}");
     }
 
     /// A lane the instrument has no parameter for is refused at bind time, but
