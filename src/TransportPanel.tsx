@@ -59,6 +59,8 @@ interface TransportPanelProps {
   stop: () => void | Promise<void>;
   patterns: GraphicalPattern[];
   onPatternsChange: (patterns: GraphicalPattern[]) => void;
+  /** The project's patterns file, passed through to the panel that writes it. */
+  patternsPath: string | null;
 }
 
 /**
@@ -84,6 +86,7 @@ export function TransportPanel({
   stop,
   patterns,
   onPatternsChange,
+  patternsPath,
 }: TransportPanelProps) {
   const [transport, setTransport] = useState<Transport | null>(null);
 
@@ -191,7 +194,11 @@ export function TransportPanel({
           </div>
         )}
 
-        <PatternPanel patterns={patterns} onChange={onPatternsChange} />
+        <PatternPanel
+          patterns={patterns}
+          onChange={onPatternsChange}
+          path={patternsPath}
+        />
       </div>
     </aside>
   );

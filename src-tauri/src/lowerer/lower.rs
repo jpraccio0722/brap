@@ -3,7 +3,6 @@ use crate::scree_graph::environment::{Env, FunctionDef, Value};
 use crate::scree_graph::graph::ScreeGraph;
 use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::parser::parser::ScreeItem;
-use crate::pattern::graphical::{define_all, GraphicalPattern};
 use crate::pattern::patterns::Binding;
 
 pub struct Lowerer {
@@ -38,16 +37,7 @@ fn seed_from_clock() -> u64 {
 }
 
 pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
-    lower_inner(items, None, &[])
-}
-
-/// Lower a program alongside the patterns drawn in the side panel, each of
-/// which the program can name as if it had written the list itself.
-pub fn lower_with_patterns(
-    items: &Vec<ScreeItem>,
-    patterns: &[GraphicalPattern],
-) -> Result<Lowered, String> {
-    lower_inner(items, None, patterns)
+    lower_inner(items, None)
 }
 
 /// Lower a single scheduler voice.
@@ -55,18 +45,11 @@ pub fn lower_with_patterns(
 /// `dur` (the note length in seconds) is pre-bound as an ordinary number, so an
 /// instrument can shape itself against the note it is playing — `env(a, d, s,
 /// r, dur)`. Outside a voice the name is simply unbound.
-///
-/// Drawn patterns are deliberately absent: a voice is one note's worth of
-/// audio, and this runs per note.
 pub fn lower_voice(items: &Vec<ScreeItem>, dur: f64) -> Result<Lowered, String> {
-    lower_inner(items, Some(dur), &[])
+    lower_inner(items, Some(dur))
 }
 
-fn lower_inner(
-    items: &Vec<ScreeItem>,
-    dur: Option<f64>,
-    patterns: &[GraphicalPattern],
-) -> Result<Lowered, String> {
+fn lower_inner(items: &Vec<ScreeItem>, dur: Option<f64>) -> Result<Lowered, String> {
     let mut lw = Lowerer {
         env: Env::new(),
         graph: ScreeGraph::default(),
@@ -79,8 +62,6 @@ fn lower_inner(
     if let Some(dur) = dur {
         lw.env.define("dur", Value::Number(dur));
     }
-
-    define_all(&mut lw.env, patterns)?;
 
     for item in items {
         lw.item(item)?;

@@ -1331,12 +1331,21 @@ fn every_example_compiles_and_realizes() {
         let name = path.file_name().unwrap().to_string_lossy().to_string();
         let src = std::fs::read_to_string(&path).expect("a readable file");
 
-        let items = parse(src).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+        let items = parse(src.clone()).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
 
-        // A file may name a pattern drawn in the side panel, which only exists
-        // when the app lowers it with `lower_with_patterns`. That is the one
-        // legitimate reason an example refers to a name it never defines, so
-        // it is skipped rather than failed. Every other kind of mistake — a
+        // Through the same pass the app runs, so an example that imports is
+        // checked as the thing it will actually be: one file with the modules
+        // it names folded into it. Its own path is what `use` resolves from.
+        let workspace =
+            crate::imports::Workspace::new(Some(path.display().to_string()), None);
+        let items = crate::imports::expand(items, &src, &workspace)
+            .unwrap_or_else(|e| panic!("{name} failed to resolve its imports: {e}"));
+
+        // A file may name a pattern drawn in the side panel, which lives in a
+        // project's `patterns.scree` — and `examples/` is not that project.
+        // That is the one legitimate reason an example refers to a name it
+        // never defines, so it is skipped rather than failed. Every other
+        // kind of mistake — a
         // misspelled UGen, a bad arity, a wrong argument — reports differently
         // and still fails here.
         let lowered = match crate::lowerer::lower::lower(&items) {

@@ -25,6 +25,16 @@ import {
 const FN = /\bfn\s+([a-zA-Z_]\w*)\s*\(([^)]*)\)/g;
 const LET = /\blet\s+([a-zA-Z_]\w*)/g;
 const FOR = /\bfor\s+([a-zA-Z_]\w*)\s+in\b/g;
+/**
+ * A `use`, split into its path and whatever follows it.
+ *
+ * What a `use` introduces is readable from the line in every case but the
+ * glob, whose names live in a file this side has never read — those appear
+ * once the program is run and the name resolves, which is the same moment a
+ * mistyped one is caught.
+ */
+const USE =
+  /\buse\s+([a-zA-Z_]\w*(?:::[a-zA-Z_]\w*)*)\s*(?:(::\*)|as\s+([a-zA-Z_]\w*)|::\{([^}]*)\})?/g;
 /** Strips `//` comments so definitions inside them are not offered. */
 const COMMENT = /\/\/[^\n]*/g;
 
@@ -70,7 +80,37 @@ function scrapeLocals(doc: string): LocalSymbol[] {
     }
   }
 
+  for (const name of importedNames(text)) {
+    // A module's name completes as a variable: what follows it is `::`, not
+    // `(`, so inserting a call would be inserting the wrong thing.
+    if (!found.has(name)) found.set(name, { name, detail: "imported", type: "variable" });
+  }
+
   return [...found.values()];
+}
+
+/** Every name the file's `use` lines make writable, in the spelling it is
+ *  written in here — which is the alias, wherever there is one. */
+function importedNames(text: string): string[] {
+  const names: string[] = [];
+
+  for (const [, path, glob, alias, list] of text.matchAll(USE)) {
+    if (list !== undefined) {
+      for (const entry of list.split(",")) {
+        // `kick` or `kick as thump`; the last word is what it is called here.
+        const words = entry.trim().split(/\s+as\s+/);
+        const name = words[words.length - 1].trim();
+        if (/^[a-zA-Z_]\w*$/.test(name)) names.push(name);
+      }
+      continue;
+    }
+    if (glob !== undefined) continue;
+    // `use a::b` puts `b` in scope, whether it turns out to be a module or a
+    // single name; `as` renames it.
+    names.push(alias ?? path.split("::").pop()!);
+  }
+
+  return names;
 }
 
 /**

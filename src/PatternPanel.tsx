@@ -201,9 +201,13 @@ function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
 interface PatternPanelProps {
   patterns: GraphicalPattern[];
   onChange: (patterns: GraphicalPattern[]) => void;
+  /** The project's patterns file, once it is known. Named on screen because a
+   *  panel that quietly writes a file into someone's project should say so —
+   *  and because it is a file they can open, edit and keep. */
+  path: string | null;
 }
 
-export function PatternPanel({ patterns, onChange }: PatternPanelProps) {
+export function PatternPanel({ patterns, onChange, path }: PatternPanelProps) {
   return (
     <section className="border-t border-neutral-800 px-4 py-4">
       <div className="flex items-center justify-between">
@@ -238,6 +242,14 @@ export function PatternPanel({ patterns, onChange }: PatternPanelProps) {
             />
           ))}
         </div>
+      )}
+
+      {path !== null && (
+        <p className="mt-3 text-[11px] leading-relaxed text-neutral-600" title={path}>
+          Saved in{" "}
+          <span className="font-mono text-neutral-500">{path.split(/[\\/]/).pop()}</span>, and
+          in scope for every file in this project.
+        </p>
       )}
     </section>
   );

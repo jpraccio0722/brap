@@ -1,10 +1,11 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use crate::engine::{stop as stop_graph, swap_program};
-use crate::{scree_graph::realizer::realize, lowerer::lower::lower_with_patterns, parser::parser::parse};
+use crate::{scree_graph::realizer::realize, lowerer::lower::lower, parser::parser::parse};
 use crate::diagnostic::{Diagnostic, Stage};
 use crate::engine::AudioEngine;
-use crate::pattern::graphical::GraphicalPattern;
+use crate::imports::Workspace;
+use crate::pattern::graphical::{self, GraphicalPattern};
 use crate::pattern::patterns::Patterns;
 use crate::scheduler::clock::{bpm_from_cps, cps_from_bpm};
 use crate::scheduler::scheduler::SchedulerState;
@@ -18,6 +19,7 @@ mod pattern;
 mod scheduler;
 mod diagnostic;
 mod engine;
+mod imports;
 mod parser;
 mod scree_graph;
 mod lowerer;
@@ -34,20 +36,44 @@ mod lang;
 /// evaluated: the editor is the only thing that knows them, and an eval is the
 /// only moment they matter.
 ///
-/// A refusal from any of the three passes goes back as a `Diagnostic` — which
-/// pass, what it said, and where — for the editor's problems panel. Nothing is
-/// swapped into the engine until all three have agreed, so a program that does
+/// They reach the program as the project's `patterns.scree`, laid over
+/// whatever is on disk: the panel writes that file as you draw, and this makes
+/// an eval independent of whether the write has landed — or is even possible,
+/// in a folder that cannot be written to. `imports::expand` folds the file into
+/// the program, which is the whole of how a drawn pattern gets a name.
+///
+/// `None` is the panel saying it has nothing to add — it has not read this
+/// project yet, or could not — as against `Some([])`, which is a panel that
+/// has read the project and found no patterns in it. Only the second one is
+/// allowed to hide a file that is on disk.
+///
+/// `workspace` is what the editor knows and this side cannot: where the file
+/// being run lives, so a `use` in it has somewhere to look. Everything a `use`
+/// names is then read from disk — a module open in another tab included, which
+/// means a change to one is heard once it has been saved.
+///
+/// A refusal from any of the passes goes back as a `Diagnostic` — which pass,
+/// what it said, and where — for the editor's problems panel. Nothing is
+/// swapped into the engine until all of them have agreed, so a program that does
 /// not compile leaves whatever is playing alone.
 #[tauri::command]
 fn run_code(
     code: String,
-    patterns: Vec<GraphicalPattern>,
+    patterns: Option<Vec<GraphicalPattern>>,
+    workspace: Workspace,
     engine: tauri::State<Mutex<AudioEngine>>,
     sched: tauri::State<SchedulerState>,
 ) -> Result<(), Diagnostic> {
-    let ast = parse(code)?;
-    let lowered = lower_with_patterns(&ast, &patterns)
-        .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
+    let mut workspace = workspace;
+    if let Some(patterns) = &patterns {
+        graphical::check_names(patterns)?;
+        workspace.set_patterns(graphical::to_source(patterns));
+    }
+
+    // Imports are resolved into the program before anything else sees it, so
+    // the lowerer, the realizer and the scheduler all compile one flat file.
+    let ast = imports::expand(parse(code.clone())?, &code, &workspace)?;
+    let lowered = lower(&ast).map_err(|e| Diagnostic::message(Stage::Lower, e))?;
     let audio_graph = realize(&lowered.graph)
         .map_err(|e| Diagnostic::message(Stage::Realize, e))?;
 
@@ -190,6 +216,63 @@ fn read_file(path: String) -> Result<String, String> {
     std::fs::read_to_string(&path).map_err(|e| e.to_string())
 }
 
+/// A project's drawn patterns, and the file they came from.
+///
+/// The path is returned rather than composed on the frontend so there is one
+/// answer to where the file is, and the editor can recognise the file when it
+/// is opened as an ordinary tab.
+#[derive(serde::Serialize, Debug)]
+struct PatternsFile {
+    path: String,
+    patterns: Vec<GraphicalPattern>,
+}
+
+/// Read a project's patterns into the panel.
+///
+/// A project with no such file has no drawn patterns, which is not a failure —
+/// it is every new project. A file that does not parse *is* one: the panel must
+/// not show an empty grid over a file it could not read, because the next thing
+/// it would do is write that empty grid back over it.
+#[tauri::command]
+fn read_patterns(root: String) -> Result<PatternsFile, Diagnostic> {
+    let path = std::path::Path::new(&root).join(graphical::FILE);
+    let display = path.display().to_string();
+
+    let patterns = match std::fs::read_to_string(&path) {
+        Ok(code) => graphical::from_source(&code).map_err(|e| e.or_in(Some(&path)))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(Diagnostic::message(
+                Stage::Import,
+                format!("could not read {display}: {e}"),
+            ))
+        }
+    };
+
+    Ok(PatternsFile { path: display, patterns })
+}
+
+/// Write a project's patterns out, and say where they went.
+///
+/// Called as the panel is drawn in, so the file is what the panel holds. It is
+/// only persistence: an eval sends the panel's rows along with the code, so
+/// music does not stop for a folder that cannot be written to — the failure
+/// shows up in the problems panel instead.
+#[tauri::command]
+fn write_patterns(root: String, patterns: Vec<GraphicalPattern>) -> Result<String, Diagnostic> {
+    graphical::check_names(&patterns)?;
+
+    let path = std::path::Path::new(&root).join(graphical::FILE);
+    std::fs::write(&path, graphical::to_source(&patterns)).map_err(|e| {
+        Diagnostic::message(
+            Stage::Import,
+            format!("could not save {}: {e}", path.display()),
+        )
+    })?;
+
+    Ok(path.display().to_string())
+}
+
 /// One entry in a project directory, as the project panel draws it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -313,6 +396,91 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     Ok(menu)
 }
 
+#[cfg(test)]
+mod pattern_file_tests {
+    use super::*;
+    use crate::pattern::graphical::GraphicalStep;
+
+    fn temp_project(name: &str) -> String {
+        let dir = std::env::temp_dir().join(format!(
+            "scree-project-{name}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("should create a temp project");
+        dir.display().to_string()
+    }
+
+    fn rows() -> Vec<GraphicalPattern> {
+        vec![GraphicalPattern {
+            name: "hats".to_string(),
+            steps: vec![
+                GraphicalStep::Trigger,
+                GraphicalStep::Rest,
+                GraphicalStep::Pitch { note: 60.0 },
+            ],
+        }]
+    }
+
+    /// The panel's whole round trip, through the two commands it calls: draw,
+    /// save, reopen the project, and find the same rows.
+    #[test]
+    fn patterns_survive_a_project_being_reopened() {
+        let root = temp_project("roundtrip");
+
+        let path = write_patterns(root.clone(), rows()).expect("should write");
+        assert!(path.ends_with(graphical::FILE), "wrote {path}");
+
+        let read = read_patterns(root.clone()).expect("should read");
+        assert_eq!(read.path, path);
+        assert_eq!(read.patterns, rows());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A project nobody has drawn in yet has no patterns, which is not a
+    /// failure — it is every new project.
+    #[test]
+    fn a_project_with_no_file_has_no_patterns() {
+        let root = temp_project("empty");
+        let read = read_patterns(root.clone()).expect("a missing file is not an error");
+        assert!(read.patterns.is_empty());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// One that does not parse is a failure, and says where: the panel needs
+    /// to know, because what it does on a successful read is start writing.
+    #[test]
+    fn an_unreadable_file_is_reported_with_its_path() {
+        let root = temp_project("broken");
+        std::fs::write(
+            std::path::Path::new(&root).join(graphical::FILE),
+            "let hats = [\\, `\nfn oops(\n",
+        )
+        .expect("should write");
+
+        let err = read_patterns(root.clone()).expect_err("should not read");
+        assert_eq!(err.file.as_deref(), Some(format!("{root}/{}", graphical::FILE).as_str()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The file is written as scree, and reads as scree: this is the property
+    /// that lets it be included like any other file in the project.
+    #[test]
+    fn the_written_file_is_a_program() {
+        let root = temp_project("program");
+        let path = write_patterns(root.clone(), rows()).expect("should write");
+        let text = std::fs::read_to_string(&path).expect("should read back");
+
+        let items = parse(text).expect("the panel's file must parse");
+        assert!(matches!(items.first(), Some(crate::parser::parser::ScreeItem::Let { .. })));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -334,6 +502,8 @@ pub fn run() {
             set_master_volume,
             save_file,
             read_file,
+            read_patterns,
+            write_patterns,
             project_root,
             list_dir,
             language_metadata

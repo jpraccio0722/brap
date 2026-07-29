@@ -1,0 +1,29 @@
+// A drum kit, as a library.
+//
+// Nothing here plays on its own — a file that is `use`d lends out its `fn`s
+// and `let`s and keeps its own `play`s to itself. Try `use kit::*` from the
+// file next door, or open this one and hit play to hear the kit by itself.
+
+fn kick() = {
+  let sweep = 50 + 150 * perc(0.001, 0.05)
+  let click = noise() * perc(0.001, 0.006)
+  sin(sweep) * perc(0.002, 0.4) * 0.9 + click * 0.1
+}
+
+fn snare() = {
+  let body = sin(190) * perc(0.001, 0.12) * 0.4
+  let crack = noise() * perc(0.001, 0.14) >> highpass(1800, 0.8)
+  (body + crack * 0.7) * 0.6
+}
+
+// The pattern fills the first parameter, and a trigger carries nothing worth
+// having — so it goes to `_`, and `open` is left as a lane to play with.
+fn hat(_, open = 0) = {
+  let length = 0.03 + 0.2 * open
+  noise() * perc(0.001, length) * 0.25 >> highpass(7000, 0.7)
+}
+
+// The kit playing itself: heard when this file is the one being run, ignored
+// when another file imports it.
+play([\, `, \, `], kick)
+play([`, \], snare)
