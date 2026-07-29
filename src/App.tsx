@@ -12,8 +12,10 @@ import {
   loadMetadata,
   type LanguageMetadata,
 } from "./scree";
+import { DocsPanel, type DocsFocus } from "./DocsPanel";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
 import { ProjectPanel } from "./ProjectPanel";
+import { RightPanel, type RightTab } from "./RightPanel";
 import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
@@ -117,6 +119,11 @@ function App() {
   const [activeId, setActiveId] = useState<string | null>(() => tabs[0].id);
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL);
+  // The right panel opens on the transport: it is the tab with the buttons the
+  // app is played from. The reference is always beside it, and a ⌘-click in
+  // the editor is what usually brings it up.
+  const [panelTab, setPanelTab] = useState<RightTab>("transport");
+  const [docsFocus, setDocsFocus] = useState<DocsFocus | null>(null);
 
   // The left panel starts shut, on its problems tab: there is nothing to say
   // until something has been run. A failed run opens it, which is the whole
@@ -279,9 +286,26 @@ function App() {
     [],
   );
 
+  /**
+   * Show a builtin in the reference, from a ⌘-click on its name in the editor.
+   *
+   * Opens the panel as well as switching it: a panel that is shut is as silent
+   * as one showing the transport, and the click asked to read something.
+   *
+   * Identity-stable, like `patternNames` and for the same reason — it is built
+   * into the extension array, which CodeMirror reconfigures from.
+   */
+  const openDocs = useCallback((name: string) => {
+    setPanelOpen(true);
+    setPanelTab("docs");
+    // The nonce is what makes a second click on the same name scroll to it
+    // again, after it has been scrolled away from.
+    setDocsFocus((prev) => ({ name, nonce: (prev?.nonce ?? 0) + 1 }));
+  }, []);
+
   const extensions = useMemo(
-    () => screeExtensions(metadata, patternNames),
-    [metadata, patternNames],
+    () => screeExtensions(metadata, patternNames, openDocs),
+    [metadata, patternNames, openDocs],
   );
 
   const newTab = useCallback(() => {
@@ -578,7 +602,7 @@ function App() {
               panel whether it is showing or not. */}
           <button
             onClick={() => setPanelOpen((open) => !open)}
-            title={panelOpen ? "Hide transport" : "Show transport"}
+            title={panelOpen ? "Hide right panel" : "Show right panel"}
             aria-expanded={panelOpen}
             className={
               "rounded-md p-1.5 transition-colors " +
@@ -699,15 +723,22 @@ function App() {
             </div>
           )}
         </main>
-        <TransportPanel
+        <RightPanel
           open={panelOpen}
           width={panelWidth}
           onResizeStart={startResize}
-          play={play}
-          stop={stop}
-          patterns={patterns}
-          onPatternsChange={setPatterns}
-          patternsPath={patternsPath}
+          tab={panelTab}
+          onTabChange={setPanelTab}
+          transport={
+            <TransportPanel
+              play={play}
+              stop={stop}
+              patterns={patterns}
+              onPatternsChange={setPatterns}
+              patternsPath={patternsPath}
+            />
+          }
+          docs={<DocsPanel builtins={metadata.builtins} focus={docsFocus} />}
         />
       </div>
     </div>
