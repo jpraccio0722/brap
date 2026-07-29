@@ -4,6 +4,12 @@
 //! and no state — you ask what falls inside a span and it tells you. That is
 //! what makes swapping one mid-performance trivial.
 
+/// Slack for comparing an onset against a time that should equal it. Onsets are
+/// built by arithmetic on step durations, so the same instant reached two ways
+/// can differ in the last bits; anything this small is nowhere near the gap
+/// between two steps of a pattern anyone can hear.
+const ONSET_EPSILON: f64 = 1e-9;
+
 /// A half-open span of cycle-time: `[begin, end)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span { pub begin: f64, pub end: f64 }
@@ -136,13 +142,98 @@ impl Pattern {
         }
     }
 
+    /// How many onsets this pattern has strictly before `at`.
+    ///
+    /// This is what gives a lane its position: the nth note played takes the
+    /// nth value of the lane, so a lane has to be told which note this is
+    /// rather than what time it is. Counting rather than sampling is also what
+    /// makes the two lengths independent — twenty cutoffs against two notes
+    /// walks the whole list over ten cycles instead of reading the same two
+    /// entries forever.
+    ///
+    /// Exact rather than `at * events_per_cycle`, because `Fast` may put a
+    /// non-whole number of onsets in a cycle: each layer is counted in its own
+    /// time, and only `Steps` — which is periodic in one cycle by construction —
+    /// multiplies out.
+    pub fn onsets_before(&self, at: f64) -> usize {
+        if !at.is_finite() || at <= 0.0 {
+            return 0;
+        }
+        match self {
+            Pattern::Silence => 0,
+
+            Pattern::Steps(steps) => {
+                if steps.is_empty() {
+                    return 0;
+                }
+                // One cycle's worth of onsets, then multiplied by whole cycles:
+                // `Steps` repeats exactly, so cycle n holds the same set as
+                // cycle 0 shifted by n.
+                let in_cycle: Vec<f64> =
+                    self.query(Span::new(0.0, 1.0)).into_iter().map(|e| e.begin).collect();
+                if in_cycle.is_empty() {
+                    return 0;
+                }
+                // Pulled back because `at` is itself an onset every time this is
+                // called: the note being counted for must land outside its own
+                // count, whichever side the arithmetic drifted to.
+                let at = at - ONSET_EPSILON;
+                let whole = at.floor();
+                let within = at - whole;
+                whole as usize * in_cycle.len()
+                    + in_cycle.iter().filter(|s| **s < within).count()
+            }
+
+            Pattern::Stack(ps) => ps.iter().map(|p| p.onsets_before(at)).sum(),
+
+            // `Fast` is a change of clock, so the count is the inner pattern's
+            // at the inner time.
+            Pattern::Fast(rate, p) => {
+                if *rate <= 0.0 || !rate.is_finite() {
+                    return 0;
+                }
+                p.onsets_before(at * rate)
+            }
+        }
+    }
+
+    /// Every value this pattern holds, in order, as one flat sequence.
+    ///
+    /// A lane is read positionally, so its subdivisions are not timing — a
+    /// nested list is simply more values in the line. `None` is a rest, which
+    /// leaves the instrument's own default in place for that note.
+    pub fn values(&self) -> Vec<Option<f64>> {
+        let mut out = Vec::new();
+        self.collect_values(&mut out);
+        out
+    }
+
+    fn collect_values(&self, out: &mut Vec<Option<f64>>) {
+        match self {
+            Pattern::Silence => {}
+            Pattern::Steps(steps) => {
+                for step in steps {
+                    match step {
+                        Step::Rest => out.push(None),
+                        Step::Value(v) => out.push(Some(*v)),
+                        Step::Group(inner) => inner.collect_values(out),
+                    }
+                }
+            }
+            Pattern::Stack(ps) => {
+                for p in ps {
+                    p.collect_values(out);
+                }
+            }
+            Pattern::Fast(_, p) => p.collect_values(out),
+        }
+    }
+
     /// What this pattern is *holding* at one instant, or `None` over a rest.
     ///
-    /// This is how a lane is read: structure comes from the pattern being
-    /// played, and every lane is asked what it has at that event's onset.
-    /// Matching lanes to events by onset instead would need float equality, and
-    /// would have nothing to say when the lanes are of different lengths — which
-    /// is the case worth having, since that is where polymeter comes from.
+    /// Not how lanes are read — see `onsets_before` for that. This answers the
+    /// different question of what a pattern has at some time, which is what
+    /// inspecting one at a moment needs.
     pub fn sample(&self, at: f64) -> Option<f64> {
         if !at.is_finite() { return None; }
         match self {

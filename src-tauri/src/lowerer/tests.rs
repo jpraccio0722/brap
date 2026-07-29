@@ -107,17 +107,18 @@ fn function_used_as_signal_is_an_error() {
 }
 
 /// `for i in 1..=3 { sin(i * 110) }` unrolls into three oscillators, summed
-/// left to right — the same graph `a + b + c` would produce. The Add nodes
-/// interleave with the oscillators because the sum folds as it goes.
+/// left to right — the same graph `a + b + c` would produce. Every oscillator
+/// is built before any of the sums, because the loop runs its body out in full
+/// before deciding it is audio rather than a list.
 #[test]
 fn for_loop_unrolls_and_sums() {
     let g = lower_src("for i in 1..=3 { sin(i * 110) }\n").unwrap();
     assert_eq!(g.nodes, vec![
         node(NodeKind::Sin, vec![Const(110.0)]),
         node(NodeKind::Sin, vec![Const(220.0)]),
-        node(NodeKind::Add, vec![Node(NodeId(0)), Node(NodeId(1))]),
         node(NodeKind::Sin, vec![Const(330.0)]),
-        node(NodeKind::Add, vec![Node(NodeId(2)), Node(NodeId(3))]),
+        node(NodeKind::Add, vec![Node(NodeId(0)), Node(NodeId(1))]),
+        node(NodeKind::Add, vec![Node(NodeId(3)), Node(NodeId(2))]),
     ]);
     assert_eq!(g.output, Some(NodeId(4)));
 }
@@ -135,12 +136,30 @@ fn for_loop_is_an_expression() {
     assert_eq!(g.output, Some(NodeId(3)));
 }
 
-/// The loop variable is a compile-time number, so a body with no signal in it
-/// folds all the way down to a constant: 1 + 2 + 3 + 4 = 10.
+/// A body with no signal in it is values, not voices, so the loop collects
+/// them. Adding them up is `sum`'s job, and saying so is the difference
+/// between building a list and mixing one down.
 #[test]
-fn for_loop_over_constants_folds() {
-    let g = lower_src("sin(for i in 1..=4 { i })\n").unwrap();
+fn for_loop_over_constants_collects() {
+    let g = lower_src("sin(sum(for i in 1..=4 { i }))\n").unwrap();
     assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(10.0)])]);
+
+    // Unsummed it is a list, which is not something to listen to.
+    let err = lower_src("sin(for i in 1..=4 { i })\n").unwrap_err();
+    assert!(err.contains("cannot use a list as a signal"), "got: {err}");
+}
+
+/// The loop that could not be written before: values in, list out. Read back
+/// through a lane, which is where a built list is most likely to be going.
+#[test]
+fn for_loop_builds_a_list() {
+    let bs = bindings_of(&format!(
+        "{BASS}fn cutoffs() = for i in 0..=3 {{ (i + 1) * 100 }}\n\
+         play([220, 330], bass, cut: cutoffs())\n"));
+
+    assert_eq!(
+        bs[0].lanes[0].pattern.values(),
+        vec![Some(100.0), Some(200.0), Some(300.0), Some(400.0)]);
 }
 
 /// Each iteration gets its own scope; the loop variable does not outlive it.
@@ -842,16 +861,43 @@ fn lanes_survive_the_pipe_form() {
     assert_eq!(bs[0].lanes.len(), 1);
 }
 
-/// `rate` is a property of the binding, so a lane written step-for-step
-/// against the pattern still lines up with it.
+/// `rate` speeds the pattern up and leaves the lanes alone. A lane is read by
+/// position — the nth note takes the nth value — so it follows the notes at
+/// whatever speed they go, and compressing it here would compress it twice.
 #[test]
-fn rate_compresses_the_lanes_too() {
+fn rate_speeds_the_pattern_and_not_the_lanes() {
     let bs = bindings_of(&format!("{BASS}play([220, 330], bass, 2, cut: [400, 2000])\n"));
 
     assert_eq!(bs[0].pattern, Pattern::Fast(2.0, Box::new(
         Pattern::Steps(vec![Step::Value(220.0), Step::Value(330.0)]))));
-    assert_eq!(bs[0].lanes[0].pattern, Pattern::Fast(2.0, Box::new(
-        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)]))));
+    assert_eq!(bs[0].lanes[0].pattern,
+        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)]));
+}
+
+/// End to end, from source to scheduled events: a lane longer than the pattern
+/// walks its whole list rather than being squeezed into the pattern's cycle.
+/// Twenty cutoffs under two notes take ten cycles, and every one is heard.
+#[test]
+fn a_long_lane_is_played_through_from_source() {
+    use crate::pattern::pattern::Span;
+    use crate::pattern::patterns::Patterns;
+
+    let bs = bindings_of(&format!("{BASS}play([220, 330], bass, cut: 1..=20)\n"));
+    let pats = Patterns { bindings: bs, origin: 0.0 };
+
+    let cuts: Vec<f64> = (0..10)
+        .flat_map(|c| pats.query(Span::new(c as f64, c as f64 + 1.0)))
+        .map(|e| e.args.iter().find(|(n, _)| n == "cut").expect("cut lane").1)
+        .collect();
+
+    assert_eq!(cuts, (1..=20).map(|i| i as f64).collect::<Vec<_>>());
+
+    // And then around again, in phase with the pattern.
+    let next: Vec<f64> = pats.query(Span::new(10.0, 11.0))
+        .iter()
+        .map(|e| e.args.iter().find(|(n, _)| n == "cut").expect("cut lane").1)
+        .collect();
+    assert_eq!(next, vec![1.0, 2.0]);
 }
 
 #[test]
@@ -1314,13 +1360,15 @@ fn every_example_compiles_and_realizes() {
         // Every instrument a pattern names must exist and build.
         let instruments = crate::scheduler::voice::Instruments::from_program(&items);
         for binding in &lowered.bindings {
-            // Lanes go in as the scheduler would send them: sampled at the
-            // first onset, so an example's named arguments are exercised too.
+            // Lanes go in as the scheduler would send them: the value the first
+            // note takes, so an example's named arguments are exercised too.
             let lanes: Vec<(String, f64)> = binding
                 .lanes
                 .iter()
                 .filter(|l| l.name != crate::pattern::patterns::LEGATO)
-                .filter_map(|l| l.pattern.sample(0.0).map(|v| (l.name.clone(), v)))
+                .filter_map(|l| {
+                    l.pattern.values().first().copied().flatten().map(|v| (l.name.clone(), v))
+                })
                 .collect();
             let voice = crate::scheduler::voice::build_voice(
                 &instruments, &binding.instrument, 60.0, &lanes, 0.5);
@@ -1559,3 +1607,9 @@ fn a_play_handle_is_not_a_value_to_compute_with() {
     let e = play_err(&format!("{SECTIONS}sin(play_once([c3], bass))\n"));
     assert!(e.contains("not audio"), "got: {e}");
 }
+
+
+
+
+
+

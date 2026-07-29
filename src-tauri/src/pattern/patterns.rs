@@ -6,9 +6,15 @@ use crate::pattern::pattern::{Event, Pattern, Span};
 /// reports at bind time rather than leaving to be discovered by ear.
 pub const LEGATO: &str = "legato";
 
-/// One named parameter, patterned. Sampled at each event's onset rather than
-/// queried, so a lane may be any length — three cutoffs against four notes is a
-/// deliberate 3-against-4, not a mismatch to pad out.
+/// One named parameter, as a sequence of values rather than a shape in time.
+///
+/// A lane is read by position: the nth note of the binding takes the nth value,
+/// wrapping when it runs out. So the two lengths are free of each other — three
+/// cutoffs against four notes is a real 3-against-4, rotating a step each cycle
+/// and coming back into phase after three, and twenty cutoffs against two notes
+/// walks all twenty over ten cycles. Reading a lane by *time* instead would
+/// squeeze it into the one cycle it shares with the pattern, where the extra
+/// values are duplicated or skipped and nothing ever moves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lane {
     pub name: String,
@@ -70,11 +76,21 @@ impl Patterns {
             let Some(span) = self.window(b.start, b.cycles, span) else {
                 return Vec::new();
             };
+            // Flattened once per binding rather than per event: a lane is the
+            // same line of values whichever note is asking.
+            let lanes: Vec<(&str, Vec<Option<f64>>)> = b.lanes.iter()
+                .map(|l| (l.name.as_str(), l.pattern.values()))
+                .collect();
+
             b.pattern.query(span).into_iter().map(|mut event| {
-                let mut args = Vec::with_capacity(b.lanes.len());
-                for lane in &b.lanes {
-                    let Some(v) = lane.pattern.sample(event.begin) else { continue };
-                    if lane.name == LEGATO {
+                // Which note this is, counted from the origin — the lane's
+                // position, not a time to look up.
+                let nth = b.pattern.onsets_before(event.begin);
+                let mut args = Vec::with_capacity(lanes.len());
+                for (name, values) in &lanes {
+                    if values.is_empty() { continue }
+                    let Some(v) = values[nth % values.len()] else { continue };
+                    if *name == LEGATO {
                         // Applied here so `dur` and the voice's own lifetime
                         // stay the same number: the scheduler derives both from
                         // the event's span.
@@ -82,7 +98,7 @@ impl Patterns {
                             event.end = event.begin + (event.end - event.begin) * v;
                         }
                     } else {
-                        args.push((lane.name.clone(), v));
+                        args.push((name.to_string(), v));
                     }
                 }
                 BoundEvent { instrument: b.instrument.clone(), event, args }
@@ -120,6 +136,7 @@ impl Patterns {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pattern::pattern::Step;
 
     #[test]
     fn bound_events_carry_their_instrument() {
@@ -181,7 +198,8 @@ mod tests {
         assert_eq!(evs[1].args, vec![("cut".to_string(), 2000.0)]);
     }
 
-    /// A shorter lane repeats against a longer pattern, note for note.
+    /// A shorter lane repeats against a longer pattern, note for note — not
+    /// stretched to cover it. Two values under four notes is heard twice.
     #[test]
     fn a_short_lane_repeats_under_a_long_pattern() {
         let evs = bound(
@@ -190,7 +208,116 @@ mod tests {
         );
 
         let cuts: Vec<f64> = evs.iter().map(|e| e.args[0].1).collect();
-        assert_eq!(cuts, vec![10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(cuts, vec![10.0, 20.0, 10.0, 20.0]);
+    }
+
+    /// The case the whole positional reading exists for: a lane longer than the
+    /// pattern is not squeezed into the cycle it shares with it. Two notes and
+    /// six cutoffs take three cycles to come back around, and every value is
+    /// heard on the way.
+    #[test]
+    fn a_long_lane_walks_across_cycles() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::steps([Some(1.0), Some(2.0)]),
+                lanes: vec![lane("cut", (1..=6).map(|i| Some(i as f64 * 100.0)).collect())],
+                start: 0.0,
+                cycles: None,
+            }],
+            ..Default::default()
+        };
+
+        let cuts: Vec<f64> = (0..4)
+            .flat_map(|c| pats.query(Span::new(c as f64, c as f64 + 1.0)))
+            .map(|e| e.args[0].1)
+            .collect();
+
+        assert_eq!(cuts, vec![
+            100.0, 200.0,   // cycle 0
+            300.0, 400.0,   // cycle 1
+            500.0, 600.0,   // cycle 2
+            100.0, 200.0,   // cycle 3 — back in phase
+        ]);
+    }
+
+    /// Lengths with a common factor rotate rather than repeat: three against
+    /// four is a step further along each cycle, in phase again after three.
+    #[test]
+    fn uneven_lengths_rotate_against_each_other() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
+                lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
+                start: 0.0,
+                cycles: None,
+            }],
+            ..Default::default()
+        };
+
+        let cycle = |c: i32| -> Vec<f64> {
+            pats.query(Span::new(c as f64, c as f64 + 1.0))
+                .iter().map(|e| e.args[0].1).collect()
+        };
+
+        assert_eq!(cycle(0), vec![10.0, 20.0, 30.0, 10.0]);
+        assert_eq!(cycle(1), vec![20.0, 30.0, 10.0, 20.0]);
+        assert_eq!(cycle(2), vec![30.0, 10.0, 20.0, 30.0]);
+        assert_eq!(cycle(3), vec![10.0, 20.0, 30.0, 10.0]);
+    }
+
+    /// A lane counts notes, not time, so the speed the notes go at does not
+    /// move it: the nth note takes the nth value at any rate.
+    #[test]
+    fn rate_does_not_shift_a_lane() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)])),
+                lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
+                start: 0.0,
+                cycles: None,
+            }],
+            ..Default::default()
+        };
+
+        // Twice as fast is four notes a cycle, still taking the lane in order.
+        let cuts: Vec<f64> = pats.query(Span::new(0.0, 1.0))
+            .iter().map(|e| e.args[0].1).collect();
+        assert_eq!(cuts, vec![10.0, 20.0, 30.0, 10.0]);
+    }
+
+    /// A rest in the *pattern* is not a note, so it takes no lane value with
+    /// it: the lane advances by what sounds, not by what was written.
+    #[test]
+    fn a_rest_in_the_pattern_does_not_consume_a_lane_value() {
+        let evs = bound(
+            Pattern::steps([Some(1.0), None, Some(2.0), Some(3.0)]),
+            vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
+        );
+
+        let cuts: Vec<f64> = evs.iter().map(|e| e.args[0].1).collect();
+        assert_eq!(cuts, vec![10.0, 20.0, 30.0]);
+    }
+
+    /// A nested list in a lane is more values, not a subdivision: lanes are
+    /// read by position, so nesting only affects the order.
+    #[test]
+    fn a_nested_lane_flattens_into_the_line() {
+        let evs = bound(
+            Pattern::steps([Some(1.0), Some(2.0), Some(3.0)]),
+            vec![Lane {
+                name: "cut".into(),
+                pattern: Pattern::Steps(vec![
+                    Step::Value(10.0),
+                    Step::Group(Box::new(Pattern::steps([Some(20.0), Some(30.0)]))),
+                ]),
+            }],
+        );
+
+        let cuts: Vec<f64> = evs.iter().map(|e| e.args[0].1).collect();
+        assert_eq!(cuts, vec![10.0, 20.0, 30.0]);
     }
 
     /// A lane resting says nothing, so the parameter falls to its own default

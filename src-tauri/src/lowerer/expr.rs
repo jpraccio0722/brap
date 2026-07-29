@@ -73,33 +73,51 @@ impl Lowerer {
                     return Err(format!("for {}: nothing to iterate over (empty)", var.0));
                 }
 
-                let mut acc: Option<Value> = None;
+                let mut out = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     self.env.push_scope();
                     self.env.define(&var.0, item.clone());
                     let iteration = self.expr(body);
                     self.env.pop_scope();
-
-                    let v = iteration?;
-                    acc = Some(match acc {
-                        None => v,
-                        // Several plays in one loop are not summed like audio:
-                        // they all happen, and the loop as a whole finishes
-                        // when the last of them does.
-                        Some(Value::Play { ends_at: a }) => {
-                            let Value::Play { ends_at: b } = v else {
-                                return Err(format!(
-                                    "for {}: a loop cannot mix plays with other values",
-                                    var.0));
-                            };
-                            // One that never stops makes the whole loop never
-                            // stop, so nothing may follow it.
-                            Value::Play { ends_at: crate::lowerer::play::later_end(a, b) }
-                        }
-                        Some(prev) => self.combine(NodeKind::Add, |a, b| a + b, prev, v)?,
-                    });
+                    out.push(iteration?);
                 }
-                Ok(acc.expect("non-empty list yields at least one value"))
+
+                // What the body produced decides what the loop is. A loop over
+                // oscillators is voices to be heard at once, so it sums; a loop
+                // over values is a list being built, so it collects. Deciding
+                // from the values rather than from a keyword is what lets one
+                // `for` be both without either having to be spelled specially.
+                if out.iter().any(|v| matches!(v, Value::Play { .. })) {
+                    // Plays are neither summed nor collected: they all happen,
+                    // and the loop as a whole finishes when the last does.
+                    let mut ends_at = Some(self.play_start);
+                    for v in &out {
+                        let Value::Play { ends_at: end } = v else {
+                            return Err(format!(
+                                "for {}: a loop cannot mix plays with other values", var.0));
+                        };
+                        // One that never stops makes the whole loop never stop,
+                        // so nothing may follow it.
+                        ends_at = crate::lowerer::play::later_end(ends_at, *end);
+                    }
+                    return Ok(Value::Play { ends_at });
+                }
+
+                if out.iter().any(|v| matches!(v, Value::Signal(_))) {
+                    // Any signal at all makes the loop audio: a number among
+                    // them is a constant to be added, which is what `combine`
+                    // already does.
+                    let mut acc: Option<Value> = None;
+                    for v in out {
+                        acc = Some(match acc {
+                            None => v,
+                            Some(prev) => self.combine(NodeKind::Add, |a, b| a + b, prev, v)?,
+                        });
+                    }
+                    return Ok(acc.expect("non-empty list yields at least one value"));
+                }
+
+                Ok(Value::List(Rc::new(out)))
             }
 
             Expr::If { cond, then, otherwise } => {
