@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { PanelTab, PanelTabs } from "./PanelTabs";
 
 /** Which of the panel's two views is on top. */
 export type SideTab = "problems" | "project";
@@ -15,38 +16,6 @@ interface SidePanelProps {
   problemCount: number;
   problems: ReactNode;
   project: ReactNode;
-}
-
-function Tab({
-  label,
-  selected,
-  count,
-  onClick,
-}: {
-  label: string;
-  selected: boolean;
-  /** A badge, when there is a number worth carrying on the tab itself. */
-  count?: number;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      onClick={onClick}
-      role="tab"
-      aria-selected={selected}
-      className={
-        "flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold uppercase tracking-wide transition-colors " +
-        (selected
-          ? "border-emerald-600 text-neutral-100"
-          : "border-transparent text-neutral-500 hover:text-neutral-300")
-      }
-    >
-      {label}
-      {count !== undefined && count > 0 && (
-        <span className="font-mono text-[10px] normal-case text-red-400">{count}</span>
-      )}
-    </button>
-  );
 }
 
 /**
@@ -75,19 +44,19 @@ export function SidePanel({
         (open ? "flex" : "hidden")
       }
     >
-      <div role="tablist" className="flex items-stretch border-b border-neutral-800">
-        <Tab
+      <PanelTabs>
+        <PanelTab
           label="Problems"
           selected={tab === "problems"}
           count={problemCount}
           onClick={() => onTabChange("problems")}
         />
-        <Tab
+        <PanelTab
           label="Project"
           selected={tab === "project"}
           onClick={() => onTabChange("project")}
         />
-      </div>
+      </PanelTabs>
 
       <div
         className={

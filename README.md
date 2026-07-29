@@ -81,6 +81,11 @@ Every name here takes its first argument on the left of a dot, so `f(a, b)`,
 `a >> f(b)` and `a.f(b)` are three spellings of one call. The editor offers only
 the names that suit whatever is in front of the dot.
 
+The notes below are the same ones the editor shows, and are generated from the
+same tables. Hold ⌘ and point at a name already written in a file to read its
+signature and note where it stands; ⌘-click it to open the whole reference,
+searchable, in the right-hand panel.
+
 In the UGen tables an **`→` separates ports from constants**. Everything to its
 left is a wired input and may be modulated by another signal; everything to its
 right is baked in when the graph is built and must be a compile-time number. So
