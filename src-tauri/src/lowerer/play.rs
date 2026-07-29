@@ -156,13 +156,10 @@ impl Lowerer {
 
         let mut pattern = to_pattern(&pattern_value)?;
         if rate != 1.0 {
-            // Lanes are compressed with the pattern, so `rate` stays a property
-            // of the whole binding: a lane written step-for-step against the
-            // pattern keeps lining up with it at any rate.
+            // Only the pattern. A lane is read by position — the nth note takes
+            // the nth value — so it advances with the notes whatever speed they
+            // go at, and compressing it too would be compressing it twice.
             pattern = Pattern::Fast(rate, Box::new(pattern));
-            for lane in &mut lanes {
-                lane.pattern = Pattern::Fast(rate, Box::new(lane.pattern.clone()));
-            }
         }
 
         // Repeats are passes of the pattern, but the binding is bounded in
