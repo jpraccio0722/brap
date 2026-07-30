@@ -1,10 +1,23 @@
 use crate::pattern::pattern::{Event, Pattern, Span};
 
-/// The lane name that never reaches the instrument: it scales the event's
-/// length instead, so `legato: 0.2` is staccato and `1.5` overlaps the next
-/// note. An instrument parameter of this name is unreachable, which `play`
-/// reports at bind time rather than leaving to be discovered by ear.
+/// Scales the event's length rather than reaching the instrument, so
+/// `legato: 0.2` is staccato and `1.5` overlaps the next note. Applied here,
+/// in `query`, because a length is a property of the event.
 pub const LEGATO: &str = "legato";
+
+/// Places the voice in the stereo field rather than reaching the instrument:
+/// -1 is hard left, 0 centre, 1 hard right. Applied in `build_voice`, because
+/// a position is a property of the voice — it rides through here as an
+/// ordinary lane value and is taken off the end.
+pub const PAN: &str = "pan";
+
+/// The lane names that never reach the instrument, each with what it does
+/// instead. A parameter of one of these names could never be filled, so `play`
+/// refuses it at bind time rather than leaving it to be discovered by ear.
+pub const RESERVED: [(&str, &str); 2] = [
+    (LEGATO, "sets the note's length"),
+    (PAN, "places the voice in the stereo field"),
+];
 
 /// One named parameter, as a sequence of values rather than a shape in time.
 ///

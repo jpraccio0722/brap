@@ -906,6 +906,37 @@ fn legato_is_accepted_without_being_a_parameter() {
     assert_eq!(bs[0].lanes[0].name, "legato");
 }
 
+#[test]
+fn pan_is_accepted_without_being_a_parameter() {
+    let bs = bindings_of(&format!("{BASS}play([220], bass, pan: -1)\n"));
+    assert_eq!(bs[0].lanes[0].name, "pan");
+}
+
+/// A pan lane is a pattern like any other, so a voice can be placed somewhere
+/// different on every note.
+#[test]
+fn pan_may_be_a_pattern() {
+    let bs = bindings_of(&format!("{BASS}play([220, 330], bass, pan: [-1, 1])\n"));
+    assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(-1.0), Some(1.0)]);
+}
+
+/// A lane shorter than the pattern is read by position and wraps, so a
+/// two-value pan alternates note by note however many notes there are — the
+/// spelling the reference gives for ping-pong percussion.
+#[test]
+fn a_short_pan_lane_alternates_across_the_pattern() {
+    let bs = bindings_of(
+        "fn hat() = noise()\nplay([\\, `, \\, `, \\, `, \\, `], hat, pan: [-0.8, 0.8])\n");
+    assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(-0.8), Some(0.8)]);
+}
+
+/// And a zero-parameter instrument takes one, which is most of a drum kit.
+#[test]
+fn pan_works_on_an_instrument_that_takes_nothing() {
+    let bs = bindings_of("fn kick() = sin(50)\nplay([\\], kick, pan: 0)\n");
+    assert_eq!(bs[0].lanes[0].name, "pan");
+}
+
 // ---- lane errors ----
 
 #[test]
@@ -947,6 +978,22 @@ fn a_lane_satisfies_a_parameter_with_no_default() {
 fn play_rejects_an_instrument_with_a_legato_parameter() {
     let err = play_err("fn bass(n, legato = 1) = saw(n)\nplay([220], bass, legato: 0.5)\n");
     assert!(err.contains("sets the note's length"), "got: {err}");
+}
+
+/// The same for `pan`, which is spent on the finished voice.
+#[test]
+fn play_rejects_an_instrument_with_a_pan_parameter() {
+    let err = play_err("fn bass(n, pan = 0) = saw(n)\nplay([220], bass, pan: 1)\n");
+    assert!(err.contains("stereo field"), "got: {err}");
+}
+
+/// The reserved names are checked one lane at a time, so a pan alongside
+/// ordinary lanes is refused on its own account.
+#[test]
+fn play_rejects_a_pan_parameter_among_other_lanes() {
+    let err = play_err("fn bass(n, cut = 1, pan = 0) = saw(n) * cut\n\
+                        play([220], bass, cut: 2, pan: 0)\n");
+    assert!(err.contains("stereo field"), "got: {err}");
 }
 
 #[test]
@@ -1666,6 +1713,216 @@ fn a_play_handle_is_not_a_value_to_compute_with() {
 
 
 
+// ---- samples ----
+
+/// The buffer every test below writes, under the path they all name.
+///
+/// A ramp from -1 to 1, so what comes out of a `sample` node says where in the
+/// buffer it was read from. Synthesized rather than decoded: what a file
+/// *contains* is `samples`'s business, and this is about what the language
+/// does with one once it has it.
+fn sampled(src: &str) -> Result<crate::lowerer::lower::Lowered, String> {
+    use std::sync::Arc;
+    let mut wave = fundsp::wave::Wave::new(1, 1000.0);
+    for i in 0..2000 {
+        wave.push(i as f32 / 1000.0 - 1.0);
+    }
+    let samples = crate::samples::Samples::from_pairs(
+        [("break.wav".to_string(), Arc::new(wave))]);
+
+    let items = parse(src.to_string()).expect("parse failed");
+    crate::lowerer::lower::lower_with_samples(&items, samples)
+}
+
+fn sample_err(src: &str) -> String {
+    match sampled(src) {
+        Err(e) => e,
+        Ok(_) => panic!("expected an error"),
+    }
+}
+
+#[test]
+fn a_loaded_buffer_can_be_read_at_a_position() {
+    let g = sampled("sample(load(\"break.wav\"), ramp(0.5))\n").expect("should lower").graph;
+
+    assert_eq!(g.samples.len(), 1, "the buffer should be in the graph");
+    let read = g.nodes.iter().find(|n| n.kind == NodeKind::Sample).expect("a Sample node");
+    // The position is wired; the buffer index and channel are baked in.
+    assert!(matches!(read.inputs[0], Node(_)), "the position should be a wired input");
+    assert_eq!(read.inputs[1], Const(0.0), "buffer 0");
+    assert_eq!(read.inputs[2], Const(0.0), "channel 0 by default");
+}
+
+/// `secs` is known while lowering, which is what lets it divide into a `ramp`
+/// frequency rather than having to be measured at audio rate.
+#[test]
+fn a_buffers_length_is_a_compile_time_number() {
+    // 2000 frames at 1000 Hz is two seconds, so the phasor is 0.5 Hz — and
+    // folds to a constant rather than becoming a Div node.
+    let g = sampled("ramp(1 / load(\"break.wav\").secs)\n").expect("should lower").graph;
+    assert_eq!(g.nodes, vec![node(NodeKind::Ramp, vec![Const(0.5)])]);
+}
+
+#[test]
+fn a_buffers_channel_count_is_a_number() {
+    let g = sampled("sin(load(\"break.wav\").channels * 100)\n").expect("should lower").graph;
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(100.0)])]);
+}
+
+/// One file read four ways is one buffer. A break chopped sixteen times should
+/// not be sixteen copies of the audio.
+#[test]
+fn one_file_read_many_times_is_stored_once() {
+    let src = "\
+let b = load(\"break.wav\")
+sample(b, ramp(1)) + sample(b, ramp(2)) + sample(load(\"break.wav\"), ramp(4))
+";
+    let g = sampled(src).expect("should lower").graph;
+    assert_eq!(g.samples.len(), 1, "one file, one buffer");
+    assert_eq!(g.nodes.iter().filter(|n| n.kind == NodeKind::Sample).count(), 3);
+}
+
+/// The chosen shape: direction and speed are arithmetic on the position, so
+/// reversing needs nothing from `sample` at all.
+#[test]
+fn reversing_is_arithmetic_on_the_position() {
+    let g = sampled("sample(load(\"break.wav\"), 1 - ramp(0.5))\n").expect("should lower").graph;
+    assert!(g.nodes.iter().any(|n| n.kind == NodeKind::Sub), "1 - ramp is a Sub node");
+    assert!(g.nodes.iter().any(|n| n.kind == NodeKind::Sample));
+}
+
+#[test]
+fn a_second_channel_can_be_asked_for() {
+    let g = sampled("sample(load(\"break.wav\"), ramp(1), 1)\n").expect("should lower").graph;
+    let read = g.nodes.iter().find(|n| n.kind == NodeKind::Sample).unwrap();
+    assert_eq!(read.inputs[2], Const(1.0));
+}
+
+// ---- what a buffer is not ----
+
+#[test]
+fn a_buffer_is_not_a_signal() {
+    let e = sample_err("sin(load(\"break.wav\"))\n");
+    assert!(e.contains("sample(buffer, position)"), "got: {e}");
+}
+
+#[test]
+fn a_buffer_is_not_a_pattern() {
+    let e = sample_err("fn v(n) = sin(n)\nplay([load(\"break.wav\")], v)\n");
+    assert!(e.contains("cannot contain a buffer"), "got: {e}");
+}
+
+#[test]
+fn reading_something_that_is_not_a_buffer_says_so() {
+    let e = sample_err("sample(220, ramp(1))\n");
+    assert!(e.contains("must be a buffer"), "got: {e}");
+}
+
+/// The channel picks which reader is built, so it cannot be modulated.
+#[test]
+fn a_channel_must_be_a_compile_time_number() {
+    let e = sample_err("sample(load(\"break.wav\"), ramp(1), sin(2))\n");
+    assert!(e.contains("compile-time number"), "got: {e}");
+}
+
+// ---- load ----
+
+/// The path has to be findable by the walk that loads it, which means written
+/// out rather than computed.
+#[test]
+fn a_path_must_be_written_out() {
+    let e = sample_err("let p = 1\nsample(load(p), ramp(1))\n");
+    assert!(e.contains("written out as a string"), "got: {e}");
+}
+
+#[test]
+fn a_string_anywhere_else_is_refused() {
+    let e = sample_err("sin(\"break.wav\")\n");
+    assert!(e.contains("only meaningful as the path"), "got: {e}");
+}
+
+/// A program naming a file nothing loaded is a bug in the walk rather than
+/// anything a program did — but it must still be an error, not a panic.
+#[test]
+fn a_buffer_that_was_never_loaded_is_an_error() {
+    let e = sample_err("sample(load(\"missing.wav\"), ramp(1))\n");
+    assert!(e.contains("was not loaded"), "got: {e}");
+}
+
+#[test]
+fn a_path_is_not_something_to_chain_into() {
+    let e = sample_err("1 >> load(\"break.wav\")\n");
+    assert!(e.contains("not something to chain into"), "got: {e}");
+}
+
+/// The sampling examples in the README, compiled.
+///
+/// Documentation that does not run is worse than none, and these are the whole
+/// explanation of the feature. Kept as the source text the reference shows, so
+/// a change to one has to be a change to both.
+#[test]
+fn the_readme_sampling_examples_compile() {
+    // `breaks/amen.wav` and `pad.wav` as the reference writes them.
+    fn readme_samples() -> crate::samples::Samples {
+        use std::sync::Arc;
+        let mut wave = fundsp::wave::Wave::new(2, 1000.0);
+        for i in 0..2000 {
+            wave.push((i as f32 / 1000.0 - 1.0, i as f32 / 1000.0 - 1.0));
+        }
+        let wave = Arc::new(wave);
+        crate::samples::Samples::from_pairs([
+            ("breaks/amen.wav".to_string(), wave.clone()),
+            ("pad.wav".to_string(), wave),
+        ])
+    }
+
+    let examples: &[&str] = &[
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(1 / amen.secs))\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, 1 - ramp(1 / amen.secs))\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(2 / amen.secs))\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(0.5 / amen.secs))\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(4 / amen.secs) * 0.25)\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, 0.5 + ramp(4 / amen.secs) * 0.25)\n",
+        "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(1 / amen.secs) >> hold(16, 0))\n",
+        // The chopping example, entire.
+        "fn chop(n, at = 0) =\n  sample(load(\"breaks/amen.wav\"), at + ramp(n) * 0.0625) * perc(0.001, 0.2)\n\
+         play([\\, \\, \\, \\, \\, \\, \\, \\], chop, 1,\n     at: [0, 0.25, 0.5, 0.0625, 0.75, 0.5, 0.125, 0.875])\n",
+        // The stereo one.
+        "let stereo = load(\"pad.wav\")\nlet pos = ramp(1 / stereo.secs)\n\
+         (sample(stereo, pos, 0) + sample(stereo, pos, 1)) * 0.5\n",
+    ];
+
+    for src in examples {
+        let items = parse(src.to_string())
+            .unwrap_or_else(|e| panic!("README example failed to parse: {e}\n{src}"));
+        let lowered = crate::lowerer::lower::lower_with_samples(&items, readme_samples())
+            .unwrap_or_else(|e| panic!("README example failed to lower: {e}\n{src}"));
+        crate::scree_graph::realizer::realize(&lowered.graph)
+            .unwrap_or_else(|e| panic!("README example failed to realize: {e}\n{src}"));
+    }
+}
+
+/// And the chopping example really builds a voice, which is the half that
+/// lowering the program does not reach.
+#[test]
+fn the_readme_chop_instrument_builds_a_voice() {
+    use std::sync::Arc;
+    let mut wave = fundsp::wave::Wave::new(1, 1000.0);
+    for i in 0..1000 {
+        wave.push(i as f32 / 500.0 - 1.0);
+    }
+    let samples = crate::samples::Samples::from_pairs(
+        [("breaks/amen.wav".to_string(), Arc::new(wave))]);
+
+    let src = "fn chop(n, at = 0) =\n  \
+               sample(load(\"breaks/amen.wav\"), at + ramp(n) * 0.0625) * perc(0.001, 0.2)\n";
+    let items = parse(src.to_string()).expect("should parse");
+    let ins = crate::scheduler::voice::Instruments::from_program(&items).with_samples(samples);
+
+    let lanes = vec![("at".to_string(), 0.75)];
+    assert!(crate::scheduler::voice::build_voice(&ins, "chop", 1.0, &lanes, 0.25).is_ok());
+}
+
 /// `;` end to end: what someone types, as the rhythm it turns into.
 ///
 /// The timing arithmetic is `pattern.rs`'s to test; these are about the trip
@@ -1915,5 +2172,4 @@ mod stack_tests {
         // `Lowered` has no Debug, so `expect_err` is unavailable here.
         let err = play_err("sin(stack([220], [330]))\n");
         assert!(err.contains("not audio"), "got: {err}");
-    }
-}
+    }}

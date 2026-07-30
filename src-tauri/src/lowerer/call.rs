@@ -9,9 +9,13 @@ impl Lowerer {
     }
 
     pub fn call_with(&mut self, func: &Ident, args: &[Arg], piped: Option<Value>) -> Result<Value, String> {
-        // Before evaluation: play needs the instrument argument syntactically.
+        // Before evaluation: play needs the instrument argument syntactically,
+        // and load needs its path the same way.
         if Lowerer::is_play(&func.0) {
             return self.play(&func.0, args, piped);
+        }
+        if Lowerer::is_load(&func.0) {
+            return self.load(args, piped);
         }
 
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);
@@ -52,6 +56,12 @@ impl Lowerer {
         // already produced by being evaluated above.
         if Lowerer::is_play_all(&func.0) {
             return self.play_all(&arg_vals);
+        }
+
+        // Before the UGen table: `sample` takes a buffer where the table's own
+        // lowering would put every argument through `as_input`.
+        if Lowerer::is_buffer_builtin(&func.0) {
+            return self.buffer_builtin(&func.0, &arg_vals);
         }
 
         if let Some(v) = self.list_builtin(&func.0, &arg_vals)? {
