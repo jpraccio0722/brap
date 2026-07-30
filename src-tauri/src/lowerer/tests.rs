@@ -607,7 +607,7 @@ fn play_binds_a_pattern_to_an_instrument() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, `, 330, `], kick)\n");
     assert_eq!(bs.len(), 1);
     assert_eq!(bs[0].instrument, "kick");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0), Step::Rest, Step::Value(330.0), Step::Rest,
     ]));
 }
@@ -617,7 +617,7 @@ fn play_binds_a_pattern_to_an_instrument() {
 fn play_rate_wraps_the_pattern() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, 330], kick, 2)\n");
     assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
-        Box::new(Pattern::Steps(vec![Step::Value(220.0), Step::Value(330.0)]))));
+        Box::new(Pattern::seq(vec![Step::Value(220.0), Step::Value(330.0)]))));
 }
 
 /// A fractional rate slows the pattern down.
@@ -625,23 +625,23 @@ fn play_rate_wraps_the_pattern() {
 fn play_rate_below_one_slows_down() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, 0.5)\n");
     assert_eq!(bs[0].pattern, Pattern::Fast(0.5,
-        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+        Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 }
 
 /// Rate 1 is the default and adds no wrapper.
 #[test]
 fn omitted_rate_is_one() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(220.0)]));
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![Step::Value(220.0)]));
 }
 
 /// Nested lists subdivide their slot.
 #[test]
 fn nested_list_becomes_a_group() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, [330, 440]], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0),
-        Step::Group(Box::new(Pattern::Steps(vec![
+        Step::Group(Box::new(Pattern::seq(vec![
             Step::Value(330.0), Step::Value(440.0),
         ]))),
     ]));
@@ -662,7 +662,7 @@ fn multiple_plays_layer() {
 #[test]
 fn pattern_elements_are_ordinary_expressions() {
     let bs = bindings_of("fn kick(f) = sin(f)\nlet r = 110\nplay([r, r * 2, `], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(110.0), Step::Value(220.0), Step::Rest,
     ]));
 }
@@ -672,7 +672,7 @@ fn pattern_elements_are_ordinary_expressions() {
 fn play_accepts_a_piped_pattern() {
     let bs = bindings_of("fn kick(f) = sin(f)\n[220, 330] >> play(kick)\n");
     assert_eq!(bs[0].instrument, "kick");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0), Step::Value(330.0),
     ]));
 }
@@ -681,7 +681,7 @@ fn play_accepts_a_piped_pattern() {
 fn play_pipes_with_a_rate() {
     let bs = bindings_of("fn kick(f) = sin(f)\n[220] >> play(kick, 4)\n");
     assert_eq!(bs[0].pattern, Pattern::Fast(4.0,
-        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+        Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 }
 
 /// Bindings can be generated in a loop.
@@ -691,7 +691,7 @@ fn play_inside_a_for_makes_several_bindings() {
         "fn kick(f) = sin(f)\nfor i in 1..=3 { play([110 * i], kick, i) }\n");
     assert_eq!(bs.len(), 3);
     assert_eq!(bs[2].pattern, Pattern::Fast(3.0,
-        Box::new(Pattern::Steps(vec![Step::Value(330.0)]))));
+        Box::new(Pattern::seq(vec![Step::Value(330.0)]))));
 }
 
 /// A program can have both a persistent graph and patterns.
@@ -757,7 +757,7 @@ fn play_loops_forever() {
 fn play_once_bounds_the_binding_to_one_cycle() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220, 330], kick)\n");
     assert_eq!(bs[0].instrument, "kick");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0), Step::Value(330.0),
     ]));
     assert_eq!(bs[0].cycles, Some(1.0));
@@ -767,7 +767,7 @@ fn play_once_bounds_the_binding_to_one_cycle() {
 fn playn_bounds_the_binding_to_its_count() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4)\n");
     assert_eq!(bs[0].cycles, Some(4.0));
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(220.0)]));
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![Step::Value(220.0)]));
 }
 
 /// Repeats count passes of the pattern, so a rate that packs two passes into
@@ -777,7 +777,7 @@ fn a_rate_shortens_the_window_it_speeds_up() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4, 2)\n");
     assert_eq!(bs[0].cycles, Some(2.0));
     assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
-        Box::new(Pattern::Steps(vec![Step::Value(220.0)]))));
+        Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, 0.5)\n");
     assert_eq!(bs[0].cycles, Some(2.0), "a half-speed pass takes two cycles");
@@ -842,7 +842,7 @@ fn a_lane_is_bound_as_a_pattern() {
     assert_eq!(bs[0].lanes[0].name, "cut");
     assert_eq!(
         bs[0].lanes[0].pattern,
-        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)])
+        Pattern::seq(vec![Step::Value(400.0), Step::Value(2000.0)])
     );
 }
 
@@ -851,7 +851,7 @@ fn a_lane_is_bound_as_a_pattern() {
 #[test]
 fn a_scalar_lane_is_a_one_step_pattern() {
     let bs = bindings_of(&format!("{BASS}play([220], bass, amp: 0.8)\n"));
-    assert_eq!(bs[0].lanes[0].pattern, Pattern::Steps(vec![Step::Value(0.8)]));
+    assert_eq!(bs[0].lanes[0].pattern, Pattern::seq(vec![Step::Value(0.8)]));
 }
 
 #[test]
@@ -869,9 +869,9 @@ fn rate_speeds_the_pattern_and_not_the_lanes() {
     let bs = bindings_of(&format!("{BASS}play([220, 330], bass, 2, cut: [400, 2000])\n"));
 
     assert_eq!(bs[0].pattern, Pattern::Fast(2.0, Box::new(
-        Pattern::Steps(vec![Step::Value(220.0), Step::Value(330.0)]))));
+        Pattern::seq(vec![Step::Value(220.0), Step::Value(330.0)]))));
     assert_eq!(bs[0].lanes[0].pattern,
-        Pattern::Steps(vec![Step::Value(400.0), Step::Value(2000.0)]));
+        Pattern::seq(vec![Step::Value(400.0), Step::Value(2000.0)]));
 }
 
 /// End to end, from source to scheduled events: a lane longer than the pattern
@@ -1195,7 +1195,7 @@ fn list_builtins_feed_patterns() {
         "fn kick(f) = sin(f)\nplay(rotl(rev([110, 220, `, 330])), kick)\n");
     assert_eq!(bs.len(), 1);
     // rev -> [330, `, 220, 110]; rotl 1 -> [`, 220, 110, 330]
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Rest, Step::Value(220.0), Step::Value(110.0), Step::Value(330.0),
     ]));
 }
@@ -1206,7 +1206,7 @@ fn list_builtins_feed_patterns() {
 #[test]
 fn trigger_is_a_sounding_step() {
     let bs = bindings_of("fn kick() = sin(50)\nplay([\\, `, \\, \\], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(1.0), Step::Rest, Step::Value(1.0), Step::Value(1.0),
     ]));
 }
@@ -1215,9 +1215,9 @@ fn trigger_is_a_sounding_step() {
 #[test]
 fn triggers_nest() {
     let bs = bindings_of("fn kick() = sin(50)\nplay([\\, [\\, \\]], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(1.0),
-        Step::Group(Box::new(Pattern::Steps(vec![
+        Step::Group(Box::new(Pattern::seq(vec![
             Step::Value(1.0), Step::Value(1.0),
         ]))),
     ]));
@@ -1227,7 +1227,7 @@ fn triggers_nest() {
 #[test]
 fn triggers_and_numbers_mix() {
     let bs = bindings_of("fn k(f) = sin(f)\nplay([220, \\, `, 330], k)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0), Step::Value(1.0), Step::Rest, Step::Value(330.0),
     ]));
 }
@@ -1243,7 +1243,7 @@ fn trigger_used_as_a_signal_is_an_error() {
 #[test]
 fn triggers_survive_list_builtins() {
     let bs = bindings_of("fn kick() = sin(50)\nplay(rotl([\\, `, `, `]), kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Rest, Step::Rest, Step::Rest, Step::Value(1.0),
     ]));
 }
@@ -1252,7 +1252,7 @@ fn triggers_survive_list_builtins() {
 #[test]
 fn trigger_across_a_newline() {
     let bs = bindings_of("fn kick() = sin(50)\nplay([\n  \\,\n  `\n], kick)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![Step::Value(1.0), Step::Rest]));
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![Step::Value(1.0), Step::Rest]));
 }
 
 // ---- note names ----
@@ -1351,7 +1351,7 @@ fn note_names_compose_with_methods_and_patterns() {
     assert_eq!(num("[c4, e4, g4][1]"), 64.0);
 
     let bs = bindings_of("fn lead(n) = sin(n.m2h)\nplay([c4, ef4, `, g4], lead)\n");
-    assert_eq!(bs[0].pattern, Pattern::Steps(vec![
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(60.0), Step::Value(63.0), Step::Rest, Step::Value(67.0),
     ]));
 }
@@ -1665,3 +1665,255 @@ fn a_play_handle_is_not_a_value_to_compute_with() {
 
 
 
+
+/// `;` end to end: what someone types, as the rhythm it turns into.
+///
+/// The timing arithmetic is `pattern.rs`'s to test; these are about the trip
+/// from source text to a bound pattern — that the token parses where a step
+/// belongs, that the number reaches the slot, and that the two positions a list
+/// can be read in give it the two meanings they should.
+#[cfg(test)]
+mod length_tests {
+    use super::*;
+    use crate::pattern::pattern::{Slot, Span, UNIT};
+
+    const TONE: &str = "fn tone(n, cut = 800) = saw(n)\n";
+
+    fn pattern_of(src: &str) -> Pattern {
+        bindings_of(src).into_iter().next().expect("a binding").pattern
+    }
+
+    fn slots(p: &Pattern) -> Vec<Slot> {
+        match p {
+            Pattern::Steps(slots) => slots.clone(),
+            other => panic!("expected a sequence, got {other:?}"),
+        }
+    }
+
+    /// The token parses, and the number lands on the slot it followed.
+    #[test]
+    fn a_length_reaches_its_slot() {
+        let got = slots(&pattern_of(&format!("{TONE}play([220;2, 330, 440], tone)\n")));
+        assert_eq!(
+            got,
+            vec![
+                Slot::sized(Step::Value(220.0), 2.0),
+                Slot::new(Step::Value(330.0)),
+                Slot::new(Step::Value(440.0)),
+            ],
+        );
+    }
+
+    /// A pattern with no `;` in it is untouched — the whole compatibility
+    /// promise, checked at the level someone actually writes.
+    #[test]
+    fn a_pattern_without_lengths_is_unchanged() {
+        let got = slots(&pattern_of(&format!("{TONE}play([220, 330], tone)\n")));
+        assert!(got.iter().all(|s| s.length == UNIT), "got {got:?}");
+    }
+
+    /// Rests and triggers take lengths too, which is what lets a bar end in
+    /// silence without padding it out with single cells.
+    #[test]
+    fn rests_and_triggers_take_lengths() {
+        let got = slots(&pattern_of(&format!(
+            "fn hit() = sin(50)\nplay([\\;3, `;5], hit)\n")));
+        assert_eq!(got[0].length, 3.0);
+        assert_eq!(got[1].length, 5.0);
+        assert_eq!(got[1].step, Step::Rest);
+    }
+
+    /// The motivating rhythm, written the way it would be: a quarter, two
+    /// eighths, and a half of silence, in one bar.
+    #[test]
+    fn a_quarter_and_two_eighths_from_source() {
+        let p = pattern_of(&format!("{TONE}play([220;2, 330, 440, `;4], tone)\n"));
+        let evs = p.query(Span::new(0.0, 1.0));
+        let onsets: Vec<f64> = evs.iter().map(|e| e.begin).collect();
+        assert_eq!(onsets, vec![0.0, 0.25, 0.375]);
+        assert_eq!(evs[0].duration(), 0.25, "the quarter lasts a beat");
+    }
+
+    /// A length may be any expression that folds to a number, like `rate`.
+    #[test]
+    fn a_length_may_be_a_bound_name() {
+        let src = format!("{TONE}let beats = 3\nplay([220;beats, 330], tone)\n");
+        assert_eq!(slots(&pattern_of(&src))[0].length, 3.0);
+    }
+
+    /// Nesting and `;` compose: a group takes its share and divides it.
+    #[test]
+    fn a_group_takes_a_length() {
+        let got = slots(&pattern_of(&format!("{TONE}play([220;3, [330, 440]], tone)\n")));
+        assert_eq!(got[0].length, 3.0);
+        assert!(matches!(got[1].step, Step::Group(_)), "got {:?}", got[1].step);
+    }
+
+    /// A lane is indexed by note, so a length there is a count of notes.
+    #[test]
+    fn a_lane_length_holds_a_value_across_notes() {
+        let bs = bindings_of(&format!(
+            "{TONE}play([220, 330, 440], tone, cut: [400;2, 2000])\n"));
+        assert_eq!(bs[0].lanes[0].pattern.values(),
+                   vec![Some(400.0), Some(400.0), Some(2000.0)]);
+    }
+
+    /// And so a fraction there is not a place. Rejected rather than rounded,
+    /// because the mistake is a misunderstanding of what the lane is.
+    #[test]
+    fn a_fractional_lane_length_is_refused() {
+        let err = play_err(&format!("{TONE}play([220], tone, cut: [400;1.5, 2000])\n"));
+        assert!(err.contains("whole number"), "got: {err}");
+        assert!(err.contains("cut"), "the message should name the lane: {err}");
+    }
+
+    /// A fraction in the pattern itself is fine — that is a dotted note.
+    #[test]
+    fn a_fractional_pattern_length_is_allowed() {
+        let got = slots(&pattern_of(&format!("{TONE}play([220;1.5, 330;0.5], tone)\n")));
+        assert_eq!(got[0].length, 1.5);
+    }
+
+    /// A list being used as data has no extent for a length to be a share of,
+    /// so `len` counts what was written. The alternative — expanding `[1;3, 2]`
+    /// to four elements — would give one literal two different lengths
+    /// depending on which side of a `play` it was read from.
+    #[test]
+    fn plain_list_operations_ignore_lengths() {
+        let g = lower_src("sin(len([1;3, 2]))\n").unwrap();
+        assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(2.0)])]);
+    }
+
+    /// Indexing gives the element, not the element with its length stuck to it.
+    #[test]
+    fn indexing_yields_the_bare_value() {
+        let g = lower_src("sin([220;4, 330][0])\n").unwrap();
+        assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(220.0)])]);
+    }
+
+    /// Rearranging a list keeps each element's length with it — `rev` moves
+    /// notes around, it does not restripe the rhythm.
+    #[test]
+    fn reversing_carries_lengths_along() {
+        let got = slots(&pattern_of(&format!("{TONE}play(rev([220;3, 330]), tone)\n")));
+        assert_eq!(got[0].length, UNIT, "330 was unweighted and still is");
+        assert_eq!(got[1].length, 3.0, "220 kept its length across the reverse");
+    }
+
+    /// Zero and negative lengths are not rhythms, and are caught where the
+    /// number is folded rather than left to divide something by nothing.
+    #[test]
+    fn a_length_must_be_positive() {
+        for bad in ["0", "-2"] {
+            let err = play_err(&format!("{TONE}play([220;{bad}, 330], tone)\n"));
+            assert!(err.contains("positive"), "length {bad} gave: {err}");
+        }
+    }
+}
+
+/// `stack` — patterns that sound at once.
+///
+/// The piano roll's primitive: overlapping notes are decomposed into
+/// monophonic voices and layered, and a chord is the case where the voices
+/// happen to line up.
+#[cfg(test)]
+mod stack_tests {
+    use super::*;
+    use crate::pattern::pattern::Span;
+
+    const TONE: &str = "fn tone(n, cut = 800) = saw(n)\n";
+
+    fn pattern_of(src: &str) -> Pattern {
+        bindings_of(src).into_iter().next().expect("a binding").pattern
+    }
+
+    fn onsets(p: &Pattern, span: Span) -> Vec<f64> {
+        let mut got: Vec<f64> = p.query(span).iter().map(|e| e.begin).collect();
+        got.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        got
+    }
+
+    /// A chord: three notes struck together, all lasting the whole cycle.
+    #[test]
+    fn a_chord_sounds_all_its_notes_at_once() {
+        let p = pattern_of(&format!("{TONE}play(stack([c4], [e4], [g4]), tone)\n"));
+        let evs = p.query(Span::new(0.0, 1.0));
+        assert_eq!(evs.len(), 3);
+        assert!(evs.iter().all(|e| e.begin == 0.0), "all together: {evs:?}");
+
+        let mut values: Vec<f64> = evs.iter().map(|e| e.value).collect();
+        values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(values, vec![60.0, 64.0, 67.0]);
+    }
+
+    /// Layers keep their own division, which is the whole reason this is not
+    /// just a longer list: three against four needs both to be true at once.
+    #[test]
+    fn layers_divide_independently() {
+        let p = pattern_of(&format!(
+            "{TONE}play(stack([220, 330, 440], [55, 110]), tone)\n"));
+        // Thirds from one layer, halves from the other.
+        assert_eq!(
+            onsets(&p, Span::new(0.0, 1.0)),
+            vec![0.0, 0.0, 1.0 / 3.0, 0.5, 2.0 / 3.0],
+        );
+    }
+
+    /// Lengths and layers compose: this is what a drawn part turns into — one
+    /// voice holding while another moves under it.
+    #[test]
+    fn a_held_note_under_a_moving_line() {
+        let p = pattern_of(&format!(
+            "{TONE}play(stack([c4;2, e4;2], [g4;4]), tone)\n"));
+        let evs = p.query(Span::new(0.0, 1.0));
+        assert_eq!(evs.len(), 3);
+
+        let held = evs.iter().find(|e| e.value == 67.0).expect("the g");
+        assert_eq!(held.duration(), 1.0, "the held note spans the cycle");
+        let moving: Vec<f64> = evs.iter().filter(|e| e.value != 67.0).map(|e| e.begin).collect();
+        assert_eq!(moving, vec![0.0, 0.5]);
+    }
+
+    /// A stack inside a step is a chord at one point of a longer line, rather
+    /// than a layer over the whole of it.
+    #[test]
+    fn a_stack_may_fill_one_step() {
+        let p = pattern_of(&format!(
+            "{TONE}play([c4, stack([e4], [g4])], tone)\n"));
+        let evs = p.query(Span::new(0.0, 1.0));
+        assert_eq!(onsets(&p, Span::new(0.0, 1.0)), vec![0.0, 0.5, 0.5]);
+        assert_eq!(evs.iter().filter(|e| e.begin == 0.5).count(), 2);
+    }
+
+    /// Stacks nest, so a voice may itself be layered.
+    #[test]
+    fn stacks_nest() {
+        let p = pattern_of(&format!(
+            "{TONE}play(stack([c4], stack([e4], [g4])), tone)\n"));
+        assert_eq!(p.query(Span::new(0.0, 1.0)).len(), 3);
+    }
+
+    /// A lane reads a stack as all its values, layer by layer — the same
+    /// positional flattening a nested list gets.
+    #[test]
+    fn a_lane_reads_a_stack_in_order() {
+        let bs = bindings_of(&format!(
+            "{TONE}play([220, 330], tone, cut: stack([400], [2000]))\n"));
+        assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(400.0), Some(2000.0)]);
+    }
+
+    /// An empty stack is a mistake worth naming rather than silence.
+    #[test]
+    fn an_empty_stack_is_an_error() {
+        let err = play_err(&format!("{TONE}play(stack(), tone)\n"));
+        assert!(err.contains("at least one"), "got: {err}");
+    }
+
+    /// A stack is layered patterns, not audio, and saying so beats a type name.
+    #[test]
+    fn a_stack_is_not_a_signal() {
+        // `Lowered` has no Debug, so `expect_err` is unavailable here.
+        let err = play_err("sin(stack([220], [330]))\n");
+        assert!(err.contains("not audio"), "got: {err}");
+    }
+}

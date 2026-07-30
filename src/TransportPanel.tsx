@@ -4,8 +4,12 @@ import type { GraphicalPattern } from "./patterns";
 interface TransportPanelProps {
   patterns: GraphicalPattern[];
   onPatternsChange: (patterns: GraphicalPattern[]) => void;
+  /** Open one in the composer, which lives in a tab rather than in here. */
+  onOpenPattern: (id: string) => void;
   /** The project's patterns file, passed through to the panel that writes it. */
   patternsPath: string | null;
+  /** False when no folder is open, so there is nowhere to save patterns to. */
+  hasProject: boolean;
 }
 
 /**
@@ -24,10 +28,18 @@ interface TransportPanelProps {
  */
 export function TransportPanel({
   patterns,
+  onOpenPattern,
   onPatternsChange,
   patternsPath,
+  hasProject,
 }: TransportPanelProps) {
   return (
-    <PatternPanel patterns={patterns} onChange={onPatternsChange} path={patternsPath} />
+    <PatternPanel
+      patterns={patterns}
+      onChange={onPatternsChange}
+      onOpen={onOpenPattern}
+      path={patternsPath}
+      hasProject={hasProject}
+    />
   );
 }

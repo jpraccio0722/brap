@@ -15,11 +15,18 @@ import {
 import { DocsPanel, type DocsFocus } from "./DocsPanel";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
 import { ProjectPanel } from "./ProjectPanel";
+import { PatternComposer } from "./PatternComposer";
 import { RightPanel, type RightTab } from "./RightPanel";
 import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
-import { fromWire, toWire, type GraphicalPattern, type WirePattern } from "./patterns";
+import {
+  fromWire,
+  nameError,
+  toWire,
+  type GraphicalPattern,
+  type WirePattern,
+} from "./patterns";
 import { Transport } from "./component/Transport";
 
 
@@ -44,6 +51,17 @@ interface Tab {
   content: string;
   /** True when content differs from what's on disk. */
   dirty: boolean;
+  /**
+   * The drawn pattern this tab edits, if it is a composer rather than a file.
+   *
+   * A composer is a tab because it is a thing you work *in*, beside the code
+   * that plays it — and because the alternative, a modal or a wider side
+   * panel, makes you choose between seeing the pattern and seeing the program.
+   * Patterns live in the project rather than in the tab, so this is an id
+   * rather than the pattern itself: a rename in the composer has to reach the
+   * list in the panel, and both have to reach the file.
+   */
+  patternId?: string;
 }
 
 const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
@@ -119,6 +137,9 @@ function App() {
     makeTab({ content: STARTER_CONTENT }),
   ]);
   const [activeId, setActiveId] = useState<string | null>(() => tabs[0].id);
+  // Which file tab was last in front, so a composer can hand an eval back to
+  // it. A ref rather than state: nothing renders from it.
+  const lastCodeId = useRef<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL);
   // The right panel opens on the transport: it is the tab with the buttons the
@@ -154,9 +175,13 @@ function App() {
   const patternsFrom = useRef<string | null>(null);
   const patternsOnDisk = useRef<string | null>(null);
 
-  // A project is a folder and nothing else. It opens on the directory the app
-  // was launched from and follows whatever File ▸ New Project… picks after
-  // that. Null only until the backend has answered.
+  // A project is a folder and nothing else. It opens on whichever one was last
+  // chosen and follows whatever File ▸ New Project… picks after that.
+  //
+  // Null is a real state, not just "the backend has not answered yet": a first
+  // run has no remembered folder, and a remembered one may since have moved.
+  // Everything that reads a project guards for it, and the patterns panel says
+  // so rather than letting unsaved work look saved.
   const [projectRoot, setProjectRoot] = useState<string | null>(null);
   // Bumped to throw the tree's listings away and read the folder again —
   // nothing watches the filesystem, so a change made outside the app has to be
@@ -168,6 +193,20 @@ function App() {
 
   // Null when every tab has been closed, which the editor is built to show.
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
+  if (activeTab && !activeTab.patternId) lastCodeId.current = activeTab.id;
+
+  /**
+   * The tab an eval runs. A composer holds no code, so playing from one runs
+   * the last file that was open instead of an empty buffer — drawing a pattern
+   * and pressing play should be heard, and the alternative is switching tabs
+   * every time to hear what you just drew.
+   */
+  const codeTab =
+    activeTab && !activeTab.patternId
+      ? activeTab
+      : (tabs.find((t) => t.id === lastCodeId.current && !t.patternId) ??
+         tabs.find((t) => !t.patternId) ??
+         null);
 
   /** Show a failure. Everything that can fail comes through here, so nothing
    *  can fail quietly — which is what this panel exists to prevent. */
@@ -202,11 +241,14 @@ function App() {
   // overwritten by a late answer.
   useEffect(() => {
     let live = true;
-    invoke<string>("project_root")
+    invoke<string | null>("recent_project")
       .then((root) => {
-        if (live) setProjectRoot((current) => current ?? root);
+        // Null is a real answer — a first run, or a folder that has since
+        // moved. The app is allowed to have no project open, and everything
+        // that reads one already guards for it.
+        if (live && root) setProjectRoot((current) => current ?? root);
       })
-      .catch((e) => console.error("could not read the working directory:", e));
+      .catch((e) => console.error("could not read the remembered project:", e));
     return () => {
       live = false;
     };
@@ -310,6 +352,31 @@ function App() {
     [metadata, patternNames, openDocs],
   );
 
+  /**
+   * Show a drawn pattern in a composer tab.
+   *
+   * One tab per pattern: opening the same one twice focuses what is already
+   * there, because two composers over one pattern would each hold a view of it
+   * that the other could invalidate.
+   */
+  const openComposer = useCallback(
+    (patternId: string) => {
+      // The tab is minted out here rather than inside the `setTabs` updater.
+      // An updater has to be pure — StrictMode runs it twice — and this one
+      // both bumped a counter and set the active id, so the tab that survived
+      // the second run was never the one that got focus.
+      const existing = tabs.find((t) => t.patternId === patternId);
+      if (existing) {
+        setActiveId(existing.id);
+        return;
+      }
+      const tab = makeTab({ patternId, title: "pattern" });
+      setTabs((prev) => [...prev, tab]);
+      setActiveId(tab.id);
+    },
+    [tabs],
+  );
+
   const newTab = useCallback(() => {
     const tab = makeTab();
     setTabs((prev) => [...prev, tab]);
@@ -392,6 +459,11 @@ function App() {
       setProjectVersion((v) => v + 1);
       setSideOpen(true);
       setSideTab("project");
+      // Remembered for the next launch. A failure here costs nothing this
+      // session, so it is logged rather than shown.
+      invoke("set_recent_project", { root: selected }).catch((e) =>
+        console.error("could not remember this project:", e),
+      );
     } catch (e) {
       report(toDiagnostic(e, "could not open that folder"), null);
     }
@@ -408,8 +480,8 @@ function App() {
   const play = useCallback(async () => {
     // Nothing open is nothing to run — the transport's buttons stay live for
     // stop, which is about what the engine is holding, not about a tab.
-    if (!activeTab) return;
-    const tabId = activeTab.id;
+    if (!codeTab) return;
+    const tabId = codeTab.id;
     try {
       // The drawn patterns go with the code: they are bindings the program can
       // name, and an eval is the only moment they mean anything.
@@ -418,13 +490,13 @@ function App() {
       // the folder this tab is saved in. What it finds there is what is on
       // disk, so a module edited in another tab is heard once it is saved.
       await invoke("run_code", {
-        code: activeTab.content,
+        code: codeTab.content,
         // Null while the panel has nothing to say about this project — before
         // its file has been read, or after a read that failed. An empty panel
         // that *has* read the project is an empty list, and means it: only
         // that may hide a patterns file sitting on disk.
         patterns: patternsFrom.current === projectRoot ? toWire(patterns) : null,
-        workspace: { path: activeTab.path, root: projectRoot },
+        workspace: { path: codeTab.path, root: projectRoot },
       });
       setDiagnostics([]);
       setRunStatus("ok");
@@ -432,7 +504,7 @@ function App() {
     } catch (e) {
       report(toDiagnostic(e), tabId);
     }
-  }, [activeTab, patterns, projectRoot, report]);
+  }, [codeTab, patterns, projectRoot, report]);
 
   const stop = useCallback(async () => {
     try {
@@ -641,7 +713,11 @@ function App() {
                     : "bg-neutral-950/40 text-neutral-400 hover:bg-neutral-900/60")
                 }
               >
-                <span className="whitespace-nowrap">{tab.title}</span>
+                <span className="whitespace-nowrap">
+                  {tab.patternId
+                    ? (patterns.find((p) => p.id === tab.patternId)?.name ?? "pattern")
+                    : tab.title}
+                </span>
                 {tab.dirty && (
                   <span
                     className="h-1.5 w-1.5 rounded-full bg-neutral-400"
@@ -704,8 +780,30 @@ function App() {
             />
           }
         />
-        <main className="min-h-0 min-w-0 flex-1">
-          {activeTab ? (
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {activeTab?.patternId ? (
+            (() => {
+              const pattern = patterns.find((p) => p.id === activeTab.patternId);
+              // The pattern can go while its tab is open — deleted from the
+              // panel, or dropped when a project was reloaded from disk.
+              if (!pattern) {
+                return (
+                  <div className="flex h-full items-center justify-center text-sm text-neutral-500">
+                    This pattern no longer exists.
+                  </div>
+                );
+              }
+              return (
+                <PatternComposer
+                  pattern={pattern}
+                  error={nameError(pattern, patterns)}
+                  onChange={(next) =>
+                    setPatterns(patterns.map((p) => (p.id === next.id ? next : p)))
+                  }
+                />
+              );
+            })()
+          ) : activeTab ? (
             <CodeMirror
               key={activeTab.id}
               onCreateEditor={(view) => setEditor({ tabId: activeTab.id, view })}
@@ -740,7 +838,9 @@ function App() {
             <TransportPanel
               patterns={patterns}
               onPatternsChange={setPatterns}
+              onOpenPattern={openComposer}
               patternsPath={patternsPath}
+              hasProject={projectRoot !== null}
             />
           }
           docs={<DocsPanel builtins={metadata.builtins} focus={docsFocus} />}

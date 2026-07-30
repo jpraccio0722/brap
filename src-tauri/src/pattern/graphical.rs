@@ -15,25 +15,100 @@
 
 use crate::diagnostic::{Diagnostic, Stage};
 use crate::lang::{self, NoteName};
-use crate::parser::parser::{parse, Expr, ScreeItem};
+use crate::parser::parser::{parse, Expr, ListItem, ScreeItem};
 
 /// What the panel's file is called, in every project.
 pub const FILE: &str = "patterns.scree";
 
-/// One beat. Pitches carry a MIDI note number; the other two are the same
+/// What a step is. Pitches carry a MIDI note number; the other two are the same
 /// silence and bare hit the language spells `` ` `` and `\`.
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
-pub enum GraphicalStep {
+pub enum StepKind {
     Rest,
     Trigger,
     Pitch { note: f64 },
+}
+
+/// The length a step has when nothing says otherwise — one grid cell.
+fn unit_length() -> f64 {
+    1.0
+}
+
+/// One step: what it is, and how many grid cells it covers.
+///
+/// `length` is in cells rather than cycles, which is what makes the grid and
+/// the language agree without either doing arithmetic: a note drawn four cells
+/// wide is written `;4`, and the cells in a row always sum to the resolution
+/// the row was drawn at.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+pub struct GraphicalStep {
+    #[serde(flatten)]
+    pub kind: StepKind,
+    #[serde(default = "unit_length")]
+    pub length: f64,
+}
+
+impl GraphicalStep {
+    /// A step of one cell, which is every step the flat grid ever drew.
+    pub fn new(kind: StepKind) -> GraphicalStep {
+        GraphicalStep { kind, length: unit_length() }
+    }
+
+    pub fn sized(kind: StepKind, length: f64) -> GraphicalStep {
+        GraphicalStep { kind, length }
+    }
+}
+
+/// Which editor a pattern is drawn in.
+///
+/// Stored rather than inferred because an empty pattern — which is what every
+/// new one is — has no pitches or triggers to infer from, and a composer that
+/// opened new patterns in the wrong editor every time would be maddening.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Copy, Debug, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// Pitched notes on a piano roll.
+    #[default]
+    Roll,
+    /// Bare triggers, for an instrument that takes no pitch.
+    Drums,
+}
+
+impl Mode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Mode::Roll => "roll",
+            Mode::Drums => "drums",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Mode> {
+        match s {
+            "roll" => Some(Mode::Roll),
+            "drums" => Some(Mode::Drums),
+            _ => None,
+        }
+    }
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 pub struct GraphicalPattern {
     pub name: String,
     pub steps: Vec<GraphicalStep>,
+    #[serde(default)]
+    pub mode: Mode,
+}
+
+impl GraphicalPattern {
+    /// How many cells wide the grid is: the lengths always sum to it.
+    ///
+    /// Derived rather than stored, because storing it would let it disagree
+    /// with the row it describes — and a resolution that contradicts the
+    /// lengths is not recoverable from, whereas this can only ever be right.
+    pub fn resolution(&self) -> f64 {
+        self.steps.iter().map(|s| s.length).sum()
+    }
 }
 
 /// The header the panel's file carries.
@@ -49,11 +124,26 @@ const HEADER: &str = "\
 // without importing them.
 ";
 
+/// The marker that carries what the file cannot otherwise say.
+///
+/// Which editor drew a row is not expressible in scree — it is not a property
+/// of the pattern, it is a property of how someone chose to look at it. A
+/// comment is where that belongs: the file stays entirely ordinary scree, the
+/// compiler never sees this, and a row whose marker is missing or unreadable
+/// still opens, just in whichever editor its contents suggest.
+const MODE_MARKER: &str = "// composer: ";
+
 impl GraphicalPattern {
-    /// One row, as the `let` the language would have been given.
+    /// One row, as the `let` the language would have been given, under the
+    /// comment that says which editor drew it.
     fn to_source(&self) -> String {
         let steps: Vec<String> = self.steps.iter().map(step_source).collect();
-        format!("let {} = [{}]", self.name, steps.join(", "))
+        format!(
+            "{MODE_MARKER}{}\nlet {} = [{}]",
+            self.mode.as_str(),
+            self.name,
+            steps.join(", "),
+        )
     }
 }
 
@@ -71,11 +161,17 @@ pub fn to_source(patterns: &[GraphicalPattern]) -> String {
 /// One beat, spelled the way it would be written by hand: a note name where
 /// there is one, so the file reads as music rather than as MIDI.
 fn step_source(step: &GraphicalStep) -> String {
-    match step {
-        GraphicalStep::Rest => "`".to_string(),
-        GraphicalStep::Trigger => "\\".to_string(),
-        GraphicalStep::Pitch { note } => note_source(*note),
+    let value = match &step.kind {
+        StepKind::Rest => "`".to_string(),
+        StepKind::Trigger => "\\".to_string(),
+        StepKind::Pitch { note } => note_source(*note),
+    };
+    // A length of one is the default, so writing it would be noise — and a row
+    // drawn at no particular resolution then reads exactly as it always did.
+    if step.length == 1.0 {
+        return value;
     }
+    format!("{value};{}", format_number(step.length))
 }
 
 fn note_source(note: f64) -> String {
@@ -114,6 +210,7 @@ fn format_number(n: f64) -> String {
 /// that silently shows nothing and then overwrites what it could not read.
 pub fn from_source(code: &str) -> Result<Vec<GraphicalPattern>, Diagnostic> {
     let items = parse(code.to_string())?;
+    let modes = modes_in(code);
 
     let mut patterns = Vec::new();
     for item in &items {
@@ -123,27 +220,92 @@ pub fn from_source(code: &str) -> Result<Vec<GraphicalPattern>, Diagnostic> {
         let Some(steps) = steps.iter().map(parse_step).collect::<Option<Vec<_>>>() else {
             continue;
         };
-        patterns.push(GraphicalPattern { name: name.0.clone(), steps });
+        let name = name.0.clone();
+        // A hand-written row has no marker, so fall back to what it looks like:
+        // anything pitched is a roll, and bare hits are drums.
+        let mode = modes.get(&name).copied().unwrap_or_else(|| infer_mode(&steps));
+        patterns.push(GraphicalPattern { name, steps, mode });
     }
 
     Ok(patterns)
 }
 
+/// Which editor each row was drawn in, read off the comments.
+///
+/// A text pass rather than part of the parse, because the lexer drops comments
+/// before the parser ever sees them — and it should, since this is not part of
+/// the program. A marker applies to the next `let` below it, which is the only
+/// arrangement [`GraphicalPattern::to_source`] ever writes.
+fn modes_in(code: &str) -> std::collections::HashMap<String, Mode> {
+    let mut out = std::collections::HashMap::new();
+    let mut pending: Option<Mode> = None;
+
+    for line in code.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix(MODE_MARKER) {
+            // An unreadable marker is not an error: the row still opens, it
+            // just opens wherever its contents suggest.
+            pending = Mode::parse(rest.trim());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("let ") {
+            if let Some(mode) = pending.take() {
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() {
+                    out.insert(name, mode);
+                }
+            }
+            continue;
+        }
+        // Anything between a marker and its `let` breaks the association: the
+        // marker was for something else, or for nothing.
+        if !line.is_empty() && !line.starts_with("//") {
+            pending = None;
+        }
+    }
+    out
+}
+
+/// Which editor a row without a marker belongs in.
+fn infer_mode(steps: &[GraphicalStep]) -> Mode {
+    if steps.iter().any(|s| matches!(s.kind, StepKind::Pitch { .. })) {
+        Mode::Roll
+    } else if steps.iter().any(|s| matches!(s.kind, StepKind::Trigger)) {
+        Mode::Drums
+    } else {
+        Mode::default()
+    }
+}
+
 /// One element of a list, as a beat — or `None` when it is something a cell
 /// cannot hold, like a nested list or an expression.
-fn parse_step(expr: &Expr) -> Option<GraphicalStep> {
-    match expr {
-        Expr::Rest => Some(GraphicalStep::Rest),
-        Expr::Trigger => Some(GraphicalStep::Trigger),
-        Expr::Num(n) => Some(GraphicalStep::Pitch { note: *n }),
+fn parse_step(item: &ListItem) -> Option<GraphicalStep> {
+    // A length is drawable now — it is how wide the note is — but only a plain
+    // number is. `[c4;beats]` is a length the grid cannot show a cell for,
+    // since it does not know what `beats` is; the row is passed over rather
+    // than guessed at.
+    let length = match item.length.as_deref() {
+        None => 1.0,
+        Some(Expr::Num(n)) if *n > 0.0 && n.is_finite() => *n,
+        Some(_) => return None,
+    };
+
+    let kind = match &item.value {
+        Expr::Rest => StepKind::Rest,
+        Expr::Trigger => StepKind::Trigger,
+        Expr::Num(n) => StepKind::Pitch { note: *n },
         // A note name is a plain variable to the parser; the lowerer only reads
         // it as a pitch when nothing else has that name, and so do we.
         Expr::Var(name) => match lang::note(&name.0) {
-            NoteName::Note(note) => Some(GraphicalStep::Pitch { note }),
-            _ => None,
+            NoteName::Note(note) => StepKind::Pitch { note },
+            _ => return None,
         },
-        _ => None,
-    }
+        _ => return None,
+    };
+    Some(GraphicalStep::sized(kind, length))
 }
 
 /// Refuse a name the panel could not write and read back.
@@ -182,11 +344,11 @@ mod tests {
     use crate::pattern::pattern::{Pattern, Step};
 
     fn pat(name: &str, steps: Vec<GraphicalStep>) -> GraphicalPattern {
-        GraphicalPattern { name: name.to_string(), steps }
+        GraphicalPattern { name: name.to_string(), steps, mode: Mode::default() }
     }
 
     fn pitch(note: f64) -> GraphicalStep {
-        GraphicalStep::Pitch { note }
+        GraphicalStep::new(StepKind::Pitch { note })
     }
 
     /// The claim this module rests on: a drawn row and the list a person would
@@ -195,7 +357,7 @@ mod tests {
     fn a_drawn_pattern_is_the_list_it_stands_for() {
         let source = to_source(&[pat(
             "riff",
-            vec![pitch(60.0), GraphicalStep::Rest, GraphicalStep::Trigger],
+            vec![pitch(60.0), GraphicalStep::new(StepKind::Rest), GraphicalStep::new(StepKind::Trigger)],
         )]);
 
         let items = parse(format!("fn kick(f) = sin(f)\n{source}\nplay(riff, kick)\n"))
@@ -204,7 +366,7 @@ mod tests {
 
         assert_eq!(
             lowered.bindings[0].pattern,
-            Pattern::Steps(vec![Step::Value(60.0), Step::Rest, Step::Value(1.0)]),
+            Pattern::seq(vec![Step::Value(60.0), Step::Rest, Step::Value(1.0)]),
         );
     }
 
@@ -228,8 +390,8 @@ mod tests {
     #[test]
     fn a_written_file_reads_back_the_same() {
         let patterns = vec![
-            pat("hats", vec![GraphicalStep::Trigger, GraphicalStep::Rest]),
-            pat("riff", vec![pitch(60.0), pitch(60.5), GraphicalStep::Rest]),
+            pat("hats", vec![GraphicalStep::new(StepKind::Trigger), GraphicalStep::new(StepKind::Rest)]),
+            pat("riff", vec![pitch(60.0), pitch(60.5), GraphicalStep::new(StepKind::Rest)]),
             pat("empty", vec![]),
         ];
         assert_eq!(from_source(&to_source(&patterns)).unwrap(), patterns);
@@ -245,8 +407,8 @@ mod tests {
             vec![pat(
                 "hats",
                 vec![
-                    GraphicalStep::Trigger,
-                    GraphicalStep::Rest,
+                    GraphicalStep::new(StepKind::Trigger),
+                    GraphicalStep::new(StepKind::Rest),
                     pitch(51.0),
                     pitch(62.0),
                 ]
@@ -319,18 +481,171 @@ mod tests {
         let lowered = lower(&items).expect("should lower");
         assert_eq!(
             lowered.bindings[0].pattern,
-            Pattern::Steps(vec![Step::Value(1.0), Step::Value(54.0), Step::Rest]),
+            Pattern::seq(vec![Step::Value(1.0), Step::Value(54.0), Step::Rest]),
         );
     }
 
     /// And the shape it reads back, which the panel deserializes.
     #[test]
     fn rows_serialize_for_the_panel() {
-        let json = serde_json::to_string(&[pat("hats", vec![GraphicalStep::Trigger, pitch(54.0)])])
+        let json = serde_json::to_string(&[pat("hats", vec![GraphicalStep::new(StepKind::Trigger), pitch(54.0)])])
             .expect("should serialize");
         assert_eq!(
             json,
-            r#"[{"name":"hats","steps":[{"kind":"trigger"},{"kind":"pitch","note":54.0}]}]"#
+            r#"[{"name":"hats","steps":[{"kind":"trigger","length":1.0},{"kind":"pitch","note":54.0,"length":1.0}],"mode":"roll"}]"#
         );
+    }
+}
+
+#[cfg(test)]
+mod length_tests {
+    use super::*;
+    use crate::pattern::pattern::Pattern;
+
+    /// A length is a note's width, so the grid draws it rather than passing
+    /// the row over — the composer's whole output depends on this.
+    #[test]
+    fn a_row_with_lengths_is_drawn() {
+        let read = from_source("let riff = [c4;3, e4]\n").expect("should read");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].steps[0].length, 3.0);
+        assert_eq!(read[0].steps[1].length, 1.0, "an absent `;` is one cell");
+        assert_eq!(read[0].resolution(), 4.0, "the cells sum to the grid width");
+    }
+
+    /// A length the grid has no cell for is still refused: it cannot show a
+    /// width it cannot compute, and guessing would be written back as fact.
+    #[test]
+    fn a_row_with_a_computed_length_is_not_drawn() {
+        let read = from_source("let beats = 3\nlet riff = [c4;beats, e4]\nlet hats = [\\, `]\n")
+            .expect("the file should still read");
+        assert_eq!(read.len(), 1, "only the drawable row: {read:?}");
+        assert_eq!(read[0].name, "hats");
+    }
+
+    /// And what it cannot draw, it still compiles — the whole file is folded
+    /// into every program in the project whether the grid shows it or not.
+    #[test]
+    fn a_row_with_lengths_still_plays() {
+        use crate::lowerer::lower::lower;
+
+        let src = "fn tone(n) = sin(n)\nlet riff = [c4;3, e4]\nplay(riff, tone)\n";
+        let items = parse(src.to_string()).expect("should parse");
+        let lowered = lower(&items).expect("should lower");
+        let Pattern::Steps(slots) = &lowered.bindings[0].pattern else {
+            panic!("expected a sequence");
+        };
+        assert_eq!(slots[0].length, 3.0);
+    }
+}
+
+/// The file format the composer reads and writes.
+#[cfg(test)]
+mod composer_format_tests {
+    use super::*;
+
+    fn pat(name: &str, mode: Mode, steps: Vec<GraphicalStep>) -> GraphicalPattern {
+        GraphicalPattern { name: name.to_string(), steps, mode }
+    }
+
+    fn pitch(note: f64, length: f64) -> GraphicalStep {
+        GraphicalStep::sized(StepKind::Pitch { note }, length)
+    }
+
+    /// A drawn note's width is written as the `;` the language reads.
+    #[test]
+    fn widths_are_written_as_lengths() {
+        let src = to_source(&[pat(
+            "riff",
+            Mode::Roll,
+            vec![pitch(60.0, 2.0), GraphicalStep::sized(StepKind::Rest, 2.0), pitch(64.0, 4.0)],
+        )]);
+        assert!(src.contains("let riff = [c4;2, `;2, e4;4]"), "got:\n{src}");
+    }
+
+    /// A one-cell step writes no `;` at all, so a row drawn at no particular
+    /// resolution reads exactly as it did before the composer existed.
+    #[test]
+    fn one_cell_steps_stay_bare() {
+        let src = to_source(&[pat(
+            "hats",
+            Mode::Drums,
+            vec![GraphicalStep::new(StepKind::Trigger), GraphicalStep::new(StepKind::Rest)],
+        )]);
+        assert!(src.contains("let hats = [\\, `]"), "got:\n{src}");
+    }
+
+    /// Which editor drew a row survives the trip through the file.
+    #[test]
+    fn the_mode_round_trips() {
+        let rows = vec![
+            pat("riff", Mode::Roll, vec![pitch(60.0, 4.0)]),
+            pat("hats", Mode::Drums, vec![GraphicalStep::sized(StepKind::Trigger, 2.0)]),
+        ];
+        assert_eq!(from_source(&to_source(&rows)).unwrap(), rows);
+    }
+
+    /// The marker is a comment, so it is not part of the program — the file
+    /// still compiles to exactly the pattern that was drawn.
+    #[test]
+    fn the_marker_is_invisible_to_the_compiler() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::pattern::Pattern;
+
+        let src = to_source(&[pat("riff", Mode::Roll, vec![pitch(60.0, 3.0), pitch(64.0, 1.0)])]);
+        let items = parse(format!("fn tone(n) = sin(n)\n{src}\nplay(riff, tone)\n"))
+            .expect("should parse");
+        let lowered = lower(&items).expect("should lower");
+        let Pattern::Steps(slots) = &lowered.bindings[0].pattern else {
+            panic!("expected a sequence");
+        };
+        assert_eq!(slots[0].length, 3.0);
+        assert_eq!(slots[1].length, 1.0);
+    }
+
+    /// A hand-written row has no marker, so the mode comes from what is in it.
+    /// Pitches are a roll; bare hits are drums.
+    #[test]
+    fn a_row_without_a_marker_infers_its_mode() {
+        let read = from_source("let riff = [c4, e4]\nlet hats = [\\, `]\n").expect("should read");
+        assert_eq!(read[0].mode, Mode::Roll);
+        assert_eq!(read[1].mode, Mode::Drums);
+    }
+
+    /// An unreadable marker is not an error. The row still opens — the marker
+    /// is a convenience, and losing it should never lose the pattern.
+    #[test]
+    fn an_unreadable_marker_falls_back_to_inference() {
+        let read = from_source("// composer: xylophone\nlet hats = [\\, `]\n")
+            .expect("should read");
+        assert_eq!(read.len(), 1);
+        assert_eq!(read[0].mode, Mode::Drums);
+    }
+
+    /// A marker only speaks for the `let` directly under it, so one left
+    /// stranded by an edit cannot claim a row it was never about.
+    #[test]
+    fn a_stranded_marker_claims_nothing() {
+        let read = from_source("// composer: drums\nfn tone(n) = sin(n)\nlet riff = [c4]\n")
+            .expect("should read");
+        assert_eq!(read[0].mode, Mode::Roll, "inferred, not the stranded marker");
+    }
+
+    /// The grid's width is the sum of its cells, which is why it is derived
+    /// rather than stored: it cannot disagree with the row it describes.
+    #[test]
+    fn resolution_is_the_sum_of_the_cells() {
+        let row = pat("riff", Mode::Roll, vec![pitch(60.0, 4.0), pitch(64.0, 12.0)]);
+        assert_eq!(row.resolution(), 16.0);
+    }
+
+    /// JSON from a panel that predates lengths still reads: an absent length is
+    /// one cell, and an absent mode is a roll.
+    #[test]
+    fn the_old_wire_format_still_deserializes() {
+        let json = r#"[{"name":"hats","steps":[{"kind":"trigger"},{"kind":"rest"}]}]"#;
+        let rows: Vec<GraphicalPattern> = serde_json::from_str(json).expect("should read");
+        assert_eq!(rows[0].steps[0].length, 1.0);
+        assert_eq!(rows[0].mode, Mode::Roll);
     }
 }

@@ -56,7 +56,7 @@ fn scale_tones(func: &str, v: &Value) -> Result<Vec<f64>, String> {
     }
     items
         .iter()
-        .map(|item| number(func, "every scale degree", item))
+        .map(|item| number(func, "every scale degree", &item.value))
         .collect()
 }
 

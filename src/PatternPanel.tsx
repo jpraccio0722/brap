@@ -1,152 +1,49 @@
-import { useState } from "react";
+import { PatternMini } from "./PatternMini";
 import {
-  cycle,
   makePattern,
   nameError,
-  noteName,
-  parseNote,
-  resize,
-  MAX_BEATS,
-  MIN_BEATS,
+  resolution,
   type GraphicalPattern,
-  type PatternStep,
 } from "./patterns";
 
 /**
- * The drawn-pattern editor: a list of named grids, each one a row of beats.
+ * The patterns list, in the right panel.
  *
- * A pattern is worth drawing rather than typing when the rhythm is the point,
- * so the cell is a single click that walks rest -> trigger -> pitch, and the
- * only thing that ever needs typing is the pitch itself.
+ * Read-only by design. A pattern is drawn in the composer, which opens as a
+ * tab — the panel's job is to say which patterns exist and what each one
+ * roughly sounds like, so you can find the one you want without the panel
+ * becoming a second, narrower editor competing with the first.
  *
  * The name is the whole reason this connects to anything: it is bound in the
  * program's environment before the program runs, so `play(hats, hat)` in the
- * editor reads the grid below. That makes a valid, unique name a hard
- * requirement rather than a nicety, which is why it is checked as you type.
+ * editor reads the row below.
  */
 
-/** Colours match the editor's own: rests warm, triggers green, pitches rose. */
-const CELL_STYLE: Record<PatternStep["kind"], string> = {
-  rest: "border-neutral-700 bg-neutral-800/60 text-neutral-500 hover:border-neutral-600",
-  trigger: "border-green-700/60 bg-green-500/15 text-green-400 hover:border-green-600",
-  pitch: "border-rose-700/60 bg-rose-500/15 text-rose-300 hover:border-rose-600",
-};
-
-const CELL_GLYPH: Record<PatternStep["kind"], string> = {
-  rest: "`",
-  trigger: "\\",
-  pitch: "♪",
-};
-
-/**
- * The pitch of one cell, edited as text.
- *
- * Held locally while it is being typed and committed only when it parses, so
- * the pattern itself never holds a note the backend could not read. A bad
- * entry reverts on blur rather than blocking the field — half of `cs4` is not
- * an error, it is someone still typing.
- */
-function NoteInput({ note, onChange }: { note: number; onChange: (note: number) => void }) {
-  const [text, setText] = useState<string | null>(null);
-  const shown = text ?? noteName(note);
-  const bad = text !== null && parseNote(text) === null;
-
-  const commit = () => {
-    if (text !== null) {
-      const parsed = parseNote(text);
-      if (parsed !== null) onChange(parsed);
-    }
-    setText(null); // back to showing the committed value, however it was typed
-  };
-
-  return (
-    <input
-      value={shown}
-      onChange={(e) => setText(e.target.value)}
-      onBlur={commit}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") e.currentTarget.blur();
-        if (e.key === "Escape") {
-          setText(null);
-          e.currentTarget.blur();
-        }
-      }}
-      title="A note name (c4, fs3, ef2) or a MIDI number"
-      className={
-        "w-full rounded border bg-neutral-900 px-1 py-0.5 text-center font-mono text-[11px] " +
-        "text-rose-200 outline-none " +
-        // The warning has to survive focus: it is at its most useful while the
-        // thing that caused it is still being typed.
-        (bad ? "border-red-500" : "border-neutral-700 focus:border-rose-500")
-      }
-    />
-  );
-}
-
-interface CellProps {
-  index: number;
-  step: PatternStep;
-  onChange: (step: PatternStep) => void;
-}
-
-function Cell({ index, step, onChange }: CellProps) {
-  return (
-    <div className="flex w-11 flex-col items-center gap-0.5">
-      <span className="text-[9px] tabular-nums text-neutral-600">{index + 1}</span>
-      <button
-        onClick={() => onChange(cycle(step))}
-        title={`Beat ${index + 1}: ${step.kind} — click to change`}
-        className={
-          "w-full rounded border py-1 text-center font-mono text-sm leading-4 transition-colors " +
-          CELL_STYLE[step.kind]
-        }
-      >
-        {CELL_GLYPH[step.kind]}
-      </button>
-      {/* The slot is kept whether or not it holds an input, so a row of mixed
-          cells lines up instead of stepping up and down. */}
-      <div className="h-5 w-full">
-        {step.kind === "pitch" && (
-          <NoteInput note={step.note} onChange={(note) => onChange({ kind: "pitch", note })} />
-        )}
-      </div>
-    </div>
-  );
-}
-
-interface PatternCardProps {
+interface PatternRowProps {
   pattern: GraphicalPattern;
   error: string | null;
-  onChange: (pattern: GraphicalPattern) => void;
+  onOpen: () => void;
   onRemove: () => void;
 }
 
-function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
-  const setBeats = (beats: number) =>
-    onChange({ ...pattern, steps: resize(pattern.steps, beats) });
-
-  const setStep = (i: number, step: PatternStep) =>
-    onChange({ ...pattern, steps: pattern.steps.map((s, j) => (j === i ? step : s)) });
-
+function PatternRow({ pattern, error, onOpen, onRemove }: PatternRowProps) {
   return (
-    <div className="rounded-md border border-neutral-800 bg-neutral-900/60 p-2">
+    <div className="group rounded-md border border-neutral-800 bg-neutral-900/60 p-2 transition-colors hover:border-neutral-700">
       <div className="flex items-center gap-1">
-        <input
-          value={pattern.name}
-          onChange={(e) => onChange({ ...pattern, name: e.target.value })}
-          spellCheck={false}
-          placeholder="name"
-          title="The name to use in play()"
-          className={
-            "min-w-0 flex-1 rounded border bg-neutral-950 px-2 py-1 font-mono text-sm " +
-            "text-neutral-100 outline-none " +
-            (error ? "border-red-500" : "border-neutral-700 focus:border-blue-600")
-          }
-        />
+        <button
+          onClick={onOpen}
+          title="Open in the composer"
+          className="min-w-0 flex-1 truncate text-left font-mono text-sm text-neutral-100 hover:text-blue-400"
+        >
+          {pattern.name}
+        </button>
+        <span className="shrink-0 text-[10px] uppercase tracking-wide text-neutral-600">
+          {pattern.mode === "drums" ? "drums" : "roll"} · {resolution(pattern)}
+        </span>
         <button
           onClick={onRemove}
           title="Delete pattern"
-          className="rounded p-1 text-neutral-500 transition-colors hover:bg-neutral-800 hover:text-red-400"
+          className="rounded p-1 text-neutral-600 opacity-0 transition-opacity hover:bg-neutral-800 hover:text-red-400 group-hover:opacity-100"
         >
           <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5">
             <path d="M18.3 5.7 12 12l6.3 6.3-1.4 1.4L10.6 13.4 4.3 19.7 2.9 18.3 9.2 12 2.9 5.7 4.3 4.3l6.3 6.3 6.3-6.3z" />
@@ -156,44 +53,11 @@ function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
 
       {error && <p className="mt-1 text-[11px] text-red-400">{error}</p>}
 
-      <div className="mt-2 flex items-center gap-2">
-        <span className="text-[11px] uppercase tracking-wide text-neutral-500">Beats</span>
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setBeats(pattern.steps.length - 1)}
-            disabled={pattern.steps.length <= MIN_BEATS}
-            title="One fewer beat"
-            className="h-5 w-5 rounded border border-neutral-700 text-neutral-300 transition-colors hover:bg-neutral-800 disabled:opacity-30"
-          >
-            −
-          </button>
-          <input
-            type="number"
-            min={MIN_BEATS}
-            max={MAX_BEATS}
-            value={pattern.steps.length}
-            onChange={(e) => {
-              // An emptied field is mid-edit, not a request for zero beats.
-              if (Number.isFinite(e.target.valueAsNumber)) setBeats(e.target.valueAsNumber);
-            }}
-            className="w-12 rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center font-mono text-xs text-neutral-100 outline-none focus:border-blue-600"
-          />
-          <button
-            onClick={() => setBeats(pattern.steps.length + 1)}
-            disabled={pattern.steps.length >= MAX_BEATS}
-            title="One more beat"
-            className="h-5 w-5 rounded border border-neutral-700 text-neutral-300 transition-colors hover:bg-neutral-800 disabled:opacity-30"
-          >
-            +
-          </button>
-        </div>
-      </div>
-
-      <div className="mt-2 flex flex-wrap gap-1">
-        {pattern.steps.map((step, i) => (
-          <Cell key={i} index={i} step={step} onChange={(s) => setStep(i, s)} />
-        ))}
-      </div>
+      {/* The picture is a button too: it is the biggest thing in the row and
+          the most obvious thing to click. */}
+      <button onClick={onOpen} title="Open in the composer" className="mt-2 block w-full">
+        <PatternMini pattern={pattern} />
+      </button>
     </div>
   );
 }
@@ -201,13 +65,33 @@ function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
 interface PatternPanelProps {
   patterns: GraphicalPattern[];
   onChange: (patterns: GraphicalPattern[]) => void;
+  /** Open one in the composer, as a tab. */
+  onOpen: (id: string) => void;
+  /** False when no folder is open. Patterns still draw and still play — they
+   *  travel with the eval — but there is nowhere to write them, so the panel
+   *  has to say so rather than let the work look saved. */
+  hasProject: boolean;
   /** The project's patterns file, once it is known. Named on screen because a
    *  panel that quietly writes a file into someone's project should say so —
    *  and because it is a file they can open, edit and keep. */
   path: string | null;
 }
 
-export function PatternPanel({ patterns, onChange, path }: PatternPanelProps) {
+export function PatternPanel({
+  patterns,
+  onChange,
+  onOpen,
+  path,
+  hasProject,
+}: PatternPanelProps) {
+  const add = () => {
+    const pattern = makePattern(patterns);
+    onChange([...patterns, pattern]);
+    // Straight into the composer: a new pattern is empty, and an empty row in
+    // the list is nothing to look at.
+    onOpen(pattern.id);
+  };
+
   return (
     <section className="border-t border-neutral-800 px-4 py-4">
       <div className="flex items-center justify-between">
@@ -215,8 +99,8 @@ export function PatternPanel({ patterns, onChange, path }: PatternPanelProps) {
           Patterns
         </h2>
         <button
-          onClick={() => onChange([...patterns, makePattern(patterns)])}
-          title="New graphical pattern"
+          onClick={add}
+          title="New pattern"
           className="rounded-md p-1 text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100"
         >
           <svg viewBox="0 0 24 24" fill="currentColor" className="h-4 w-4">
@@ -227,24 +111,32 @@ export function PatternPanel({ patterns, onChange, path }: PatternPanelProps) {
 
       {patterns.length === 0 ? (
         <p className="mt-2 text-xs leading-relaxed text-neutral-500">
-          None yet. Add one, name it, and play it from the editor:{" "}
+          None yet. Add one, draw it, and play it from the editor:{" "}
           <span className="font-mono text-neutral-400">play(name, kick)</span>
         </p>
       ) : (
-        <div className="mt-3 flex flex-col gap-3">
+        <div className="mt-3 flex flex-col gap-2">
           {patterns.map((p) => (
-            <PatternCard
+            <PatternRow
               key={p.id}
               pattern={p}
               error={nameError(p, patterns)}
-              onChange={(next) => onChange(patterns.map((q) => (q.id === p.id ? next : q)))}
+              onOpen={() => onOpen(p.id)}
               onRemove={() => onChange(patterns.filter((q) => q.id !== p.id))}
             />
           ))}
         </div>
       )}
 
-      {path !== null && (
+      {!hasProject && (
+        <p className="mt-3 rounded border border-amber-900/50 bg-amber-950/20 px-2 py-1.5 text-[11px] leading-relaxed text-amber-500/90">
+          No folder open, so these are not being saved. They still play — an
+          eval carries them — but they go when the app does.{" "}
+          <span className="text-amber-400">File ▸ New Project…</span> picks one.
+        </p>
+      )}
+
+      {hasProject && path !== null && (
         <p className="mt-3 text-[11px] leading-relaxed text-neutral-600" title={path}>
           Saved in{" "}
           <span className="font-mono text-neutral-500">{path.split(/[\\/]/).pop()}</span>, and

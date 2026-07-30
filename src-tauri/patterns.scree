@@ -4,4 +4,5 @@
 // here will be lost. Every file in this project can name these patterns
 // without importing them.
 
-let pat1 = [\, `, \, `, \, `, \, `]
+// composer: drums
+let pat1 = [\, \;4, `, \, `]

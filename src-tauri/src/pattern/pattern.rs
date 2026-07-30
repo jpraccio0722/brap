@@ -33,7 +33,7 @@ impl Event {
     }
 }
 
-/// One slot in a sequence.
+/// What happens in a slot.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Step {
     /// Silence for the slot's duration.
@@ -44,11 +44,51 @@ pub enum Step {
     Group(Box<Pattern>),
 }
 
+/// The length every slot has unless a `;` gave it another one. A sequence of
+/// these divides its cycle evenly, which is what patterns did before lengths
+/// existed and what the great majority of them still want.
+pub const UNIT: f64 = 1.0;
+
+/// One slot in a sequence: what happens, and how much of the sequence it takes.
+///
+/// Lengths are *relative*, not absolute — the sequence always fills exactly one
+/// cycle and the slots divide it in proportion. So `[a;2, b, c]` is a half and
+/// two quarters, and the same shape written `[a;4, b;2, c;2]` is the same
+/// rhythm. That is what makes an absent length mean "one": a sequence with no
+/// lengths at all is every slot at [`UNIT`], which divides evenly.
+///
+/// A length is one slot, not several. `[c4;3, e4]` holds c4 for three quarters
+/// of the cycle as a single sustained note — it does not strike it three times.
+/// That distinction is the whole reason lengths live here rather than being
+/// desugared into repeated steps on the way in.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Slot {
+    pub step: Step,
+    pub length: f64,
+}
+
+impl Slot {
+    /// A slot of the default length, which is what everything that predates
+    /// `;` builds.
+    pub fn new(step: Step) -> Slot {
+        Slot { step, length: UNIT }
+    }
+
+    /// A slot with an explicit length. Nonsense lengths fall back to [`UNIT`]
+    /// rather than poisoning the division: a single bad number would otherwise
+    /// take the whole sequence silent, which is a hard thing to hear the cause
+    /// of. `play` rejects them at bind time, where there is somewhere to say so.
+    pub fn sized(step: Step, length: f64) -> Slot {
+        let length = if length.is_finite() && length > 0.0 { length } else { UNIT };
+        Slot { step, length }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
     Silence,
-    /// Steps evenly dividing one cycle.
-    Steps(Vec<Step>),
+    /// Slots dividing one cycle in proportion to their lengths.
+    Steps(Vec<Slot>),
     Stack(Vec<Pattern>),
     /// Compress into `1/rate` of the time, repeating to fill the cycle.
     Fast(f64, Box<Pattern>),
@@ -58,15 +98,16 @@ pub enum Pattern {
 impl Pattern {
     /// Convenience for a flat sequence with no subdivision.
     pub fn steps(values: impl IntoIterator<Item = Option<f64>>) -> Pattern {
-        Pattern::Steps(
-            values
-                .into_iter()
-                .map(|v| match v {
-                    Some(x) => Step::Value(x),
-                    None => Step::Rest,
-                })
-                .collect(),
-        )
+        Pattern::seq(values.into_iter().map(|v| match v {
+            Some(x) => Step::Value(x),
+            None => Step::Rest,
+        }))
+    }
+
+    /// A sequence of steps at the default length — an even division, which is
+    /// every pattern that does not use `;`.
+    pub fn seq(steps: impl IntoIterator<Item = Step>) -> Pattern {
+        Pattern::Steps(steps.into_iter().map(Slot::new).collect())
     }
 
     pub fn fast(rate: f64, p: Pattern) -> Pattern {
@@ -85,11 +126,20 @@ impl Pattern {
 
             Pattern::Steps(steps) => {
                 if steps.is_empty() || span.end <= span.begin { return Vec::new(); }
-                let step_dur = 1.0 / steps.len() as f64;
+                // The lengths are relative, so the cycle is divided by their
+                // total. `Slot::sized` has already refused anything that could
+                // make this zero or non-finite.
+                let total: f64 = steps.iter().map(|s| s.length).sum();
+                if !(total > 0.0) || !total.is_finite() { return Vec::new(); }
                 let mut out = Vec::new();
                 for cycle in span.begin.floor() as i64 ..= span.end.ceil() as i64 {
-                    for (i, step) in steps.iter().enumerate() {
-                        let slot = cycle as f64 + i as f64 * step_dur;
+                    // Walked rather than indexed: where a slot starts depends
+                    // on the lengths of the ones before it, not on its position.
+                    let mut offset = 0.0;
+                    for Slot { step, length } in steps.iter() {
+                        let step_dur = length / total;
+                        let slot = cycle as f64 + offset / total;
+                        offset += length;
                         match step {
                             Step::Rest => {}
 
@@ -202,6 +252,12 @@ impl Pattern {
     /// A lane is read positionally, so its subdivisions are not timing — a
     /// nested list is simply more values in the line. `None` is a rest, which
     /// leaves the instrument's own default in place for that note.
+    ///
+    /// A length here is how many *notes* the value covers rather than how much
+    /// time, because that is the only thing position can measure: `[400;2,
+    /// 2000]` is 400 for two notes and then 2000. Held and repeated are the
+    /// same thing for a lane — there is no attack to re-strike — which is why
+    /// this may flatten a length that a pattern would have had to sustain.
     pub fn values(&self) -> Vec<Option<f64>> {
         let mut out = Vec::new();
         self.collect_values(&mut out);
@@ -212,10 +268,20 @@ impl Pattern {
         match self {
             Pattern::Silence => {}
             Pattern::Steps(steps) => {
-                for step in steps {
+                for Slot { step, length } in steps {
+                    // Lengths reaching a lane are whole numbers — `play` rejects
+                    // fractions there, where half a note position means nothing
+                    // — but round rather than trust it, since a pattern reused
+                    // as a lane has been through no such check.
+                    let held = (length.round() as usize).max(1);
                     match step {
-                        Step::Rest => out.push(None),
-                        Step::Value(v) => out.push(Some(*v)),
+                        Step::Rest => out.extend(std::iter::repeat(None).take(held)),
+                        Step::Value(v) => {
+                            out.extend(std::iter::repeat(Some(*v)).take(held))
+                        }
+                        // A group is already several values; stretching it would
+                        // have to mean stretching each, which is not a thing
+                        // anyone writes. Its own slots carry their own lengths.
                         Step::Group(inner) => inner.collect_values(out),
                     }
                 }
@@ -241,17 +307,29 @@ impl Pattern {
 
             Pattern::Steps(steps) => {
                 if steps.is_empty() { return None; }
-                let pos = at.rem_euclid(1.0);
-                let len = steps.len() as f64;
-                // `min` guards the case where rem_euclid rounds up to exactly 1.
-                let i = ((pos * len) as usize).min(steps.len() - 1);
-                match &steps[i] {
-                    Step::Rest => None,
-                    Step::Value(v) => Some(*v),
-                    // Slot-local time: one cycle of the inner pattern fills the
-                    // slot, exactly as `query` treats a group.
-                    Step::Group(inner) => inner.sample(pos * len - i as f64),
+                let total: f64 = steps.iter().map(|s| s.length).sum();
+                if !(total > 0.0) || !total.is_finite() { return None; }
+                // Where in the cycle, rescaled to the lengths' own units so it
+                // can be walked against them.
+                let pos = at.rem_euclid(1.0) * total;
+
+                let mut offset = 0.0;
+                for Slot { step, length } in steps {
+                    // The last slot takes anything rem_euclid rounded up to the
+                    // very end of the cycle, which no earlier slot will claim.
+                    let last = offset + length >= total;
+                    if pos < offset + length || last {
+                        return match step {
+                            Step::Rest => None,
+                            Step::Value(v) => Some(*v),
+                            // Slot-local time: one cycle of the inner pattern
+                            // fills the slot, exactly as `query` treats a group.
+                            Step::Group(inner) => inner.sample((pos - offset) / length),
+                        };
+                    }
+                    offset += length;
                 }
+                None
             }
 
             // First lane that has something wins, so a stack reads as a layered
@@ -396,7 +474,7 @@ mod tests {
 
     #[test]
     fn sample_descends_into_a_group() {
-        let p = Pattern::Steps(vec![
+        let p = Pattern::seq(vec![
             Step::Value(1.0),
             Step::Group(Box::new(Pattern::steps([Some(2.0), Some(3.0)]))),
         ]);
@@ -432,5 +510,160 @@ mod tests {
         let mut got = onsets(&p.query(Span::new(0.0, 1.0)));
         got.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(got, vec![0.0, 0.0, 0.5]);
+    }
+}
+
+/// Slot lengths: the rhythm a `;` writes.
+///
+/// These are about division alone — that a length moves the onsets and the
+/// durations of a sequence, and that its absence leaves both exactly where they
+/// were. What a length is allowed to *be*, and what it means once a lane rather
+/// than a cycle is reading it, is checked where those decisions are made.
+#[cfg(test)]
+mod length_tests {
+    use super::*;
+
+    fn onsets(events: &[Event]) -> Vec<f64> {
+        events.iter().map(|e| e.begin).collect()
+    }
+
+    fn durations(events: &[Event]) -> Vec<f64> {
+        events.iter().map(|e| e.duration()).collect()
+    }
+
+    fn sized(pairs: impl IntoIterator<Item = (f64, f64)>) -> Pattern {
+        Pattern::Steps(
+            pairs.into_iter().map(|(v, len)| Slot::sized(Step::Value(v), len)).collect(),
+        )
+    }
+
+    /// The promise the whole feature rests on: no lengths at all is the even
+    /// division patterns have always had.
+    #[test]
+    fn absent_lengths_divide_evenly() {
+        let plain = Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
+        let ones = sized([(1.0, 1.0), (2.0, 1.0), (3.0, 1.0), (4.0, 1.0)]);
+        assert_eq!(plain.query(Span::new(0.0, 1.0)), ones.query(Span::new(0.0, 1.0)));
+    }
+
+    /// A length takes its share of the cycle, and pushes everything after it
+    /// along — the onsets move, which is what makes this rhythm and not sustain.
+    #[test]
+    fn a_length_takes_its_share_of_the_cycle() {
+        let p = sized([(1.0, 2.0), (2.0, 1.0), (3.0, 1.0)]);
+        let evs = p.query(Span::new(0.0, 1.0));
+        assert_eq!(onsets(&evs), vec![0.0, 0.5, 0.75]);
+        assert_eq!(durations(&evs), vec![0.5, 0.25, 0.25]);
+    }
+
+    /// Lengths are relative, so scaling every one of them changes nothing.
+    #[test]
+    fn only_the_ratio_matters() {
+        let small = sized([(1.0, 2.0), (2.0, 1.0), (3.0, 1.0)]);
+        let large = sized([(1.0, 8.0), (2.0, 4.0), (3.0, 4.0)]);
+        assert_eq!(small.query(Span::new(0.0, 1.0)), large.query(Span::new(0.0, 1.0)));
+    }
+
+    /// The rhythm that started this: a quarter and two eighths, then two beats
+    /// of rest, in one bar.
+    #[test]
+    fn a_quarter_and_two_eighths() {
+        let p = Pattern::Steps(vec![
+            Slot::sized(Step::Value(220.0), 2.0),
+            Slot::sized(Step::Value(330.0), 1.0),
+            Slot::sized(Step::Value(440.0), 1.0),
+            Slot::sized(Step::Rest, 4.0),
+        ]);
+        let evs = p.query(Span::new(0.0, 1.0));
+        // Eighths of a bar: the quarter at 0 for two of them, then one each.
+        assert_eq!(onsets(&evs), vec![0.0, 0.25, 0.375]);
+        assert_eq!(durations(&evs), vec![0.25, 0.125, 0.125]);
+    }
+
+    /// A length is one event, not several. This is the distinction that keeps
+    /// lengths on the slot instead of being desugared into repeats on the way in
+    /// — three strikes and one held note are different music.
+    #[test]
+    fn a_long_note_is_sustained_not_repeated() {
+        let evs = sized([(60.0, 3.0), (64.0, 1.0)]).query(Span::new(0.0, 1.0));
+        assert_eq!(evs.len(), 2, "a length must not multiply the note");
+        assert_eq!(evs[0].value, 60.0);
+        assert_eq!(evs[0].duration(), 0.75);
+    }
+
+    /// Lengths repeat with the cycle like everything else in a sequence.
+    #[test]
+    fn lengths_hold_across_cycles() {
+        let p = sized([(1.0, 3.0), (2.0, 1.0)]);
+        assert_eq!(onsets(&p.query(Span::new(0.0, 2.0))), vec![0.0, 0.75, 1.0, 1.75]);
+    }
+
+    /// A group takes its slot's share, and divides that share by its own
+    /// lengths. Nesting and `;` are the same mechanism at two scales.
+    #[test]
+    fn a_group_may_be_given_a_length() {
+        let inner = Pattern::seq([Step::Value(2.0), Step::Value(3.0)]);
+        let p = Pattern::Steps(vec![
+            Slot::sized(Step::Value(1.0), 3.0),
+            Slot::sized(Step::Group(Box::new(inner)), 1.0),
+        ]);
+        let evs = p.query(Span::new(0.0, 1.0));
+        // The group owns the last quarter, split in two.
+        assert_eq!(onsets(&evs), vec![0.0, 0.75, 0.875]);
+        assert_eq!(durations(&evs), vec![0.75, 0.125, 0.125]);
+    }
+
+    /// `sample` asks what is sounding at an instant, so it has to walk the
+    /// lengths rather than divide by the slot count.
+    #[test]
+    fn sample_follows_the_lengths() {
+        let p = sized([(1.0, 3.0), (2.0, 1.0)]);
+        assert_eq!(p.sample(0.0), Some(1.0));
+        assert_eq!(p.sample(0.5), Some(1.0), "still inside the long first slot");
+        assert_eq!(p.sample(0.74), Some(1.0));
+        assert_eq!(p.sample(0.8), Some(2.0));
+        // And it repeats, so the same questions answer the same way next cycle.
+        assert_eq!(p.sample(1.5), Some(1.0));
+    }
+
+    /// A lane reads by note, so a length there is how many notes the value
+    /// covers — held and repeated being the same thing where there is no attack.
+    #[test]
+    fn values_repeat_a_length_for_a_lane() {
+        assert_eq!(
+            sized([(400.0, 2.0), (2000.0, 1.0)]).values(),
+            vec![Some(400.0), Some(400.0), Some(2000.0)],
+        );
+    }
+
+    /// Rests take a length too, which is how a bar ends in silence.
+    #[test]
+    fn a_rest_may_be_given_a_length() {
+        let p = Pattern::Steps(vec![
+            Slot::sized(Step::Value(1.0), 1.0),
+            Slot::sized(Step::Rest, 3.0),
+        ]);
+        let evs = p.query(Span::new(0.0, 1.0));
+        assert_eq!(onsets(&evs), vec![0.0]);
+        assert_eq!(durations(&evs), vec![0.25], "the rest still takes its share");
+    }
+
+    /// A length that is not a number cannot be allowed to take the sequence
+    /// silent — `Slot::sized` falls back rather than dividing by nothing.
+    #[test]
+    fn nonsense_lengths_fall_back_to_one() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(Slot::sized(Step::Value(1.0), bad).length, UNIT, "length {bad}");
+        }
+    }
+
+    /// The lane's own position count has to follow the lengths too, or a lane
+    /// walks out of step with the pattern it is decorating.
+    #[test]
+    fn onsets_are_counted_at_their_new_places() {
+        let p = sized([(1.0, 3.0), (2.0, 1.0)]);
+        assert_eq!(p.onsets_before(0.5), 1, "only the first slot has begun");
+        assert_eq!(p.onsets_before(0.75), 1);
+        assert_eq!(p.onsets_before(1.0), 2, "both, by the end of the cycle");
     }
 }
