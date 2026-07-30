@@ -46,15 +46,15 @@ export function SidePanel({
     >
       <PanelTabs>
         <PanelTab
+          label="Project"
+          selected={tab === "project"}
+          onClick={() => onTabChange("project")}
+        />
+        <PanelTab
           label="Problems"
           selected={tab === "problems"}
           count={problemCount}
           onClick={() => onTabChange("problems")}
-        />
-        <PanelTab
-          label="Project"
-          selected={tab === "project"}
-          onClick={() => onTabChange("project")}
         />
       </PanelTabs>
 
@@ -81,7 +81,7 @@ export function SidePanel({
         title="Drag to resize"
         role="separator"
         aria-orientation="vertical"
-        className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize hover:bg-emerald-600/40 active:bg-emerald-600/60"
+        className="absolute inset-y-0 -right-1 z-10 w-2 cursor-col-resize hover:bg-blue-600/40 active:bg-blue-600/60"
       />
     </aside>
   );

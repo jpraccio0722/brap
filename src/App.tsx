@@ -20,6 +20,8 @@ import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
 import { fromWire, toWire, type GraphicalPattern, type WirePattern } from "./patterns";
+import { Transport } from "./component/Transport";
+
 
 /** A project's drawn patterns, as `read_patterns` returns them. */
 interface PatternsFile {
@@ -130,7 +132,7 @@ function App() {
   // point of it.
   const [sideOpen, setSideOpen] = useState(false);
   const [sideWidth, setSideWidth] = useState(DEFAULT_SIDE_PANEL);
-  const [sideTab, setSideTab] = useState<SideTab>("problems");
+  const [sideTab, setSideTab] = useState<SideTab>("project");
   const [diagnostics, setDiagnostics] = useState<Diagnostic[]>([]);
   const [runStatus, setRunStatus] = useState<RunStatus>("idle");
   // Which tab the diagnostics describe. They outlive the run, and the editor
@@ -595,7 +597,12 @@ function App() {
               </span>
             )}
           </button>
-          <h1 className="text-sm font-semibold tracking-wide text-neutral-300">scree</h1>
+          <div className="ml-4">
+            <Transport 
+              play={play}
+              stop={stop}
+            />
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {/* One hamburger, both ways: it is where a reader looks for the
@@ -731,8 +738,6 @@ function App() {
           onTabChange={setPanelTab}
           transport={
             <TransportPanel
-              play={play}
-              stop={stop}
               patterns={patterns}
               onPatternsChange={setPatterns}
               patternsPath={patternsPath}

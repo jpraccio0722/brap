@@ -140,7 +140,7 @@ function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
           className={
             "min-w-0 flex-1 rounded border bg-neutral-950 px-2 py-1 font-mono text-sm " +
             "text-neutral-100 outline-none " +
-            (error ? "border-red-500" : "border-neutral-700 focus:border-emerald-600")
+            (error ? "border-red-500" : "border-neutral-700 focus:border-blue-600")
           }
         />
         <button
@@ -176,7 +176,7 @@ function PatternCard({ pattern, error, onChange, onRemove }: PatternCardProps) {
               // An emptied field is mid-edit, not a request for zero beats.
               if (Number.isFinite(e.target.valueAsNumber)) setBeats(e.target.valueAsNumber);
             }}
-            className="w-12 rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center font-mono text-xs text-neutral-100 outline-none focus:border-emerald-600"
+            className="w-12 rounded border border-neutral-700 bg-neutral-950 px-1 py-0.5 text-center font-mono text-xs text-neutral-100 outline-none focus:border-blue-600"
           />
           <button
             onClick={() => setBeats(pattern.steps.length + 1)}

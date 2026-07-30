@@ -122,7 +122,7 @@ export function DocsPanel({ builtins, focus }: DocsPanelProps) {
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search the reference"
           aria-label="Search the reference"
-          className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-emerald-700 focus:outline-none"
+          className="w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-blue-700 focus:outline-none"
         />
       </div>
 

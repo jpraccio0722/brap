@@ -1,0 +1,7 @@
+// Patterns drawn in the side panel.
+//
+// The panel rewrites this file whenever a row changes, so anything else kept
+// here will be lost. Every file in this project can name these patterns
+// without importing them.
+
+let pat1 = [\, `, \, `, \, `, \, `]
