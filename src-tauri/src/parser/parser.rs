@@ -89,7 +89,7 @@ pub enum Expr {
     If  { cond: Box<Expr>, then: Box<Expr>, otherwise: Option<Box<Expr>> },
     Index { base: Box<Expr>, index: Box<Expr> },
     Let { name: Ident, value: Box<Expr>, body: Box<Expr> },
-    List(Vec<Expr>),
+    List(Vec<ListItem>),
     Mul   { lhs: Box<Expr>, rhs: Box<Expr> },
     Neg { expr: Box<Expr> },
     Num(f64),
@@ -107,6 +107,27 @@ pub enum Expr {
     Var(Ident),
 }
 
+
+/// One element of a list, with the length a `;` gave it.
+///
+/// The length is an expression rather than a number because it is read at
+/// lowering like every other constant the language folds — `[c4;beats, e4]`
+/// should work for the same reason `play`'s `rate` may be a `let`. What it may
+/// *mean* depends on how the list is read: time in a pattern, notes in a lane,
+/// nothing at all in a list being used as data.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ListItem {
+    pub value: Expr,
+    pub length: Option<Box<Expr>>,
+}
+
+impl ListItem {
+    /// An element with no `;`, which is every element written before lengths
+    /// existed and most of them since.
+    pub fn plain(value: Expr) -> ListItem {
+        ListItem { value, length: None }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum CmpOp { Lt, Le, Gt, Ge, Eq, Ne }
@@ -443,7 +464,14 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .allow_trailing()
             .collect::<Vec<_>>();
 
-        let list = expr.clone()
+        // `value;length`, the length optional. Nothing else in the grammar uses
+        // `;`, so there is no ambiguity to resolve here — the only reason it
+        // binds tighter than `,` is that the separator is what ends an element.
+        let list_item = expr.clone()
+            .then(just(Token::Semi).ignore_then(expr.clone()).or_not())
+            .map(|(value, length)| ListItem { value, length: length.map(Box::new) });
+
+        let list = list_item
             .separated_by(just(Token::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
@@ -808,7 +836,13 @@ mod tests {
             panic!("expected a call, got {ast:?}");
         };
         assert_eq!(args[1].name, Some(Ident("cut".to_string())));
-        assert_eq!(args[1].value, Expr::List(vec![Expr::Num(400.0), Expr::Num(2000.0)]));
+        assert_eq!(
+            args[1].value,
+            Expr::List(vec![
+                ListItem::plain(Expr::Num(400.0)),
+                ListItem::plain(Expr::Num(2000.0)),
+            ]),
+        );
     }
 
     /// `choice` has to rewind after the Ident when no Colon follows, or a bare

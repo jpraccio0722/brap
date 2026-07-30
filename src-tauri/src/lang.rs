@@ -622,6 +622,15 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         doc: "Pair elements positionally: `zip([1, 2], [3, 4])` is `[[1, 3], [2, 4]]`. Every argument must be a list, and all must be the same length.",
     },
     ListBuiltin {
+        name: "stack",
+        params: &["pattern"],
+        arities: &[1],
+        variadic: true,
+        receives: ValueKind::Pattern,
+        returns: ValueKind::Pattern,
+        doc: "Patterns that sound at once instead of in turn: `stack([c4;2, e4;2], [g4;4])` is a two-note line under a held g. Each argument keeps its own division, so the layers need not agree on a rhythm — a three against a four is written by stacking them. This is how a chord is written, and how a drawn part with overlapping notes is split into voices. Lanes read a stack as all its values in order, layer by layer.",
+    },
+    ListBuiltin {
         name: "rev",
         params: &["list"],
         arities: &[1],
@@ -951,7 +960,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
     },
     ListBuiltin {
         name: "play_once",
@@ -1545,7 +1554,7 @@ mod receives_tests {
 
     /// One name per kind that accepts that kind and no other, so which of them
     /// compiles identifies what the receiver was.
-    const PROBES: [(ValueKind, &str); 5] = [
+    const PROBES: [(ValueKind, &str); 6] = [
         (ValueKind::List, "len"),
         (ValueKind::Play, "play_all"),
         // Nothing but a buffer has a length in seconds.
@@ -1555,6 +1564,11 @@ mod receives_tests {
         // signal. Order matters: the narrower probe is asked first.
         (ValueKind::Number, "m2h"),
         (ValueKind::Signal, "clip"),
+        // Last, and it has to be: a list and a number are both usable as
+        // patterns, so this probe accepts everything the three above do. Asked
+        // here, it identifies only what nothing else would take — a layered
+        // pattern, which is a pattern and nothing else.
+        (ValueKind::Pattern, "play_once(inst)"),
     ];
 
     /// The declared result must be the one the probes actually identify.

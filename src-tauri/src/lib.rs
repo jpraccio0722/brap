@@ -298,17 +298,57 @@ struct Entry {
     is_dir: bool,
 }
 
-/// Where the project panel opens: the directory the app was launched from.
+/// What the app remembers the last project in, inside its own config folder.
+const RECENT_PROJECT: &str = "recent-project";
+
+/// Whether a remembered path is still worth opening.
 ///
-/// A project here is nothing more than a folder, so this is the whole of the
-/// default one. File ▸ New Project… replaces it with any other.
+/// A project is nothing more than a folder, so the only thing that can go
+/// wrong is that it stopped being one — moved, deleted, or on a volume that is
+/// not mounted this time. None of those deserve an error: the app simply opens
+/// with no project, which is the same state it is in on a first run.
+fn usable_project(saved: &str) -> Option<String> {
+    let saved = saved.trim();
+    if saved.is_empty() {
+        return None;
+    }
+    std::path::Path::new(saved).is_dir().then(|| saved.to_string())
+}
+
+fn recent_project_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app.path()
+        .app_config_dir()
+        .map(|dir| dir.join(RECENT_PROJECT))
+        .map_err(|e| e.to_string())
+}
+
+/// The project to open on launch: whichever folder was last chosen, if it is
+/// still there.
+///
+/// Deliberately *not* the working directory. A launched binary's cwd says
+/// nothing about what someone is working on — under `tauri dev` it is the Rust
+/// crate, and a bundled app opened from the desktop gets `/` — so using it
+/// meant the app wrote the panel's `patterns.scree` into the source tree in
+/// development, and somewhere unwritable in a real build. `None` is a real
+/// answer here: the app is allowed to have no project open.
 #[tauri::command]
-fn project_root() -> Result<String, String> {
-    std::env::current_dir()
-        .map_err(|e| e.to_string())?
-        .into_os_string()
-        .into_string()
-        .map_err(|p| format!("{} is not valid UTF-8", p.to_string_lossy()))
+fn recent_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let path = recent_project_file(&app)?;
+    // An unreadable file is a first run, not a failure.
+    let Ok(saved) = std::fs::read_to_string(&path) else {
+        return Ok(None);
+    };
+    Ok(usable_project(&saved))
+}
+
+/// Remember the project just opened, for the next launch.
+#[tauri::command]
+fn set_recent_project(app: tauri::AppHandle, root: String) -> Result<(), String> {
+    let path = recent_project_file(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, root).map_err(|e| e.to_string())
 }
 
 /// List one directory, for the project tree.
@@ -414,7 +454,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
 #[cfg(test)]
 mod pattern_file_tests {
     use super::*;
-    use crate::pattern::graphical::GraphicalStep;
+    use crate::pattern::graphical::{GraphicalStep, StepKind};
 
     fn temp_project(name: &str) -> String {
         let dir = std::env::temp_dir().join(format!(
@@ -431,10 +471,11 @@ mod pattern_file_tests {
         vec![GraphicalPattern {
             name: "hats".to_string(),
             steps: vec![
-                GraphicalStep::Trigger,
-                GraphicalStep::Rest,
-                GraphicalStep::Pitch { note: 60.0 },
+                GraphicalStep::new(StepKind::Trigger),
+                GraphicalStep::new(StepKind::Rest),
+                GraphicalStep::new(StepKind::Pitch { note: 60.0 }),
             ],
+            mode: graphical::Mode::Roll,
         }]
     }
 
@@ -519,7 +560,8 @@ pub fn run() {
             read_file,
             read_patterns,
             write_patterns,
-            project_root,
+            recent_project,
+            set_recent_project,
             list_dir,
             language_metadata
         ])
@@ -540,4 +582,48 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod recent_project_tests {
+    use super::usable_project;
+
+    /// A remembered folder that is still a folder is the one to open.
+    #[test]
+    fn an_existing_folder_is_usable() {
+        let dir = std::env::temp_dir();
+        let saved = dir.to_string_lossy().to_string();
+        assert_eq!(usable_project(&saved), Some(saved.clone()));
+    }
+
+    /// Trailing whitespace is the file's, not the path's — it is written with
+    /// whatever the OS left on the line.
+    #[test]
+    fn surrounding_whitespace_is_ignored() {
+        let dir = std::env::temp_dir();
+        let saved = format!("  {}\n", dir.to_string_lossy());
+        assert_eq!(usable_project(&saved), Some(dir.to_string_lossy().to_string()));
+    }
+
+    /// A folder that has moved, been deleted, or is on an unmounted volume is
+    /// not an error — the app just opens with no project, as on a first run.
+    #[test]
+    fn a_missing_folder_is_no_project() {
+        assert_eq!(usable_project("/nowhere/that/exists/at/all"), None);
+    }
+
+    /// A file is not a project. Only folders are.
+    #[test]
+    fn a_file_is_not_a_project() {
+        let file = std::env::temp_dir().join("scree-usable-project-test");
+        std::fs::write(&file, "x").expect("should write");
+        assert_eq!(usable_project(&file.to_string_lossy()), None);
+        std::fs::remove_file(&file).ok();
+    }
+
+    #[test]
+    fn an_empty_record_is_no_project() {
+        assert_eq!(usable_project(""), None);
+        assert_eq!(usable_project("   \n"), None);
+    }
 }

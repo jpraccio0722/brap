@@ -6,15 +6,23 @@
 
 use std::rc::Rc;
 
-use crate::scree_graph::environment::Value;
+use crate::scree_graph::environment::{Item, Value};
 use crate::scree_graph::ugen_nodes::NodeKind;
 use crate::lowerer::lower::Lowerer;
 
-fn as_list(func: &str, v: &Value) -> Result<Rc<Vec<Value>>, String> {
+fn as_list(func: &str, v: &Value) -> Result<Rc<Vec<Item>>, String> {
     match v {
         Value::List(items) => Ok(items.clone()),
         _ => Err(format!("{func} expects a list")),
     }
+}
+
+/// A list's elements without their lengths, for the builtins that compute over
+/// values rather than rearranging them. `sum` of `[1;4, 2]` is 3: a length says
+/// how much of a *sequence* an element occupies, and arithmetic is not a
+/// sequence.
+fn as_values(func: &str, v: &Value) -> Result<Vec<Value>, String> {
+    Ok(as_list(func, v)?.iter().map(|i| i.value.clone()).collect())
 }
 
 fn as_number(func: &str, what: &str, v: &Value) -> Result<f64, String> {
@@ -72,7 +80,15 @@ pub(crate) fn check_arity(
     ))
 }
 
+/// A list built by a builtin, whose elements carry no length of their own.
 fn list(items: Vec<Value>) -> Result<Option<Value>, String> {
+    Ok(Some(Value::List(Item::all(items))))
+}
+
+/// A list rebuilt from elements that already had lengths — `rev`, `push`,
+/// `split` and the like, where an element survives the operation and should
+/// keep whatever `;` gave it.
+fn relist(items: Vec<Item>) -> Result<Option<Value>, String> {
     Ok(Some(Value::List(Rc::new(items))))
 }
 
@@ -131,24 +147,42 @@ impl Lowerer {
                 }
 
                 let rows = (0..len)
-                    .map(|i| Value::List(Rc::new(lists.iter().map(|l| l[i].clone()).collect())))
+                    .map(|i| Value::List(Item::all(lists.iter().map(|l| l[i].value.clone()))))
                     .collect();
                 list(rows)
+            }
+
+            // Layers rather than a sequence.
+            //
+            // Every argument is run through `to_pattern` and the result thrown
+            // away, purely to refuse a non-pattern here rather than at the
+            // `play` that eventually reads the stack. That is what the declared
+            // `receives: Pattern` promises, and it puts the error on the call
+            // that has the mistake in it.
+            "stack" => {
+                if args.is_empty() {
+                    return Err("stack expects at least one pattern".into());
+                }
+                for (i, arg) in args.iter().enumerate() {
+                    crate::lowerer::play::to_pattern(arg)
+                        .map_err(|e| format!("stack: layer {} is not a pattern — {e}", i + 1))?;
+                }
+                Ok(Some(Value::Stack(Rc::new(args.to_vec()))))
             }
 
             "rev" => {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
-                list(items.iter().rev().cloned().collect())
+                relist(items.iter().rev().cloned().collect())
             }
 
             // `[a, b, c]` -> `[a, b, c, c, b, a]`: the sequence, then its mirror.
             "palindrome" => {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
-                let mut out: Vec<Value> = items.iter().cloned().collect();
+                let mut out: Vec<Item> = items.iter().cloned().collect();
                 out.extend(items.iter().rev().cloned());
-                list(out)
+                relist(out)
             }
 
             // Rotation amount defaults to 1 and wraps, so `rotl(l, len(l))` is
@@ -165,17 +199,17 @@ impl Lowerer {
                 };
                 let n = if func == "rotr" { -n } else { n };
                 let at = n.rem_euclid(items.len() as i64) as usize;
-                let mut out: Vec<Value> = items[at..].to_vec();
+                let mut out: Vec<Item> = items[at..].to_vec();
                 out.extend_from_slice(&items[..at]);
-                list(out)
+                relist(out)
             }
 
             "push" => {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
-                let mut out: Vec<Value> = items.iter().cloned().collect();
-                out.push(args[1].clone());
-                list(out)
+                let mut out: Vec<Item> = items.iter().cloned().collect();
+                out.push(Item::plain(args[1].clone()));
+                relist(out)
             }
 
             // Removes the last element. Lists are immutable, so nothing is
@@ -186,12 +220,12 @@ impl Lowerer {
                 if items.is_empty() {
                     return Err("pop: the list is already empty".into());
                 }
-                list(items[..items.len() - 1].to_vec())
+                relist(items[..items.len() - 1].to_vec())
             }
 
             "sort" => {
                 arity(func, args)?;
-                let items = as_list(func, &args[0])?;
+                let items = as_values(func, &args[0])?;
                 let mut nums = items
                     .iter()
                     .map(|v| as_number(func, "every element", v))
@@ -202,7 +236,7 @@ impl Lowerer {
 
             "sum" => {
                 arity(func, args)?;
-                let items = as_list(func, &args[0])?;
+                let items = as_values(func, &args[0])?;
                 let mut it = items.iter();
                 let Some(first) = it.next() else {
                     return Ok(Some(Value::Number(0.0)));
@@ -238,7 +272,7 @@ impl Lowerer {
                     return Err("choice: the list is empty".into());
                 }
                 let i = self.next_index(items.len());
-                Ok(Some(items[i].clone()))
+                Ok(Some(items[i].value.clone()))
             }
 
             // `wchoice(values, weights)` — parallel lists, like zip.
@@ -258,7 +292,7 @@ impl Lowerer {
                 }
                 let ws = weights
                     .iter()
-                    .map(|v| as_number(func, "every weight", v))
+                    .map(|w| as_number(func, "every weight", &w.value))
                     .collect::<Result<Vec<_>, _>>()?;
                 if let Some(bad) = ws.iter().find(|w| **w < 0.0 || !w.is_finite()) {
                     return Err(format!("wchoice: weights must be finite and >= 0, got {bad}"));
@@ -272,22 +306,22 @@ impl Lowerer {
                 for (i, w) in ws.iter().enumerate() {
                     point -= w;
                     if point < 0.0 {
-                        return Ok(Some(items[i].clone()));
+                        return Ok(Some(items[i].value.clone()));
                     }
                 }
-                Ok(Some(items[items.len() - 1].clone()))
+                Ok(Some(items[items.len() - 1].value.clone()))
             }
 
             "scramble" => {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
-                let mut out: Vec<Value> = items.iter().cloned().collect();
+                let mut out: Vec<Item> = items.iter().cloned().collect();
                 // Fisher-Yates.
                 for i in (1..out.len()).rev() {
                     let j = self.next_index(i + 1);
                     out.swap(i, j);
                 }
-                list(out)
+                relist(out)
             }
 
             // `map(list, transform)` — the function applied to every element.
@@ -306,7 +340,7 @@ impl Lowerer {
 
                 let mut out = Vec::with_capacity(items.len());
                 for v in items.iter() {
-                    out.push(self.apply("map", def.clone(), vec![v.clone()])?);
+                    out.push(self.apply("map", def.clone(), vec![v.value.clone()])?);
                 }
                 list(out)
             }
@@ -322,7 +356,7 @@ impl Lowerer {
 
                 let mut out = Vec::new();
                 for v in items.iter() {
-                    let keep = self.apply("filter", def.clone(), vec![v.clone()])?;
+                    let keep = self.apply("filter", def.clone(), vec![v.value.clone()])?;
                     match keep {
                         Value::Number(n) => {
                             if n != 0.0 {
@@ -336,7 +370,7 @@ impl Lowerer {
                         }
                     }
                 }
-                list(out)
+                relist(out)
             }
 
             _ => Ok(None),
@@ -372,7 +406,7 @@ mod tests {
             let mut lowerer = lowerer();
             // One list argument is enough to get past the match arm; whether it
             // then succeeds or errors on arity/types is irrelevant here.
-            let args = vec![Value::List(Rc::new(vec![Value::Number(1.0)]))];
+            let args = vec![Value::List(Item::all([Value::Number(1.0)]))];
             let handled = match lowerer.list_builtin(b.name, &args) {
                 Ok(None) => false,
                 Ok(Some(_)) | Err(_) => true,
@@ -385,7 +419,7 @@ mod tests {
     /// that would regress if `arities` were flattened to a single number.
     #[test]
     fn arity_errors_list_every_accepted_count() {
-        let items = Value::List(Rc::new(vec![Value::Number(1.0)]));
+        let items = Value::List(Item::all([Value::Number(1.0)]));
         let mut lowerer = lowerer();
 
         // Value has no Debug, so unwrap_err() is unavailable here.

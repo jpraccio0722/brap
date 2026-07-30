@@ -127,6 +127,12 @@ pub enum Token {
     #[token("%")]
     Percent,
 
+    /// How long a step is, inside a pattern: `[220;2, 330, 440]`.
+    ///
+    /// The number is a *share* of the sequence rather than a duration — the
+    /// list still fills exactly one cycle, and the lengths divide it between
+    /// them. Absent, a step's length is one, which is the even division every
+    /// pattern had before this existed.
     #[token(";")]
     Semi,
 
