@@ -1,5 +1,6 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  MIDDLE_C,
   RESOLUTIONS,
   ROLL_HIGH,
   ROLL_LOW,
@@ -56,11 +57,35 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
   const grid = toCells(pattern.steps);
   const [drag, setDrag] = useState<DragState | null>(null);
   const surface = useRef<HTMLDivElement>(null);
+  const scroller = useRef<HTMLDivElement>(null);
 
   // Highest note first, so the roll reads the way a keyboard stands.
   const lanes = drums
     ? [0]
     : Array.from({ length: ROLL_HIGH - ROLL_LOW + 1 }, (_, i) => ROLL_HIGH - i);
+
+  /**
+   * Open looking at the music.
+   *
+   * The roll spans all 88 keys, so scrolling to whatever is drawn is the
+   * difference between opening on a part and opening on an empty stretch of
+   * register two octaves above it. An empty pattern gets middle C, which is
+   * where the first note is most likely to go.
+   *
+   * Keyed on the pattern rather than on its steps, so this places the view
+   * once when a pattern is opened and never fights the scrolling afterwards.
+   */
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el || drums) return;
+    const pitches = pattern.steps.flatMap((s) => (s.kind === "pitch" ? [s.note] : []));
+    const focus = pitches.length
+      ? (Math.min(...pitches) + Math.max(...pitches)) / 2
+      : MIDDLE_C;
+    const lane = ROLL_HIGH - Math.round(focus);
+    el.scrollTop = Math.max(0, lane * LANE_H - el.clientHeight / 2);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pattern.id, drums]);
 
   const setSteps = (steps: PatternStep[]) => onChange({ ...pattern, steps });
 
@@ -190,7 +215,7 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
         </p>
       )}
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      <div ref={scroller} className="min-h-0 flex-1 overflow-auto">
         <div className="flex w-max">
           {/* The keyboard, which scrolls vertically with the grid because it is
               in the same scroll box and the same flow. */}
@@ -201,10 +226,10 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
                   key={note}
                   style={{ height: LANE_H }}
                   className={
-                    "flex items-center justify-end border-b border-r pr-1 font-mono text-[9px] " +
+                    "flex items-center justify-end border-b border-r pr-1 font-mono text-[12px] " +
                     (isAccidental(note)
-                      ? "border-neutral-900 bg-neutral-900 text-neutral-600"
-                      : "border-neutral-800 bg-neutral-950 text-neutral-500")
+                      ? "border-neutral-900 bg-neutral-950 text-neutral-600"
+                      : "border-neutral-700 bg-neutral-800 text-neutral-500")
                   }
                 >
                   {/* Only C is labelled, or the gutter is unreadable noise. */}

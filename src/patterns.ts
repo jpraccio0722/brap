@@ -38,10 +38,19 @@ export interface GraphicalPattern {
 export const RESOLUTIONS = [4, 8, 16, 32] as const;
 export const DEFAULT_RESOLUTION = 16;
 
-/** The range of pitches the roll draws, as MIDI numbers: C2 to C6, four
- *  octaves, which covers a bassline and a melody without endless scrolling. */
-export const ROLL_LOW = 36;
-export const ROLL_HIGH = 84;
+/**
+ * The range of pitches the roll draws, as MIDI numbers: A0 to C8.
+ *
+ * The 88 keys of a piano, so the roll never runs out from under a part. It is
+ * far taller than any window, which is the point — the roll scrolls, and opens
+ * centred on whatever the pattern already holds rather than at one end of a
+ * compass nobody uses all of.
+ */
+export const ROLL_LOW = 21;
+export const ROLL_HIGH = 108;
+
+/** Where an empty roll opens: middle C, in the middle of the view. */
+export const MIDDLE_C = 60;
 
 /** What the backend will accept as a name it can bind. Mirrors `check_names`
  *  in `src-tauri/src/pattern/graphical.rs`. */
