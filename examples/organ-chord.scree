@@ -1,8 +1,0 @@
-// an expression can be entered and will play
-// here's three organ noted added together and volume reduced 
-0.2 * organ(57.m2h) + organ(61.m2h) + organ(64.m2h)
-
-
-
-
-

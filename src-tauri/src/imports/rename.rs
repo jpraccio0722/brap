@@ -151,7 +151,11 @@ impl<'a> Scope<'a> {
 
             Expr::List(items) => {
                 for item in items {
-                    self.expr(item)?;
+                    self.expr(&mut item.value)?;
+                    // A length is an expression, so it may name an import too.
+                    if let Some(length) = &mut item.length {
+                        self.expr(length)?;
+                    }
                 }
                 Ok(())
             }

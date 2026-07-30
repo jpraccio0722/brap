@@ -23,7 +23,7 @@ export function PanelTab({ label, selected, count, onClick }: PanelTabProps) {
       className={
         "flex items-center gap-1.5 border-b-2 px-3 py-2 text-xs font-semibold uppercase tracking-wide transition-colors " +
         (selected
-          ? "border-emerald-600 text-neutral-100"
+          ? "border-blue-600 text-neutral-100"
           : "border-transparent text-neutral-500 hover:text-neutral-300")
       }
     >

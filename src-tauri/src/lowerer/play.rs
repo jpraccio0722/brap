@@ -18,7 +18,7 @@
 use crate::scree_graph::environment::Value;
 use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{Arg, Expr, Ident};
-use crate::pattern::pattern::{Pattern, Step};
+use crate::pattern::pattern::{Pattern, Slot, Step, UNIT};
 use crate::pattern::patterns::{Binding, Lane, LEGATO};
 
 /// The one-shot: `play`, stopping after a single pass of the pattern.
@@ -140,7 +140,12 @@ impl Lowerer {
             }
 
             let value = self.expr(&arg.value)?;
-            lanes.push(Lane { name: lane, pattern: to_pattern(&value)? });
+            let pattern = to_pattern(&value)?;
+            whole_lengths(&pattern).map_err(|len| format!(
+                "{name}: lane '{lane}' has a length of {len}. A lane is read by note, \
+                 not by time — a `;` there is how many notes the value covers, so it \
+                 has to be a whole number"))?;
+            lanes.push(Lane { name: lane, pattern });
         }
 
         // Every parameter the pattern and lanes leave unfilled has to have a
@@ -183,17 +188,56 @@ impl Lowerer {
 pub fn to_pattern(v: &Value) -> Result<Pattern, String> {
     match v {
         Value::List(items) => {
-            let steps = items.iter().map(to_step).collect::<Result<Vec<_>, _>>()?;
+            // A `;` length here is time: the slot takes that share of the
+            // cycle, as one sustained event. Absent, it is `UNIT` and the
+            // sequence divides evenly, exactly as it did before `;` existed.
+            let steps = items
+                .iter()
+                .map(|item| {
+                    Ok(Slot::sized(to_step(&item.value)?, item.length.unwrap_or(UNIT)))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
             Ok(Pattern::Steps(steps))
         }
-        Value::Number(n) => Ok(Pattern::Steps(vec![Step::Value(*n)])),
+        // Layers, each dividing the cycle in its own right. Nothing is done to
+        // reconcile their lengths — that they need not agree is the point.
+        Value::Stack(layers) => Ok(Pattern::Stack(
+            layers.iter().map(to_pattern).collect::<Result<Vec<_>, _>>()?,
+        )),
+        Value::Number(n) => Ok(Pattern::seq([Step::Value(*n)])),
         Value::Rest => Ok(Pattern::Silence),
-        Value::Trigger => Ok(Pattern::Steps(vec![Step::Value(1.0)])),
+        Value::Trigger => Ok(Pattern::seq([Step::Value(1.0)])),
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())
         }
         Value::Function(_) => Err("a pattern cannot contain a function".to_string()),
         Value::Play { .. } => Err("a pattern cannot contain a play".to_string()),
+    }
+}
+
+/// Refuse a fractional `;` anywhere in a pattern being used as a lane.
+///
+/// Lengths mean two different things in the two positions, and only one of them
+/// admits a fraction. A pattern divides time, where `;1.5` is a dotted note; a
+/// lane is indexed by which note is asking, where one and a half notes is not a
+/// place. Rejecting it is better than rounding, because the rounding is silent
+/// and the mistake is a misunderstanding worth naming.
+///
+/// Returns the offending length, so the caller can say which number it meant.
+fn whole_lengths(p: &Pattern) -> Result<(), f64> {
+    match p {
+        Pattern::Silence => Ok(()),
+        Pattern::Steps(slots) => slots.iter().try_for_each(|slot| {
+            if slot.length.fract() != 0.0 {
+                return Err(slot.length);
+            }
+            match &slot.step {
+                Step::Group(inner) => whole_lengths(inner),
+                _ => Ok(()),
+            }
+        }),
+        Pattern::Stack(ps) => ps.iter().try_for_each(whole_lengths),
+        Pattern::Fast(_, inner) => whole_lengths(inner),
     }
 }
 
@@ -204,7 +248,10 @@ fn to_step(v: &Value) -> Result<Step, String> {
         // A trigger sounds but carries nothing; instruments that take an
         // argument see 1.
         Value::Trigger => Ok(Step::Value(1.0)),
-        Value::List(_) => Ok(Step::Group(Box::new(to_pattern(v)?))),
+        // Both fill the slot with a whole pattern: a list divides it in turn, a
+        // stack layers over the whole of it. That is how a chord is written at
+        // one step of a longer line.
+        Value::List(_) | Value::Stack(_) => Ok(Step::Group(Box::new(to_pattern(v)?))),
         Value::Signal(_) => {
             Err("a pattern cannot contain a signal (patterns are events, not audio)".to_string())
         }

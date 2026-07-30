@@ -1,7 +1,7 @@
 use std::fmt::format;
 use std::rc::Rc;
 
-use crate::scree_graph::environment::{Env, Value};
+use crate::scree_graph::environment::{Env, Item, Value};
 use crate::scree_graph::ugen_nodes::{NodeInput, NodeKind};
 use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{CmpOp, Expr, Statement};
@@ -76,7 +76,7 @@ impl Lowerer {
                 let mut out = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     self.env.push_scope();
-                    self.env.define(&var.0, item.clone());
+                    self.env.define(&var.0, item.value.clone());
                     let iteration = self.expr(body);
                     self.env.pop_scope();
                     out.push(iteration?);
@@ -117,7 +117,7 @@ impl Lowerer {
                     return Ok(acc.expect("non-empty list yields at least one value"));
                 }
 
-                Ok(Value::List(Rc::new(out)))
+                Ok(Value::List(Item::all(out)))
             }
 
             Expr::If { cond, then, otherwise } => {
@@ -140,7 +140,7 @@ impl Lowerer {
                 if i < 0.0 || i.fract() != 0.0 {
                     return Err(format!("list index must be a whole number >= 0, got {i}"));
                 }
-                items.get(i as usize).cloned().ok_or_else(|| format!(
+                items.get(i as usize).map(|it| it.value.clone()).ok_or_else(|| format!(
                     "list index {i} out of bounds (length {})", items.len()))
             }            
             
@@ -155,10 +155,27 @@ impl Lowerer {
                 result
             }
 
+            // A `;` length is folded to a number here, alongside the element it
+            // belongs to, and checked for being one at all. What it goes on to
+            // *mean* is not this layer's business: a pattern reads it as time,
+            // a lane as a count of notes, and `len` not at all.
             Expr::List(items) => {
-                let vals = items.iter()
-                    .map(|e| self.expr(e))
-                    .collect::<Result<Vec<_>, _>>()?;
+                let mut vals = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    let value = self.expr(&item.value)?;
+                    let length = match &item.length {
+                        None => None,
+                        Some(e) => {
+                            let n = self.number(e, "a `;` length")?;
+                            if !n.is_finite() || n <= 0.0 {
+                                return Err(format!(
+                                    "a `;` length must be a positive number, got {n}"));
+                            }
+                            Some(n)
+                        }
+                    };
+                    vals.push(Item { value, length });
+                }
                 Ok(Value::List(Rc::new(vals)))
             }
             
@@ -193,7 +210,7 @@ impl Lowerer {
                 let mut out = Vec::with_capacity(count);
                 let mut i = lo;
                 while i <= hi { out.push(Value::Number(i)); i += 1.0; }
-                Ok(Value::List(Rc::new(out)))
+                Ok(Value::List(Item::all(out)))
             }
 
             Expr::Rem { lhs, rhs } => {
@@ -262,6 +279,9 @@ impl Lowerer {
             Value::Signal(id) => Ok(NodeInput::Node(id)),
             Value::Function(_) => Err("cannot use a function as a signal".into()),
             Value::List(_) => Err("cannot use a list as a signal (iterate it with `for`)".into()),
+            Value::Stack(_) => Err(
+                "cannot use a stack as a signal (a stack is layered patterns, not audio — \
+                 sum oscillators with `+` to hear them at once)".into()),
             Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
             Value::Trigger => Err("cannot use a trigger as a signal (triggers belong in patterns)".into()),
             Value::Play { .. } => Err(

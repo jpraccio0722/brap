@@ -309,7 +309,7 @@ mod tests {
             Pattern::steps([Some(1.0), Some(2.0), Some(3.0)]),
             vec![Lane {
                 name: "cut".into(),
-                pattern: Pattern::Steps(vec![
+                pattern: Pattern::seq(vec![
                     Step::Value(10.0),
                     Step::Group(Box::new(Pattern::steps([Some(20.0), Some(30.0)]))),
                 ]),
