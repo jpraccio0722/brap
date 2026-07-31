@@ -2346,6 +2346,105 @@ fn then_fill_refuses_a_group() {
     assert!(e.contains("single `play`"), "got: {e}");
 }
 
+/// What `loop` is for: a fill on its own stops, and the pair of them is what
+/// wants to come round again.
+#[test]
+fn loop_repeats_the_whole_chain_and_not_just_the_last_link() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 3).then_fill([c2, c2]).loop(3)\n"));
+    assert_eq!(bs.len(), 6, "groove and fill, three times over");
+    // Pass one is the original pair; every later pass is it, four cycles on.
+    let starts: Vec<f64> = bs.iter().map(|b| b.start).collect();
+    assert_eq!(starts, vec![0.0, 3.0, 4.0, 7.0, 8.0, 11.0]);
+    assert_eq!(bs[2].instrument, "bass", "a copy plays what it copied");
+    assert_eq!(bs[2].pattern, bs[0].pattern);
+    assert_eq!(bs[3].pattern, bs[1].pattern);
+    assert_eq!(bs[2].cycles, Some(3.0), "and for as long");
+}
+
+/// The chain carries on from the end of the last pass, not the first.
+#[test]
+fn loop_hands_the_chain_on_after_every_pass() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 3).then_fill([c2]).loop(2).then(one)\n"));
+    assert_eq!(bs.last().unwrap().start, 8.0);
+}
+
+/// Lanes and rates ride along, because a pass is a copy of the binding and not
+/// a re-reading of the source.
+#[test]
+fn loop_copies_lanes_and_rate() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 3, 2, cut: [500, 900]).loop(2)\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[1].start, 1.5, "1.5 cycles at rate 2");
+    assert_eq!(bs[1].lanes, bs[0].lanes);
+    assert_eq!(bs[1].pattern, bs[0].pattern);
+}
+
+/// A `with` is part of the chain too, so both parts come round together.
+#[test]
+fn loop_repeats_everything_laid_alongside() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 2).with(two).loop(2)\n"));
+    assert_eq!(bs.len(), 4);
+    let starts: Vec<f64> = bs.iter().map(|b| b.start).collect();
+    assert_eq!(starts, vec![0.0, 0.0, 2.0, 2.0]);
+}
+
+/// One pass is the chain itself, untouched.
+#[test]
+fn loop_of_one_writes_nothing_new() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3).loop(1).then(one)\n"));
+    assert_eq!(bs.len(), 2, "the play, and what followed it");
+    assert_eq!(bs[1].start, 3.0);
+}
+
+/// A second pass over something that never ends would play over the first.
+#[test]
+fn loop_refuses_an_endless_chain() {
+    let e = play_err(&format!("{ARR}play([c3], bass).loop(2)\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+}
+
+/// `take` is the way out of that, and it bounds the loop as well.
+#[test]
+fn loop_takes_a_chain_that_take_has_bounded() {
+    let bs = bindings_of(&format!("{ARR}play([c3], bass).take(2).loop(3)\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[2].start, 4.0);
+    assert_eq!(bs[2].cycles, Some(2.0), "the cut came with the copy");
+}
+
+/// A choice already comes back around on a period of its own, and two
+/// repetitions of one binding is one too many.
+#[test]
+fn loop_refuses_a_chain_containing_a_choice() {
+    let e = play_err(&format!("{ARR}playn([c3], bass, 2).rthen([one, two]).take(4).loop(2)\n"));
+    assert!(e.contains("choice"), "got: {e}");
+}
+
+#[test]
+fn loop_refuses_a_count_that_is_not_a_whole_number() {
+    let e = play_err(&format!("{ARR}playn([c3], bass, 2).loop(2.5)\n"));
+    assert!(e.contains("whole number"), "got: {e}");
+}
+
+/// Each pass is real bindings, so an absurd count is a memory problem.
+#[test]
+fn loop_refuses_an_absurd_count() {
+    let e = play_err(&format!("{ARR}playn([c3], bass, 2).loop(100000)\n"));
+    assert!(e.contains("a typo?"), "got: {e}");
+}
+
+/// A loop is a chain in its own right: what follows chains onto all of it.
+#[test]
+fn a_loop_can_be_looped() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 2).loop(2).loop(2)\n"));
+    assert_eq!(bs.len(), 4);
+    let starts: Vec<f64> = bs.iter().map(|b| b.start).collect();
+    assert_eq!(starts, vec![0.0, 2.0, 4.0, 6.0]);
+}
+
 /// The hazard `quantize` exists for: `rate` divides into the count, so this
 /// section is 1.5 cycles long and everything after it would be off the beat.
 #[test]
@@ -2601,6 +2700,7 @@ fn outro() = play_once([c2], inst)
 ";
     for example in [
         "playn(riff, lead, 4)\n  .then_fill([1, 1, 1, 1])\n  .then_n(chorus, 2)\n  .then(outro)",
+        "playn(riff, lead, 3)\n  .then_fill([1, 1, 1, 1])\n  .loop(4)\n  .then(chorus)",
         "playn(riff, lead, 4).with(drums).then(chorus)",
         "playn(pat, inst, 3, 2).then(chorus)",
         "playn(pat, inst, 3, 2).quantize().then(chorus)",

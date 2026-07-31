@@ -6,6 +6,9 @@ interface TransportPanelProps {
   onPatternsChange: (patterns: GraphicalPattern[]) => void;
   /** Open one in the composer, which lives in a tab rather than in here. */
   onOpenPattern: (id: string) => void;
+  /** Open a file by path, for the panel's heading — it names the patterns file
+   *  and opens it. */
+  onOpenFile: (path: string) => void;
   /** The project's patterns file, passed through to the panel that writes it. */
   patternsPath: string | null;
   /** False when no folder is open, so there is nowhere to save patterns to. */
@@ -29,6 +32,7 @@ interface TransportPanelProps {
 export function TransportPanel({
   patterns,
   onOpenPattern,
+  onOpenFile,
   onPatternsChange,
   patternsPath,
   hasProject,
@@ -38,6 +42,7 @@ export function TransportPanel({
       patterns={patterns}
       onChange={onPatternsChange}
       onOpen={onOpenPattern}
+      onOpenFile={onOpenFile}
       path={patternsPath}
       hasProject={hasProject}
     />

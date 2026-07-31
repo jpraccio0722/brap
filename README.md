@@ -267,6 +267,24 @@ playn(riff, lead, 4)
   .then(outro)
 ```
 
+Everything here runs once and hands on, so a chain simply stops when it reaches
+the end. `loop` is how a chain comes back around instead:
+
+```rust
+playn(riff, lead, 3)
+  .then_fill([1, 1, 1, 1])  // three bars and a fill …
+  .loop(4)                  // … four times through
+  .then(chorus)
+```
+
+It repeats *the whole chain to its left*, which is the point — a fill is only
+worth writing because the groove returns after it, and there is nowhere else to
+say "these two together" without naming the pair as a `fn` first. `then_n` is
+the other half of the pair: it names a section and runs it after this one, and
+because it inlines afresh each pass a `rand` inside it lands differently every
+time. `loop` copies bindings that already exist, so every pass is the same
+music.
+
 `with` lays a section alongside rather than after it, from the same downbeat:
 
 ```rust
@@ -285,6 +303,7 @@ play itself.
 | `at` | `at(cycle, section)` | Place a section at an absolute cycle from the origin. The escape hatch from chaining, for an arrangement whose shape you already know. |
 | `seq` | `seq(section, ...)` | Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. |
 | `then_n` | `then_n(play, section, times)` | A section `times` times, back to back. Inlined afresh each pass, so a `rand` inside it is a different number every time round — the same rule a voice follows. |
+| `loop` | `loop(play, times)` | Everything chained so far, `times` times through. The counterpart to `then_n`: that one names a `fn` and runs it *after* this section, this one takes no section at all, because the section it repeats is the chain it is written on. The whole chain must finish. The passes are copies, so a `rand` in the chain was already spent and every pass is the same music — `then_n` is the one that draws afresh. |
 | `then_each` | `then_each(play, list, body)` | One pass per element, with the element passed in: `.then_each([1, 2, 4], faster)` calls `faster(1)`, `faster(2)`, `faster(4)`. `body` takes exactly one parameter. Arrangement by list — every list function already builds the shape of a piece, and this is what spends one. |
 | `then_fill` | `then_fill(play, pattern, rate?)` | One pass of a pattern on this section's **own** instrument. No `fn` and no second `play`: a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. Needs a single `play` on the left — a group has no one instrument to fill for. |
 | `quantize` | `quantize(play, grid?)` | Round where the chain has reached up to a multiple of `grid` cycles (default 1), without shortening what is already playing. |

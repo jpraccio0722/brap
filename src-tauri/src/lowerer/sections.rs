@@ -29,6 +29,7 @@ use crate::scree_graph::environment::{FunctionDef, Value};
 pub const THEN: &str = "then";
 pub const THEN_AFTER: &str = "then_after";
 pub const THEN_N: &str = "then_n";
+pub const LOOP: &str = "loop";
 pub const THEN_EACH: &str = "then_each";
 pub const THEN_FILL: &str = "then_fill";
 pub const OVERLAP: &str = "overlap";
@@ -45,8 +46,8 @@ pub const MAYBE: &str = "maybe";
 
 /// Every name this module handles, in one place so `lang` and `call` agree.
 pub const SECTION_BUILTINS: &[&str] = &[
-    THEN, THEN_AFTER, THEN_N, THEN_EACH, THEN_FILL, OVERLAP, WITH, AT, SEQ,
-    QUANTIZE, TAKE, STOP, WTHEN, RTHEN, SHUFFLE_THEN, MAYBE,
+    THEN, THEN_AFTER, THEN_N, LOOP, THEN_EACH, THEN_FILL, OVERLAP, WITH, AT,
+    SEQ, QUANTIZE, TAKE, STOP, WTHEN, RTHEN, SHUFFLE_THEN, MAYBE,
 ];
 
 /// What a handle covers: where it sits, and which bindings are its own.
@@ -55,6 +56,10 @@ struct Section {
     ends_at: Option<f64>,
     first: usize,
     last: usize,
+    /// Where the chain this section belongs to began — see `Value::Play`.
+    /// Carried from the receiver by everything that has one, so only `.loop`
+    /// ever reads it.
+    chain_first: usize,
 }
 
 impl Section {
@@ -69,8 +74,21 @@ impl Section {
             ends_at: self.ends_at,
             first: self.first,
             last: self.last,
+            chain_first: self.chain_first,
             template: (self.last == self.first + 1).then_some(self.first),
         }
+    }
+
+    /// A section that begins a chain rather than continuing one: `at` and
+    /// `seq`, which take no receiver.
+    fn rooted(starts_at: f64, ends_at: Option<f64>, first: usize, last: usize) -> Self {
+        Section { starts_at, ends_at, first, last, chain_first: first }
+    }
+
+    /// This section, chained onto `prev`.
+    fn after(mut self, prev: &Section) -> Self {
+        self.chain_first = prev.chain_first;
+        self
     }
 }
 
@@ -85,6 +103,7 @@ impl Lowerer {
             THEN => self.then(args),
             THEN_AFTER => self.then_after(args),
             THEN_N => self.then_n(args),
+            LOOP => self.loop_(args),
             THEN_EACH => self.then_each(args),
             THEN_FILL => self.then_fill(args),
             OVERLAP => self.overlap(args),
@@ -137,7 +156,7 @@ impl Lowerer {
         for binding in &self.bindings[first..] {
             ends_at = later_end(ends_at, binding.cycles.map(|c| binding.start + c));
         }
-        Ok(Section { starts_at: offset, ends_at, first, last: self.bindings.len() })
+        Ok(Section::rooted(offset, ends_at, first, self.bindings.len()))
     }
 
     fn inline_body(
@@ -162,7 +181,8 @@ impl Lowerer {
 
     /// The receiver of a chained combinator, unpacked.
     fn receiver(&self, who: &str, args: &[Value]) -> Result<Section, String> {
-        let Some(Value::Play { starts_at, ends_at, first, last, .. }) = args.first() else {
+        let Some(Value::Play { starts_at, ends_at, first, last, chain_first, .. }) = args.first()
+        else {
             return Err(format!(
                 "{who}: the left side must be a play — `playn(...).{who}(...)`"));
         };
@@ -171,6 +191,7 @@ impl Lowerer {
             ends_at: *ends_at,
             first: *first,
             last: *last,
+            chain_first: *chain_first,
         })
     }
 
@@ -225,7 +246,7 @@ impl Lowerer {
         }
         let def = self.function(THEN, "the section", args.get(1))?;
         let at = self.cursor(THEN, &s)?;
-        Ok(self.inline(THEN, def, Vec::new(), at)?.value())
+        Ok(self.inline(THEN, def, Vec::new(), at)?.after(&s).value())
     }
 
     /// `.then_after(n, f)` — `n` cycles of silence, then `f`.
@@ -243,7 +264,7 @@ impl Lowerer {
         }
         let def = self.function(THEN_AFTER, "the section", args.get(2))?;
         let at = self.cursor(THEN_AFTER, &s)? + gap;
-        Ok(self.inline(THEN_AFTER, def, Vec::new(), at)?.value())
+        Ok(self.inline(THEN_AFTER, def, Vec::new(), at)?.after(&s).value())
     }
 
     /// `.overlap(n, f)` — start `f` `n` cycles *before* this section ends.
@@ -274,6 +295,7 @@ impl Lowerer {
             ends_at: later_end(Some(end), next.ends_at),
             first: s.first,
             last: next.last,
+            chain_first: s.chain_first,
         }
         .value())
     }
@@ -297,6 +319,7 @@ impl Lowerer {
             ends_at: later_end(s.ends_at, alongside.ends_at),
             first: s.first,
             last: alongside.last,
+            chain_first: s.chain_first,
         }
         .value())
     }
@@ -332,13 +355,7 @@ impl Lowerer {
             at = s.ends_at.ok_or_else(|| format!(
                 "{SEQ}: section {} never finishes, so nothing could follow it", i + 1))?;
         }
-        Ok(Section {
-            starts_at: start,
-            ends_at: Some(at),
-            first,
-            last: self.bindings.len(),
-        }
-        .value())
+        Ok(Section::rooted(start, Some(at), first, self.bindings.len()).value())
     }
 
     // ---- repeating a section ----
@@ -375,8 +392,101 @@ impl Lowerer {
             at = s.ends_at.ok_or_else(|| format!(
                 "{THEN_N}: pass {} never finishes, so the next could not follow it", i + 1))?;
         }
-        Ok(Section { starts_at: start, ends_at: Some(at), first, last: self.bindings.len() }
-            .value())
+        Ok(Section::rooted(start, Some(at), first, self.bindings.len()).after(&s).value())
+    }
+
+    /// `.loop(n)` — everything chained so far, `n` times through.
+    ///
+    /// The counterpart to `then_n`, and the difference is which section is
+    /// repeated. `then_n` takes a `fn` and runs it `n` times *after* this one;
+    /// `loop` takes no section at all, because the section it repeats is the
+    /// chain it is written on — `playn(groove, kit, 3).then_fill(roll).loop(4)`
+    /// is four bars of groove-and-fill, and there is nowhere else to say that
+    /// without naming the pair as a `fn` first.
+    ///
+    /// Reaching back over the whole chain is why `chain_first` exists. Every
+    /// `.then` narrows `first..last` to what it wrote, so that a `.take` after
+    /// it cuts what followed rather than what came before; that is right for
+    /// cutting and wrong for repeating, and the two need different answers to
+    /// "which section".
+    ///
+    /// The passes are copies of bindings rather than a counter on one, which
+    /// keeps the scheduler out of it — the same choice `then_n` makes, and for
+    /// the same reason. It does mean a `rand` inside the chain was spent once,
+    /// before `loop` ever saw it: every pass is the same music, where
+    /// `then_n`'s are each drawn afresh. Where that matters, `then_n` is the
+    /// one that wants a `fn`.
+    pub fn loop_(&mut self, args: &[Value]) -> Result<Value, String> {
+        let s = self.receiver(LOOP, args)?;
+        if args.len() != 2 {
+            return Err(format!(
+                "{LOOP} expects a count: playn(pat, inst, 4).{LOOP}(2)"));
+        }
+        let times = self.constant(LOOP, "the count", args.get(1))?;
+        if times.fract() != 0.0 || times < 1.0 {
+            return Err(format!(
+                "{LOOP}: the count must be a whole number of at least 1, got {times}"));
+        }
+        if times > MAX_REPEATS {
+            return Err(format!(
+                "{LOOP}: {times} passes is more than {MAX_REPEATS} — a typo? Each one is real \
+                 bindings, so the count is a size and not just a duration."));
+        }
+
+        let end = self.cursor(LOOP, &s)?;
+        let range = s.chain_first..s.last;
+        if range.is_empty() {
+            return Err(format!("{LOOP}: this chain plays nothing, so there is nothing to loop"));
+        }
+
+        // Every pass has to be the same length as the first, so anything still
+        // open at the end of one would run into the next. `take` and `stop` are
+        // how an endless part is given a length; a choice already repeats on a
+        // period of its own, and two repetitions of one binding is one too many.
+        for b in &self.bindings[range.clone()] {
+            if b.cycles.is_none() {
+                return Err(format!(
+                    "{LOOP}: something in this chain never finishes, so a second pass would \
+                     play over the first. Bound it with `play_once`, `playn`, `.{TAKE}(n)` or \
+                     `.{STOP}()`."));
+            }
+            if b.choice.is_some() {
+                return Err(format!(
+                    "{LOOP}: this chain contains a choice, which already comes back around on \
+                     a period of its own. Put the choice inside a `fn` and reach for \
+                     `.{THEN_N}` instead."));
+            }
+        }
+
+        // Where the chain opened, which is not `starts_at`: that is the last
+        // link's, and the whole chain is what repeats.
+        let start = self.bindings[range.clone()]
+            .iter()
+            .fold(f64::INFINITY, |a, b| a.min(b.start));
+        let period = end - start;
+        if !(period > 0.0) {
+            return Err(format!(
+                "{LOOP}: this chain takes no time, so looping it would not go anywhere"));
+        }
+
+        let first = s.chain_first;
+        for pass in 1..times as usize {
+            for i in range.clone() {
+                let mut b = self.bindings[i].clone();
+                b.start += period * pass as f64;
+                self.bindings.push(b);
+            }
+        }
+        Ok(Section {
+            starts_at: start,
+            ends_at: Some(start + period * times),
+            first,
+            last: self.bindings.len(),
+            // A loop is a chain in its own right: what follows it chains onto
+            // the whole loop, so a second `.loop` repeats all of it again.
+            chain_first: first,
+        }
+        .value())
     }
 
     /// `.then_each(list, f)` — `f(element)` per element, in sequence.
@@ -416,8 +526,7 @@ impl Lowerer {
                 "{THEN_EACH}: element {} never finishes, so the next could not follow it",
                 i + 1))?;
         }
-        Ok(Section { starts_at: start, ends_at: Some(at), first, last: self.bindings.len() }
-            .value())
+        Ok(Section::rooted(start, Some(at), first, self.bindings.len()).after(&s).value())
     }
 
     /// `.then_fill(pattern, rate?)` — one pass of `pattern` on this section's
@@ -429,10 +538,11 @@ impl Lowerer {
     /// it needs a receiver that is one play — a group of them has no single
     /// instrument to be a fill for.
     pub fn then_fill(&mut self, args: &[Value]) -> Result<Value, String> {
-        let Some(Value::Play { ends_at, template, .. }) = args.first() else {
+        let Some(Value::Play { ends_at, template, chain_first, .. }) = args.first() else {
             return Err(format!(
                 "{THEN_FILL}: the left side must be a play — `playn(...).{THEN_FILL}(pat)`"));
         };
+        let chain_first = *chain_first;
         if args.len() < 2 || args.len() > 3 {
             return Err(format!(
                 "{THEN_FILL} expects a pattern and an optional rate: \
@@ -484,6 +594,7 @@ impl Lowerer {
             ends_at: Some(at + 1.0 / rate),
             first,
             last: self.bindings.len(),
+            chain_first,
         }
         .value())
     }
@@ -517,6 +628,7 @@ impl Lowerer {
             ends_at: Some((end / grid).ceil() * grid),
             first: s.first,
             last: s.last,
+            chain_first: s.chain_first,
         }
         .value())
     }
@@ -537,8 +649,7 @@ impl Lowerer {
         }
         let cut = s.starts_at + n;
         self.cut_at(&s, cut);
-        Ok(Section { starts_at: s.starts_at, ends_at: Some(cut), first: s.first, last: s.last }
-            .value())
+        Ok(Section { ends_at: Some(cut), ..s }.value())
     }
 
     /// `.stop()` — cut everything still open in this section at the moment its
@@ -565,8 +676,7 @@ impl Lowerer {
                  at least one `play_once` or `playn`, or say how long with `.{TAKE}(n)`."));
         };
         self.cut_at(&s, cut);
-        Ok(Section { starts_at: s.starts_at, ends_at: Some(cut), first: s.first, last: s.last }
-            .value())
+        Ok(Section { ends_at: Some(cut), ..s }.value())
     }
 
     // ---- choosing between sections ----
@@ -665,7 +775,7 @@ impl Lowerer {
             }
         }
 
-        Ok(Section { starts_at: at, ends_at: None, first, last: self.bindings.len() }.value())
+        Ok(Section::rooted(at, None, first, self.bindings.len()).after(&s).value())
     }
 
     /// `.maybe(p, f)` — `f`, with probability `p`, each time round.
@@ -706,7 +816,7 @@ impl Lowerer {
                 b.choice = Some(ChoiceRef { group, arm: 0 });
             }
         }
-        Ok(Section { starts_at: at, ends_at: None, first, last: self.bindings.len() }.value())
+        Ok(Section::rooted(at, None, first, self.bindings.len()).after(&s).value())
     }
 
     /// `.shuffle_then([a, b, c])` — all of them, once each, in an order drawn
@@ -748,8 +858,7 @@ impl Lowerer {
                 "{SHUFFLE_THEN}: section {} never finishes, so the next could not follow it",
                 i + 1))?;
         }
-        Ok(Section { starts_at: start, ends_at: Some(at), first, last: self.bindings.len() }
-            .value())
+        Ok(Section::rooted(start, Some(at), first, self.bindings.len()).after(&s).value())
     }
 
     /// A seed for one choice, drawn from the eval's own RNG — so re-evaluating
