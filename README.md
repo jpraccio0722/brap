@@ -14,6 +14,34 @@ npm install && npm run tauri dev
 ## Step by step tutorial
 
 
+## Projects
+
+A project is a folder. `File ▸ Open Project…` points the panel at one and
+`File ▸ New Project…` starts one wherever you like — the platform's own dialog
+is where the folder itself gets made. Whichever you last opened is the one the
+app comes back to.
+
+What a project remembers lives in a `scree-project.json` beside your files:
+
+```json
+{
+  "name": "Nocturne",
+  "bpm": 96.0,
+  "volume": 0.7
+}
+```
+
+The name is the one at the top of the project panel, and you can edit it there;
+it starts as the folder's name and is free to diverge. The other two are the
+transport in the title bar, so a piece opens at the tempo and level you left it
+at. Everything is written as you change it, and every field is optional — a file
+may say only the one thing it means to change.
+
+Opening a folder that has no such file changes nothing: the transport stays
+where you left it, and the file appears the first time you move something (or
+straight away, for `New Project…`).
+
+
 ## Imports
 
 A file can use another file's definitions. The spelling is Rust's:

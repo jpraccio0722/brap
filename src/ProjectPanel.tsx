@@ -166,6 +166,13 @@ function Row({
 interface ProjectPanelProps {
   /** The project's folder, or null before the backend has named one. */
   root: string | null;
+  /**
+   * What the project calls itself, from its settings file. Null until that has
+   * been read, when the folder's own name stands in for it.
+   */
+  name: string | null;
+  /** Rename the project, which is saved with the rest of its settings. */
+  onRename: (name: string) => void;
   /** The file the editor is showing, so the tree can mark it. */
   activePath: string | null;
   /** Open a file in a tab. */
@@ -177,18 +184,28 @@ interface ProjectPanelProps {
 /**
  * Every file in the project, which is simply a folder on disk.
  *
- * It starts on the directory the app was launched from and follows whatever
- * File ▸ New Project… picks after that. There is no project file and nothing
- * to configure: a project is a root path, and this is a view of it.
+ * It opens on whichever folder was last used and follows whatever File ▸ New
+ * Project… or File ▸ Open Project… picks after that. What little a project
+ * configures — its name, and the transport it is played at — lives in a
+ * `scree-project.json` beside its files; the name is edited here, at the top of
+ * the tree, because that is where you read it.
  */
-export function ProjectPanel({ root, activePath, onOpenFile, onRefresh }: ProjectPanelProps) {
+export function ProjectPanel({
+  root,
+  name,
+  onRename,
+  activePath,
+  onOpenFile,
+  onRefresh,
+}: ProjectPanelProps) {
   if (root === null) {
     return (
       <div className="px-4 py-4 text-xs leading-relaxed text-neutral-500">
         <p>
           No project open. Pick a folder with{" "}
-          <span className="text-neutral-400">File ▸ New Project…</span> and its
-          files show up here.
+          <span className="text-neutral-400">File ▸ Open Project…</span> — or
+          start one with <span className="text-neutral-400">New Project…</span>{" "}
+          — and its files show up here.
         </p>
       </div>
     );
@@ -197,12 +214,24 @@ export function ProjectPanel({ root, activePath, onOpenFile, onRefresh }: Projec
   return (
     <>
       <div className="flex items-center justify-between gap-2 border-b border-neutral-800 px-3 py-1.5">
-        <span
+        {/* An input rather than a label, since the name is the project's own
+            rather than the folder's: a folder is named for where it sits on a
+            disk, a piece for what it is. Until the settings have been read the
+            folder's name stands in, which is what they will say anyway. */}
+        <input
+          value={name ?? basename(root)}
+          onChange={(e) => onRename(e.target.value)}
+          // A project with no name is one the tree cannot be read by, and the
+          // backend would fill it in on the next save regardless — so it is
+          // filled in here, where it can still be seen happening.
+          onBlur={() => {
+            if ((name ?? "").trim() === "") onRename(basename(root));
+          }}
+          spellCheck={false}
+          aria-label="Project name"
           title={root}
-          className="truncate text-xs font-medium uppercase tracking-wide text-neutral-300"
-        >
-          {basename(root)}
-        </span>
+          className="min-w-0 flex-1 truncate rounded bg-transparent px-1 py-0.5 text-xs font-medium tracking-wide text-neutral-300 outline-none transition-colors hover:bg-neutral-800 focus:bg-neutral-800 focus:text-neutral-100"
+        />
         {/* Nothing watches the filesystem, so a folder changed from outside the
             app needs asking for. Collapsing and reopening does it for one
             folder; this does it for the lot. */}

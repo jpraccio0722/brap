@@ -27,7 +27,7 @@ import {
   type GraphicalPattern,
   type WirePattern,
 } from "./patterns";
-import { Transport } from "./component/Transport";
+import { Transport, type TransportState } from "./component/Transport";
 
 
 /** A project's drawn patterns, as `read_patterns` returns them. */
@@ -37,10 +37,33 @@ interface PatternsFile {
   patterns: WirePattern[];
 }
 
+/**
+ * What a project remembers between sessions, as its `scree-project.json` holds
+ * it. The key order matters: it is what the two sides are compared as JSON in,
+ * to tell a change worth saving from a file that already says this.
+ */
+interface ProjectSettings {
+  name: string;
+  /** Beats per minute. */
+  bpm: number;
+  /** Linear amplitude, 0 to 1. */
+  volume: number;
+}
+
+/** A project's settings, as `open_project` returns them. */
+interface ProjectFile {
+  /** Absolute path of the project's `scree-project.json`. */
+  path: string;
+  project: ProjectSettings;
+}
+
 /** How long the panel waits before writing a change out. Long enough that
  *  dragging across a row is one write, short enough to be over before anyone
  *  reaches for the play key. */
 const PATTERN_SAVE_DELAY = 400;
+/** The same for the project's settings, where the drag is a fader rather than
+ *  a row of cells. */
+const PROJECT_SAVE_DELAY = 400;
 
 interface Tab {
   id: string;
@@ -188,6 +211,23 @@ function App() {
   // asked for.
   const [projectVersion, setProjectVersion] = useState(0);
 
+  // The engine's own controls, held up here rather than in the title bar
+  // because they are half of what a project remembers: opening one puts them
+  // where its file says, and moving either writes that file. Null until
+  // something has said where they sit — the engine on launch, or a project.
+  const [transport, setTransport] = useState<TransportState | null>(null);
+  // What the project is called, which is the panel's to show and to edit. Null
+  // while no project is open, and again after one that could not be read.
+  const [projectName, setProjectName] = useState<string | null>(null);
+  // Where the settings file is, so the panel can recognise it when it is opened
+  // as an ordinary tab.
+  const [projectPath, setProjectPath] = useState<string | null>(null);
+  // The same guard the patterns keep, for the same reason: the settings are
+  // only written back to a project they were successfully read from, so a file
+  // nobody could parse is left for a person to fix rather than overwritten.
+  const projectFrom = useRef<string | null>(null);
+  const projectOnDisk = useRef<string | null>(null);
+
   const startResize = usePanelResize("right", setPanelWidth);
   const startSideResize = usePanelResize("left", setSideWidth);
 
@@ -231,6 +271,24 @@ function App() {
         if (live) setMetadata(meta);
       })
       .catch((e) => console.error("could not load language metadata:", e));
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  // Where the transport sits, fetched once from the engine so the faders open
+  // on its real defaults rather than a guess that drifts away from them.
+  //
+  // Never over a project's own settings: opening a project moves the engine to
+  // what its file says, and if that has already happened this answer is the
+  // older news, however it was ordered.
+  useEffect(() => {
+    let live = true;
+    invoke<TransportState>("transport")
+      .then((t) => {
+        if (live) setTransport((current) => current ?? t);
+      })
+      .catch((e) => console.error("could not read the transport:", e));
     return () => {
       live = false;
     };
@@ -318,6 +376,81 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [patterns, projectRoot, report]);
+
+  /**
+   * Read a project's settings, and take on what they say.
+   *
+   * The tempo and volume are the backend's to apply — it does so as it answers,
+   * so the engine and the faders drawn here can never disagree about a project
+   * that has just opened. A folder with no settings file keeps the transport
+   * where it is and is described that way, which is what makes opening one safe
+   * mid-performance.
+   *
+   * A file that cannot be read is worth showing, and it also stops the writing
+   * below: settings are small, but they are somebody's, and an unparseable file
+   * is one to fix rather than to flatten.
+   */
+  const loadProject = useCallback(
+    async (root: string) => {
+      try {
+        const file = await invoke<ProjectFile>("open_project", { root });
+        if (projectRootRef.current !== root) return; // the project moved on
+        setProjectPath(file.path);
+        setProjectName(file.project.name);
+        setTransport({ bpm: file.project.bpm, volume: file.project.volume });
+        projectOnDisk.current = JSON.stringify(file.project);
+        projectFrom.current = root;
+      } catch (e) {
+        if (projectRootRef.current !== root) return;
+        // The name goes, since it described another project. The transport
+        // stays where it is: it is the engine's, and nothing about a file that
+        // would not parse is a reason to move what is playing.
+        setProjectName(null);
+        projectFrom.current = null;
+        report(toDiagnostic(e, "could not read this project's settings"), null);
+      }
+    },
+    [report],
+  );
+
+  // On open, and again whenever the project is refreshed — which is how a file
+  // edited outside the app is picked up.
+  useEffect(() => {
+    if (projectRoot === null) return;
+    void loadProject(projectRoot);
+  }, [projectRoot, projectVersion, loadProject]);
+
+  // And back out again as any of it changes. Debounced like the patterns: a
+  // fader dragged across its travel is one write, not sixty.
+  useEffect(() => {
+    if (projectRoot === null || projectFrom.current !== projectRoot) return;
+    if (projectName === null || transport === null) return;
+
+    // Built in the backend's field order, so the comparison below is against
+    // the same JSON the file was read as.
+    const settings: ProjectSettings = {
+      name: projectName,
+      bpm: transport.bpm,
+      volume: transport.volume,
+    };
+    const json = JSON.stringify(settings);
+    if (json === projectOnDisk.current) return; // the file already says this
+
+    const timer = setTimeout(() => {
+      invoke<string>("save_project", { root: projectRoot, project: settings })
+        .then((path) => {
+          projectOnDisk.current = json;
+          setProjectPath(path);
+        })
+        // Left un-synced on purpose, so the next change tries again. Nothing is
+        // lost this session — the engine has already been told.
+        .catch((e) =>
+          report(toDiagnostic(e, "could not save this project's settings"), null),
+        );
+    }, PROJECT_SAVE_DELAY);
+
+    return () => clearTimeout(timer);
+  }, [projectName, transport, projectRoot, report]);
 
   // The completion source reads the drawn patterns through a ref so a rename
   // in the panel shows up in the next completion without touching the
@@ -444,30 +577,68 @@ function App() {
   }, [openPath, report]);
 
   /**
-   * Point the project panel at another folder.
+   * Point the app at a folder, however the folder was chosen.
    *
-   * There is no project file to create, so "new" is a folder chooser — and the
-   * platform's own dialog is where a new folder gets made, which is why this
-   * needs nothing else. Open tabs are left alone: they are files, and a file
-   * does not stop being open because the tree beside it moved.
+   * Open tabs are left alone: they are files, and a file does not stop being
+   * open because the tree beside it moved. Everything that belongs to the
+   * project — its patterns, its settings — is read by the effects above, which
+   * this sets going.
+   */
+  const chooseProject = useCallback((root: string) => {
+    setProjectRoot(root);
+    setProjectVersion((v) => v + 1);
+    setSideOpen(true);
+    setSideTab("project");
+    // Remembered for the next launch. A failure here costs nothing this
+    // session, so it is logged rather than shown.
+    invoke("set_recent_project", { root }).catch((e) =>
+      console.error("could not remember this project:", e),
+    );
+  }, []);
+
+  /**
+   * Start a project in a folder.
+   *
+   * The platform's own dialog is where a new folder gets made, so this is a
+   * folder chooser and then one write: the `scree-project.json` that is the
+   * whole difference between a folder and a project. It is written with the
+   * transport as it stands, since picking a folder should not change what is
+   * playing.
    */
   const newProject = useCallback(async () => {
     try {
       const selected = await open({ directory: true, multiple: false });
       if (!selected || typeof selected !== "string") return; // user cancelled
-      setProjectRoot(selected);
-      setProjectVersion((v) => v + 1);
-      setSideOpen(true);
-      setSideTab("project");
-      // Remembered for the next launch. A failure here costs nothing this
-      // session, so it is logged rather than shown.
-      invoke("set_recent_project", { root: selected }).catch((e) =>
-        console.error("could not remember this project:", e),
-      );
+      try {
+        await invoke("create_project", { root: selected });
+      } catch (e) {
+        // Opened anyway: a folder that cannot be written to is still one you
+        // can work in, and this is worth saying rather than refusing over.
+        report(toDiagnostic(e, "could not start a project there"), null);
+      }
+      chooseProject(selected);
     } catch (e) {
       report(toDiagnostic(e, "could not open that folder"), null);
     }
-  }, [report]);
+  }, [chooseProject, report]);
+
+  /**
+   * Open a project that already exists.
+   *
+   * The same chooser, without the write. A folder that has settings opens on
+   * them — its name, its tempo, its volume — and one that has none is simply a
+   * folder full of files, which is what every project was before this file
+   * existed and is still allowed to be.
+   */
+  const openProject = useCallback(async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (!selected || typeof selected !== "string") return; // user cancelled
+      chooseProject(selected);
+    } catch (e) {
+      report(toDiagnostic(e, "could not open that folder"), null);
+    }
+  }, [chooseProject, report]);
 
   /**
    * Evaluate the active tab.
@@ -540,18 +711,23 @@ function App() {
       if (savedPath === patternsPath && projectRoot !== null) {
         await loadPatterns(projectRoot);
       }
+      // And the settings file the same way: edit the tempo in it by hand, save,
+      // and the fader moves — which is also the moment the engine is told.
+      if (savedPath === projectPath && projectRoot !== null) {
+        await loadProject(projectRoot);
+      }
     } catch (e) {
       // Left dirty on purpose: the tab still differs from what is on disk.
       report(toDiagnostic(e, `could not save ${tab.title}`), tab.id);
     }
-  }, [activeTab, patternsPath, projectRoot, loadPatterns, report]);
+  }, [activeTab, patternsPath, projectPath, projectRoot, loadPatterns, loadProject, report]);
 
   // The File menu's items arrive as events. Their handlers take new identities
   // on every keystroke, so the listeners reach them through a ref and subscribe
   // once for the life of the app: re-subscribing is asynchronous, and a menu
   // click landing mid-swap could be heard by both the old listener and the new.
-  const fileActions = useRef({ newTab, openTab, saveTab, newProject });
-  fileActions.current = { newTab, openTab, saveTab, newProject };
+  const fileActions = useRef({ newTab, openTab, saveTab, newProject, openProject });
+  fileActions.current = { newTab, openTab, saveTab, newProject, openProject };
 
   useEffect(() => {
     const subscriptions = [
@@ -559,6 +735,7 @@ function App() {
       listen("file-open", () => void fileActions.current.openTab()),
       listen("file-save", () => void fileActions.current.saveTab()),
       listen("project-new", () => void fileActions.current.newProject()),
+      listen("project-open", () => void fileActions.current.openProject()),
     ];
     return () => {
       for (const sub of subscriptions) void sub.then((unlisten) => unlisten());
@@ -670,9 +847,11 @@ function App() {
             )}
           </button>
           <div className="ml-4">
-            <Transport 
+            <Transport
               play={play}
               stop={stop}
+              state={transport}
+              onChange={setTransport}
             />
           </div>
         </div>
@@ -774,6 +953,8 @@ function App() {
               // listing it is holding.
               key={projectVersion}
               root={projectRoot}
+              name={projectName}
+              onRename={setProjectName}
               activePath={activeTab?.path ?? null}
               onOpenFile={(path) => void openPath(path)}
               onRefresh={() => setProjectVersion((v) => v + 1)}
