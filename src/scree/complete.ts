@@ -208,8 +208,12 @@ function accepts(receives: ValueKind, receiver: ValueKind): boolean {
       return receiver === "list" || receiver === "number";
     case "play":
       return receiver === "play";
+    case "buffer":
+      return receiver === "buffer";
     default:
-      // "nothing" takes no argument at all; "any" is only ever a result.
+      // "nothing" takes no argument at all; "any" is only ever a result; and
+      // "text" is written out at the call, never produced, so nothing can
+      // stand to the left of a name that wants one.
       return false;
   }
 }

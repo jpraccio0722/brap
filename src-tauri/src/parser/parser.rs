@@ -95,6 +95,10 @@ pub enum Expr {
     Num(f64),
     Range { lo: Box<Expr>, hi: Box<Expr> },
     Rem { lhs: Box<Expr>, rhs: Box<Expr> },
+    /// A double-quoted string. Only ever the path in `load("break.wav")` —
+    /// there is nothing else in the language that takes one, and the lowerer
+    /// says so if one turns up anywhere else.
+    Str(String),
     /// A silent step in a pattern, written `` ` ``.
     Rest,
     /// A sounding step with no value, written as a single backslash.
@@ -440,6 +444,7 @@ fn expr<'a, I>() -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clon
 where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
     recursive(|expr| {
         let int = select! { Token::Num(n) => Expr::Num(n) }.labelled("a number");
+        let string = select! { Token::Str(s) => Expr::Str(s) }.labelled("a string");
         let var = name().map(Expr::Var);
         let paren = expr.clone()
             .delimited_by(just(Token::ParensOpen), just(Token::ParensClose));
@@ -521,7 +526,8 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
         let trigger = just(Token::Trigger).to(Expr::Trigger);
 
         let atom = choice((
-            int, rest, trigger, list, for_expr, if_expr, let_expr, block, call, var, paren,
+            int, string, rest, trigger, list, for_expr, if_expr, let_expr, block, call, var,
+            paren,
         ));
 
         // Indexing and method calls share one fold so they interleave freely:

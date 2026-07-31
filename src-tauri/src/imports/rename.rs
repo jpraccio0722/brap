@@ -211,7 +211,9 @@ impl<'a> Scope<'a> {
                 result
             }
 
-            Expr::Num(_) | Expr::Rest | Expr::Trigger => Ok(()),
+            // A string is a path to a file on disk, not a name in a module, so
+            // qualifying an import never touches one.
+            Expr::Num(_) | Expr::Str(_) | Expr::Rest | Expr::Trigger => Ok(()),
         }
     }
 }

@@ -1,7 +1,11 @@
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
 use crate::engine::{stop as stop_graph, swap_program};
-use crate::{scree_graph::realizer::realize, lowerer::lower::lower, parser::parser::parse};
+use crate::{
+    scree_graph::realizer::realize,
+    lowerer::lower::lower_with_samples,
+    parser::parser::parse,
+};
 use crate::diagnostic::{Diagnostic, Stage};
 use crate::engine::AudioEngine;
 use crate::imports::Workspace;
@@ -24,6 +28,7 @@ mod parser;
 mod scree_graph;
 mod lowerer;
 mod lang;
+mod samples;
 
 /// Backend hook for the editor's "play" button.
 ///
@@ -63,6 +68,7 @@ fn run_code(
     workspace: Workspace,
     engine: tauri::State<Mutex<AudioEngine>>,
     sched: tauri::State<SchedulerState>,
+    samples: tauri::State<samples::Cache>,
 ) -> Result<(), Diagnostic> {
     let mut workspace = workspace;
     if let Some(patterns) = &patterns {
@@ -73,7 +79,16 @@ fn run_code(
     // Imports are resolved into the program before anything else sees it, so
     // the lowerer, the realizer and the scheduler all compile one flat file.
     let ast = imports::expand(parse(code.clone())?, &code, &workspace)?;
-    let lowered = lower(&ast).map_err(|e| Diagnostic::message(Stage::Lower, e))?;
+
+    // Files before lowering, and before the scheduler is told anything. A
+    // `load` names a path relative to this file, exactly as a `use` does, and
+    // this is the only thread allowed to read a disk — a voice is built per
+    // note on the scheduler's.
+    let loaded = samples::Samples::load(&ast, workspace.dir().as_deref(), &samples)
+        .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
+
+    let lowered = lower_with_samples(&ast, loaded.clone())
+        .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
     let audio_graph = realize(&lowered.graph)
         .map_err(|e| Diagnostic::message(Stage::Realize, e))?;
 
@@ -83,7 +98,7 @@ fn run_code(
         .instruments
         .lock()
         .map_err(|_| Diagnostic::message(Stage::Engine, "instruments lock poisoned"))? =
-        Instruments::from_program(&ast);
+        Instruments::from_program(&ast).with_samples(loaded);
 
     let starting_from_silence = sched
         .patterns
@@ -560,6 +575,9 @@ pub fn run() {
 
             app.manage(Mutex::new(engine));
             app.manage(sched);
+            // Outlives every eval: a break named by a program being edited is
+            // decoded on the first run and shared by every run after it.
+            app.manage(samples::Cache::default());
             Ok(())
         })
         .run(tauri::generate_context!())

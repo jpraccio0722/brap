@@ -371,6 +371,7 @@ mod tests {
             play_start: 0.0,
             // Fixed, so a failure here is reproducible.
             rng: rand::rngs::SmallRng::seed_from_u64(0x9E37_79B9_7F4A_7C15),
+            samples: Default::default(),
         }
     }
 

@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
+
+use fundsp::wave::Wave;
+
 use crate::scree_graph::ugen_nodes::NodeId;
 use crate::parser::parser::{Expr, Param};
 
@@ -17,6 +21,9 @@ pub enum Value {
     /// a nesting. Only patterns read it; everywhere else it is an error, since
     /// there is no sensible `len` or index of two things happening together.
     Stack(Rc<Vec<Value>>),
+    /// A loaded audio file, as `load` answers with it. Not a signal — nothing
+    /// comes out of a buffer until `sample` reads it at a position.
+    Buffer(Arc<Wave>),
     /// A silent step. Only meaningful inside a pattern.
     Rest,
     /// A sounding step carrying no value. Only meaningful inside a pattern.

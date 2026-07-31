@@ -259,9 +259,9 @@ impl Lowerer {
             }
 
             // Shuffled, then cut. `choose_multiple` would be cheaper but keeps
-            // the elements in the order they were written, and a sample drawn
+            // the elements in the order they were written, and a handful drawn
             // for a melody wants its order drawn too.
-            "sample" => {
+            "choices" => {
                 let items = as_list(func, &args[0])?;
                 let n = count(func, spec.params[1], &args[1])?;
                 if n > items.len() {
@@ -359,6 +359,8 @@ mod tests {
             bindings: Vec::new(),
             play_start: 0.0,
             rng: SmallRng::seed_from_u64(0x5EED),
+            // Nothing here reads a buffer.
+            samples: Default::default(),
         }
     }
 
@@ -524,7 +526,7 @@ mod tests {
         assert_eq!(constant("sin(len(randis(5, 60, 72)))"), 5.0);
         assert_eq!(constant("sin(len(walk(12, 0, 0.1)))"), 12.0);
         assert_eq!(constant("sin(len(walki(3, 60, 2)))"), 3.0);
-        assert_eq!(constant("sin(len(sample([1, 2, 3, 4], 2)))"), 2.0);
+        assert_eq!(constant("sin(len(choices([1, 2, 3, 4], 2)))"), 2.0);
         assert_eq!(constant("sin(len(randscale(6, [0, 4, 7])))"), 6.0);
         // Nothing is not an error, it is an empty list.
         assert_eq!(constant("sin(len(rands(0)))"), 0.0);
@@ -577,10 +579,10 @@ mod tests {
     }
 
     #[test]
-    fn sample_never_repeats_an_element() {
+    fn choices_never_repeats_an_element() {
         let source = Value::List(Item::all((0..12).map(|i| Value::Number(i as f64))));
         for _ in 0..20 {
-            let vs = list_draw("sample", &[source.clone(), Value::Number(5.0)]);
+            let vs = list_draw("choices", &[source.clone(), Value::Number(5.0)]);
             assert_eq!(vs.len(), 5);
             let mut sorted = vs.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -593,9 +595,9 @@ mod tests {
     /// Taking the whole list is a shuffle, which is the boundary case that
     /// would break if the truncation were off by one.
     #[test]
-    fn sampling_everything_is_a_permutation() {
+    fn choosing_everything_is_a_permutation() {
         let source = Value::List(Item::all((0..6).map(|i| Value::Number(i as f64))));
-        let mut vs = list_draw("sample", &[source, Value::Number(6.0)]);
+        let mut vs = list_draw("choices", &[source, Value::Number(6.0)]);
         vs.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(vs, vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
     }
@@ -719,7 +721,7 @@ mod tests {
 
     #[test]
     fn asking_for_more_than_a_list_holds_is_an_error() {
-        let e = err("sin(len(sample([1, 2, 3], 5)))");
+        let e = err("sin(len(choices([1, 2, 3], 5)))");
         assert!(e.contains("distinct"), "got: {e}");
     }
 
@@ -744,7 +746,7 @@ mod tests {
     fn a_signal_is_rejected() {
         assert!(err("sin(2).rand(1)").contains("compile-time number"));
         assert!(err("sin(rand(0, sin(2)))").contains("compile-time number"));
-        assert!(err("sin(len(sample(sin(2), 1)))").contains("expects a list"));
+        assert!(err("sin(len(choices(sin(2), 1)))").contains("expects a list"));
     }
 
     #[test]
