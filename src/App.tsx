@@ -955,7 +955,9 @@ function App() {
       // no editor to move the cursor in, and moving it in the old one would
       // put it on an unrelated line.
       if (diagnostic.file !== null) {
-        void openPath(diagnostic.file).then(() => setPendingReveal(diagnostic));
+        void openPath(diagnostic.file).then((opened) => {
+          if (opened) setPendingReveal(diagnostic);
+        });
         return;
       }
       if (sourceTabId && sourceTabId !== activeId) setActiveId(sourceTabId);
