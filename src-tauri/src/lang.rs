@@ -46,6 +46,10 @@ pub enum ValueKind {
     Pattern,
     /// A handle from `play`, `play_once`, `playn` or `play_all`.
     Play,
+    /// A `fn` named rather than called — what the arrangement combinators take
+    /// as a section, and what `seq` takes on its left. Never a result: naming a
+    /// function is the only way to produce one, so nothing answers with it.
+    Section,
     /// A loaded audio file, from `load`.
     Buffer,
     /// A double-quoted string. Only `load` takes one, and only written out —
@@ -1129,6 +1133,141 @@ pub static SPECIALS: &[ListBuiltin] = &[
         doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called by the audio thread.",
     },
     ListBuiltin {
+        name: "then_after",
+        params: &["play", "cycles", "section"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "`then`, with `cycles` of silence in between: `playn(verse, lead, 4).then_after(1, chorus)` leaves a bar's rest before the chorus. The gap cannot be negative — `overlap` is how a section starts early.",
+    },
+    ListBuiltin {
+        name: "overlap",
+        params: &["play", "cycles", "section"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "`then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join: `playn(verse, lead, 8).overlap(2, chorus)`. Never earlier than the receiver's own start. The chain carries on from whichever of the two ends later.",
+    },
+    ListBuiltin {
+        name: "with",
+        params: &["play", "section"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Run a section *alongside* this one, from where it began: `playn(verse, lead, 4).with(drums).then(chorus)`. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. The pair finishes when the later of them does.",
+    },
+    ListBuiltin {
+        name: "at",
+        params: &["cycle", "section"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Play,
+        doc: "Place a section at an absolute cycle, counted from the origin: `at(8, chorus)`. The escape hatch from chaining — an arrangement whose shape you already know is often clearer written down than derived one `.then` at a time.",
+    },
+    ListBuiltin {
+        name: "seq",
+        params: &["section"],
+        arities: &[1],
+        variadic: true,
+        receives: ValueKind::Section,
+        returns: ValueKind::Play,
+        doc: "Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. Each is a no-parameter `fn`, and each must finish for the next to follow.",
+    },
+    ListBuiltin {
+        name: "then_n",
+        params: &["play", "section", "times"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Run a section `times` times, back to back: `play_once(intro, lead).then_n(verse, 4)`. Inlined afresh each pass rather than written once and repeated, so a `rand` inside the section is a different number every time round — the same rule a voice already follows.",
+    },
+    ListBuiltin {
+        name: "then_each",
+        params: &["play", "list", "body"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "One pass of the section per element of the list, in sequence, with the element passed in: `play_once(intro, lead).then_each([1, 2, 4], faster)` calls `faster(1)`, then `faster(2)`, then `faster(4)`. `body` takes exactly one parameter — the element. Arrangement by list — every list function in the language already builds the shape of a piece, and this is what spends one.",
+    },
+    ListBuiltin {
+        name: "then_fill",
+        params: &["play", "pattern", "rate"],
+        arities: &[2, 3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "One pass of a pattern on this section's *own* instrument: `playn(groove, drums, 4).then_fill([1, 1, 1, 1])`. Unlike `then` there is no `fn` and no second `play` — a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. The left side has to be a single `play`: a group of them has no one instrument to be a fill for. `rate` defaults to 1.",
+    },
+    ListBuiltin {
+        name: "quantize",
+        params: &["play", "grid"],
+        arities: &[1, 2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Round where the chain has reached up to a multiple of `grid` cycles, without touching what is already playing: `playn(pat, inst, 3, 2).quantize().then(chorus)`. `grid` defaults to 1. The cure for a section whose length is not a whole number — `rate` divides into the count, so `playn(pat, inst, 3, 2)` is 1.5 cycles long and every `.then` after it would otherwise be permanently off the downbeat.",
+    },
+    ListBuiltin {
+        name: "take",
+        params: &["play", "cycles"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "This section, cut to `cycles`: `play(riff, lead).take(8).then(chorus)`. What gives a plain `play` an end — `playn` only bounds a single play, not a `play_all` group or a whole nested section. A part that already stops sooner is left alone, since a cut is a ceiling and not a length.",
+    },
+    ListBuiltin {
+        name: "stop",
+        params: &["play"],
+        arities: &[1],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Cut everything still open in this section at the moment its last *counted* part finishes: `play_all(play(groove, drums), playn(riff, lead, 8)).stop()` lets the eight-cycle riff decide when the endless drums give up. One pattern as the trigger to stop the rest. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at.",
+    },
+    ListBuiltin {
+        name: "wthen",
+        params: &["play", "sections", "weights"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Choose between sections, afresh each time round: `playn(intro, lead, 2).wthen([verse, chorus], [0.7, 0.3])`. Weights are relative and need not sum to 1. Unlike `choice`, which draws once while the program is lowered, this is decided by the scheduler as the music reaches it — so the block repeats forever and deals a new hand every time. Every arm must finish, and they all come back to the same place; the block itself never finishes, so bound it with `.take(n)` if something should follow.",
+    },
+    ListBuiltin {
+        name: "rthen",
+        params: &["play", "sections"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "`wthen` with every section equally likely: `playn(intro, lead, 2).rthen([verse, chorus, bridge])`. Rerolls each time round and never finishes, exactly as `wthen` does.",
+    },
+    ListBuiltin {
+        name: "maybe",
+        params: &["play", "chance", "section"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Play a section with probability `chance` (0 to 1), decided afresh each time round: `playn(groove, drums, 4).maybe(0.25, fill)`. A `wthen` whose other arm is silence — it repeats and rerolls for the same reason, since a coin flipped once is just an `if`.",
+    },
+    ListBuiltin {
+        name: "shuffle_then",
+        params: &["play", "sections"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Every section once each, in an order drawn now: `play_once(intro, lead).shuffle_then([verse, chorus, bridge])`. The counterpart to `rthen` rather than a variant of it — a weighted choice may pass a section over for a long time, and this cannot. It settles at eval time like `scramble`, so it has a length and a `.then` may follow it.",
+    },
+    ListBuiltin {
         name: "play",
         params: &["pattern", "instrument", "rate"],
         arities: &[2, 3],
@@ -1469,7 +1608,7 @@ mod tests {
             // intercepted somewhere: the `play` family, `then`, `play_all`,
             // `load`, and the three that begin from a buffer.
             let intercepted = Lowerer::is_play(b.name)
-                || Lowerer::is_then(b.name)
+                || Lowerer::is_section(b.name)
                 || Lowerer::is_play_all(b.name)
                 || Lowerer::is_load(b.name)
                 || Lowerer::is_buffer_builtin(b.name);
@@ -1582,19 +1721,20 @@ mod receives_tests {
     use super::*;
 
     /// Instruments and predicates for the arguments the receiver does not fill.
-    const PREAMBLE: &str = "fn inst(n) = sin(n)\nfn pred(x) = 1\nfn section() = play([60], inst)\n";
+    const PREAMBLE: &str = "fn inst(n) = sin(n)\nfn pred(x) = 1\nfn section() = play_once([60], inst)\nfn body(x) = play_once([x], inst)\n";
 
     /// One value of each kind that can stand to the left of a dot.
     ///
     /// There is no `Text` receiver: a string is only ever written out as
     /// `load`'s argument, so no expression answers with one and nothing can be
     /// chained from it.
-    const RECEIVERS: [(ValueKind, &str); 5] = [
+    const RECEIVERS: [(ValueKind, &str); 6] = [
         (ValueKind::Number, "1"),
         (ValueKind::Signal, "sin(220)"),
         (ValueKind::List, "[1, 2, 3]"),
         (ValueKind::Play, "playn([60, 63], inst, 2)"),
         (ValueKind::Buffer, "load(\"test.wav\")"),
+        (ValueKind::Section, "section"),
     ];
 
     /// The one buffer these tests know about, under the path they all write.
@@ -1630,6 +1770,7 @@ mod receives_tests {
             // A bare value is a one-step pattern: `60.play(inst)` sounds once.
             ValueKind::Pattern => matches!(receiver, ValueKind::List | ValueKind::Number),
             ValueKind::Play => receiver == ValueKind::Play,
+            ValueKind::Section => receiver == ValueKind::Section,
             ValueKind::Buffer => receiver == ValueKind::Buffer,
             // Written out at the call, never produced — so nothing stands to
             // the left of a name that wants one.
@@ -1645,6 +1786,12 @@ mod receives_tests {
             "predicate" | "transform" => "pred",
             "instrument" => "inst",
             "section" => "section",
+            // As many as `sections` has, or a weighted choice is short of one.
+            "sections" => "[section, section, section]",
+            // Only `then_each` takes a list it does not also receive, so this
+            // filler had no reason to exist until now.
+            "list" => "[1, 2, 3]",
+            "body" => "body",
             "weights" => "[1, 2, 3]",
             "scale" => "[0, 2, 4, 5, 7, 9, 11]",
             "bits" => "10",
@@ -1774,6 +1921,7 @@ mod receives_tests {
                 "list" | "values" => "[1, 2, 3]",
                 "pattern" => "[60, 63]",
                 "play" => "playn([60, 63], inst, 2)",
+                "section" => "section",
                 "buffer" => "load(\"test.wav\")",
                 "path" => "\"test.wav\"",
                 _ => "1",

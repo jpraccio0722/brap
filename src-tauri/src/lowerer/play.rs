@@ -179,12 +179,30 @@ impl Lowerer {
         // Anything already sequenced by a `.then` above this call has moved the
         // start; a bare `play` writes at the origin.
         let start = self.play_start;
-        self.bindings.push(
-            Binding { instrument: instrument.clone(), pattern, lanes, start, cycles });
+        let first = self.bindings.len();
+        self.bindings.push(Binding {
+            instrument: instrument.clone(),
+            pattern,
+            lanes,
+            start,
+            cycles,
+            // Written once and never chosen between: only `wthen` and `maybe`
+            // set these, and they set them on bindings this call already made.
+            repeat: None,
+            choice: None,
+        });
 
         // The handle is what `.then` chains from. It contributes nothing to the
         // output sum, like a bare number.
-        Ok(Value::Play { ends_at: cycles.map(|c| start + c) })
+        Ok(Value::Play {
+            starts_at: start,
+            ends_at: cycles.map(|c| start + c),
+            first,
+            last: self.bindings.len(),
+            // A single play, so `.then_fill` has exactly one instrument to
+            // inherit — the only place a template is ever set.
+            template: Some(first),
+        })
     }
 }
 
@@ -306,82 +324,30 @@ impl Lowerer {
         // The floor is where the section itself opened: a group is never over
         // before it began, whatever its parts turn out to be.
         let mut ends_at = Some(self.play_start);
+        let mut first = usize::MAX;
+        let mut last = 0usize;
         for (i, arg) in args.iter().enumerate() {
-            let Value::Play { ends_at: end } = arg else {
+            let Value::Play { ends_at: end, first: f, last: l, .. } = arg else {
                 return Err(format!(
                     "{PLAY_ALL}: argument {} is not a play — every argument must be a \
                      `play`, `play_once`, `playn`, or another `{PLAY_ALL}`", i + 1));
             };
             ends_at = later_end(ends_at, *end);
+            // Contiguous, because the arguments were lowered left to right and
+            // each one pushed its bindings as it went.
+            first = first.min(*f);
+            last = last.max(*l);
         }
 
-        Ok(Value::Play { ends_at })
-    }
-}
-
-/// `.then(f)` — run `f`'s bindings once this one has finished.
-pub const THEN: &str = "then";
-
-impl Lowerer {
-    pub fn is_then(name: &str) -> bool {
-        name == THEN
-    }
-
-    /// Sequence one section after another.
-    ///
-    /// There is no runtime interpreter here — the program *is* the graph — so
-    /// this cannot be a callback fired by the audio thread. What it does
-    /// instead is the useful half: `f` is inlined now, at eval time, and every
-    /// binding it writes is offset to start where the receiver stops. The
-    /// scheduler needs no notion of "afterwards" at all; it just sees bindings
-    /// that open later.
-    ///
-    /// `f` takes no parameters. Closures do not exist — a function is inlined
-    /// and captures nothing — so it has to be a named `fn`.
-    pub fn then(&mut self, args: &[Value]) -> Result<Value, String> {
-        let (Some(receiver), Some(body), 2) = (args.first(), args.get(1), args.len()) else {
-            return Err(format!(
-                "{THEN} expects a function to run afterwards: \
-                 playn(pat, inst, 4).{THEN}(next)"));
-        };
-
-        let Value::Play { ends_at } = receiver else {
-            return Err(format!(
-                "{THEN}: the left side must be a play — `playn(...).{THEN}(f)`"));
-        };
-        let Some(offset) = *ends_at else {
-            return Err(format!(
-                "{THEN}: plain `play` never finishes, so nothing could follow it. \
-                 Use `play_once` or `playn`."));
-        };
-
-        let Value::Function(def) = body else {
-            return Err(format!("{THEN}: expects a function, and not a call of one"));
-        };
-        if !def.params.is_empty() {
-            return Err(format!(
-                "{THEN}: the function must take no parameters, but it declares {}",
-                def.params.len()));
-        }
-
-        // Everything `f` writes starts where the receiver stopped. Nested
-        // `.then`s inside it are relative to *its* start, so the offsets add up
-        // exactly as the nesting reads.
-        let outer = self.play_start;
-        let first_new = self.bindings.len();
-        self.play_start = offset;
-        let result = self.apply(THEN, def.clone(), Vec::new());
-        self.play_start = outer;
-        result?;
-
-        // Where the whole chain now ends. A binding that never stops makes the
-        // chain never stop, so a further `.then` is refused rather than being
-        // scheduled at a time that will not arrive.
-        let mut ends_at = Some(offset);
-        for binding in &self.bindings[first_new..] {
-            ends_at = later_end(ends_at, binding.cycles.map(|c| binding.start + c));
-        }
-
-        Ok(Value::Play { ends_at })
+        Ok(Value::Play {
+            starts_at: self.play_start,
+            ends_at,
+            first: first.min(last),
+            last,
+            // Gathering several plays is exactly what makes "the instrument"
+            // ambiguous, so a group is never a template for a fill — unless it
+            // gathered only one, where nothing was made ambiguous at all.
+            template: (last == first + 1).then_some(first),
+        })
     }
 }

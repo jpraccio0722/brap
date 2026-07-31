@@ -883,7 +883,7 @@ fn a_long_lane_is_played_through_from_source() {
     use crate::pattern::patterns::Patterns;
 
     let bs = bindings_of(&format!("{BASS}play([220, 330], bass, cut: 1..=20)\n"));
-    let pats = Patterns { bindings: bs, origin: 0.0 };
+    let pats = Patterns { bindings: bs, origin: 0.0, choices: Vec::new() };
 
     let cuts: Vec<f64> = (0..10)
         .flat_map(|c| pats.query(Span::new(c as f64, c as f64 + 1.0)))
@@ -2208,3 +2208,408 @@ mod stack_tests {
         let err = play_err("sin(stack([220], [330]))\n");
         assert!(err.contains("not audio"), "got: {err}");
     }}
+
+
+// ---- arrangement combinators ----
+
+/// Sections with lengths, which everything that sequences them needs. The
+/// `SECTIONS` fixture's `chorus` is a plain `play` on purpose, so it is the
+/// wrong shape for anything but `.then`.
+const ARR: &str = "\
+fn lead(n) = sin(n)
+fn bass(n, cut = 400) = lowpass(saw(n), cut, 1)
+fn hat(n) = noise() * n
+fn one() = play_once([c4], lead)
+fn two() = playn([c5], lead, 2)
+fn faster(x) = playn([c4], lead, x)
+fn endless() = play([c4], lead)
+";
+
+/// A gap really is silence: the next section opens later than it otherwise
+/// would, and nothing is written to fill the space.
+#[test]
+fn then_after_leaves_a_gap() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).then_after(2, one)\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[1].start, 6.0);
+}
+
+/// The two sections really do sound together over the join.
+#[test]
+fn overlap_starts_the_next_section_early() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).overlap(1, two)\n"));
+    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[1].start, 3.0, "one cycle before the first ended");
+    // The chain carries on from the later of the two: 3 + 2 beats 4.
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).overlap(1, two).then(one)\n"));
+    assert_eq!(bs[2].start, 5.0);
+}
+
+/// Overlapping by more than the section's whole length stops at its start
+/// rather than placing the newcomer in front of it.
+#[test]
+fn overlap_never_runs_backwards_past_the_start() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 2).overlap(99, one)\n"));
+    assert_eq!(bs[1].start, 0.0);
+}
+
+/// `with` lays a section alongside from where the receiver *began*, which is
+/// what separates it from `then`.
+#[test]
+fn with_runs_alongside_from_the_start() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 4).then(two).with(one)\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[1].start, 4.0, "two, after the bass");
+    assert_eq!(bs[2].start, 4.0, "one, alongside it rather than after it");
+}
+
+/// And the pair finishes when the later of them does, so a `.then` clears both.
+#[test]
+fn with_finishes_when_the_later_one_does() {
+    let bs = bindings_of(&format!("{ARR}one().with(two).then(one)\n"));
+    assert_eq!(bs[2].start, 2.0, "two is the longer of the pair");
+}
+
+#[test]
+fn at_places_a_section_absolutely() {
+    let bs = bindings_of(&format!("{ARR}at(8, one)\n"));
+    assert_eq!(bs[0].start, 8.0);
+}
+
+#[test]
+fn seq_runs_sections_in_order() {
+    let bs = bindings_of(&format!("{ARR}seq(one, two, one)\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[0].start, 0.0);
+    assert_eq!(bs[1].start, 1.0);
+    assert_eq!(bs[2].start, 3.0);
+}
+
+#[test]
+fn then_n_repeats_a_section() {
+    let bs = bindings_of(&format!("{ARR}one().then_n(two, 3)\n"));
+    assert_eq!(bs.len(), 4);
+    assert_eq!(bs[1].start, 1.0);
+    assert_eq!(bs[2].start, 3.0);
+    assert_eq!(bs[3].start, 5.0);
+}
+
+/// Each pass is inlined afresh, so the chain after them all is where the last
+/// one really ended.
+#[test]
+fn then_n_hands_over_after_the_last_pass() {
+    let bs = bindings_of(&format!("{ARR}one().then_n(two, 3).then(one)\n"));
+    assert_eq!(bs[4].start, 7.0);
+}
+
+/// The element reaches the section, which is the whole point of `then_each`.
+#[test]
+fn then_each_passes_the_element() {
+    let bs = bindings_of(&format!("{ARR}one().then_each([1, 2, 4], faster)\n"));
+    assert_eq!(bs.len(), 4);
+    assert_eq!(bs[1].cycles, Some(1.0));
+    assert_eq!(bs[2].cycles, Some(2.0));
+    assert_eq!(bs[3].cycles, Some(4.0));
+    // And they follow one another rather than piling up at the same cycle.
+    assert_eq!(bs[1].start, 1.0);
+    assert_eq!(bs[2].start, 2.0);
+    assert_eq!(bs[3].start, 4.0);
+}
+
+/// A fill is played by the instrument it follows, with that instrument's lanes.
+#[test]
+fn then_fill_inherits_the_instrument_and_its_lanes() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 4, cut: [500, 900]).then_fill([c2, c2, c2])\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[1].instrument, "bass");
+    assert_eq!(bs[1].start, 4.0);
+    assert_eq!(bs[1].cycles, Some(1.0), "one pass");
+    assert_eq!(bs[1].lanes, bs[0].lanes, "the lanes came with it");
+    assert_ne!(bs[1].pattern, bs[0].pattern, "only the pattern is new");
+}
+
+#[test]
+fn then_fill_hands_the_chain_on() {
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 4).then_fill([c2]).then(one)\n"));
+    assert_eq!(bs[2].start, 5.0);
+}
+
+/// A group of plays has no one instrument, so there is nothing to fill for.
+#[test]
+fn then_fill_refuses_a_group() {
+    let e = play_err(&format!(
+        "{ARR}play_all(play_once([c3], bass), play_once([c4], lead)).then_fill([c2])\n"));
+    assert!(e.contains("single `play`"), "got: {e}");
+}
+
+/// The hazard `quantize` exists for: `rate` divides into the count, so this
+/// section is 1.5 cycles long and everything after it would be off the beat.
+#[test]
+fn quantize_rounds_a_fractional_section_up() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3, 2).then(one)\n"));
+    assert_eq!(bs[1].start, 1.5, "unquantized, and off the downbeat");
+
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3, 2).quantize().then(one)\n"));
+    assert_eq!(bs[1].start, 2.0);
+}
+
+/// A section already on the grid is left where it is rather than pushed out.
+#[test]
+fn quantize_leaves_an_exact_multiple_alone() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).quantize(4).then(one)\n"));
+    assert_eq!(bs[1].start, 4.0);
+}
+
+#[test]
+fn quantize_takes_a_grid() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 5).quantize(4).then(one)\n"));
+    assert_eq!(bs[1].start, 8.0);
+}
+
+/// Quantizing moves where the *next* section starts without shortening what is
+/// already playing.
+#[test]
+fn quantize_does_not_cut_what_is_playing() {
+    let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3, 2).quantize().then(one)\n"));
+    assert_eq!(bs[0].cycles, Some(1.5));
+}
+
+/// `take` is what gives a plain `play` an end, so a chain can follow one.
+#[test]
+fn take_bounds_an_endless_play() {
+    let e = play_err(&format!("{ARR}play([c3], bass).then(one)\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+
+    let bs = bindings_of(&format!("{ARR}play([c3], bass).take(8).then(one)\n"));
+    assert_eq!(bs[0].cycles, Some(8.0));
+    assert_eq!(bs[1].start, 8.0);
+}
+
+/// A cut is a ceiling, not a length: a part that already stops sooner is left
+/// exactly as it was.
+#[test]
+fn take_leaves_a_shorter_part_alone() {
+    let bs = bindings_of(&format!(
+        "{ARR}play_all(play([c3], bass), playn([c4], lead, 2)).take(8)\n"));
+    assert_eq!(bs[0].cycles, Some(8.0), "the endless one was cut");
+    assert_eq!(bs[1].cycles, Some(2.0), "the short one was not lengthened");
+}
+
+/// One counted pattern as the trigger to stop the endless ones around it.
+#[test]
+fn stop_cuts_the_endless_parts_where_the_counted_one_runs_out() {
+    let bs = bindings_of(&format!(
+        "{ARR}play_all(play([c3], bass), play([c5], hat), playn([c4], lead, 8)).stop()\n"));
+    assert_eq!(bs[0].cycles, Some(8.0));
+    assert_eq!(bs[1].cycles, Some(8.0));
+    assert_eq!(bs[2].cycles, Some(8.0));
+}
+
+/// And having stopped, the chain has an end, so something may follow it.
+#[test]
+fn stop_gives_the_chain_an_end() {
+    let bs = bindings_of(&format!(
+        "{ARR}play_all(play([c3], bass), playn([c4], lead, 4)).stop().then(one)\n"));
+    assert_eq!(bs[2].start, 4.0);
+}
+
+#[test]
+fn stop_refuses_a_section_that_never_finishes() {
+    let e = play_err(&format!("{ARR}play_all(play([c3], bass), play([c5], hat)).stop()\n"));
+    assert!(e.contains("no moment to stop at"), "got: {e}");
+}
+
+// ---- choice ----
+
+/// Every arm is written, all starting at the same cycle, all marked as arms of
+/// one choice — the scheduler is what picks between them.
+#[test]
+fn wthen_writes_every_arm_as_one_choice() {
+    let src = format!("{ARR}playn([c3], bass, 2).wthen([one, two], [0.7, 0.3])\n");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+
+    assert_eq!(l.bindings.len(), 3);
+    assert_eq!(l.choices.len(), 1);
+    assert_eq!(l.choices[0].weights, vec![0.7, 0.3]);
+
+    let arms = &l.bindings[1..];
+    assert!(arms.iter().all(|b| b.start == 2.0), "every arm opens at the same cycle");
+    assert_eq!(arms[0].choice.map(|c| c.arm), Some(0));
+    assert_eq!(arms[1].choice.map(|c| c.arm), Some(1));
+    // The period is the longest arm, so the short one leaves silence rather
+    // than dragging the next repetition early.
+    assert!(arms.iter().all(|b| b.repeat == Some(2.0)));
+}
+
+/// A choice repeats forever, so nothing may be scheduled after it until it has
+/// been given a length.
+#[test]
+fn wthen_never_finishes_on_its_own() {
+    let e = play_err(&format!(
+        "{ARR}playn([c3], bass, 2).wthen([one, two], [1, 1]).then(one)\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+
+    let bs = bindings_of(&format!(
+        "{ARR}playn([c3], bass, 2).wthen([one, two], [1, 1]).take(8).then(one)\n"));
+    assert_eq!(bs[3].start, 10.0, "eight cycles after the choice opened at 2");
+}
+
+#[test]
+fn rthen_weights_every_arm_alike() {
+    let src = format!("{ARR}playn([c3], bass, 2).rthen([one, two, one])\n");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+    assert_eq!(l.choices[0].weights, vec![1.0, 1.0, 1.0]);
+}
+
+/// `maybe` is a choice whose other arm owns no bindings, so drawing it is
+/// simply silence.
+#[test]
+fn maybe_is_a_choice_against_silence() {
+    let src = format!("{ARR}playn([c3], bass, 4).maybe(0.25, one)\n");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+
+    assert_eq!(l.bindings.len(), 2);
+    assert_eq!(l.choices.len(), 1);
+    assert_eq!(l.choices[0].weights, vec![0.25, 0.75]);
+    assert_eq!(l.bindings[1].choice.map(|c| c.arm), Some(0));
+    assert_eq!(l.bindings[1].repeat, Some(1.0));
+}
+
+/// Unlike a weighted choice, this plays all of them — the order is what varies.
+#[test]
+fn shuffle_then_plays_every_section_once() {
+    let bs = bindings_of(&format!("{ARR}one().shuffle_then([two, two, two])\n"));
+    assert_eq!(bs.len(), 4);
+    assert_eq!(bs[1].start, 1.0);
+    assert_eq!(bs[2].start, 3.0);
+    assert_eq!(bs[3].start, 5.0);
+    // It settles at eval time, so it has a length and no choice was recorded.
+    let items = parse(format!("{ARR}one().shuffle_then([two, two])\n")).unwrap();
+    assert!(lower_full(&items).unwrap().choices.is_empty());
+}
+
+/// Every arm has to come back to the same place, so an endless one is refused
+/// rather than silently taking the choice over.
+#[test]
+fn a_choice_refuses_an_endless_arm() {
+    let e = play_err(&format!("{ARR}one().rthen([one, endless])\n"));
+    assert!(e.contains("never finishes"), "got: {e}");
+}
+
+#[test]
+fn wthen_needs_one_weight_per_section() {
+    let e = play_err(&format!("{ARR}one().wthen([one, two], [1])\n"));
+    assert!(e.contains("2 sections but 1 weights"), "got: {e}");
+}
+
+#[test]
+fn wthen_refuses_weights_that_are_all_zero() {
+    let e = play_err(&format!("{ARR}one().wthen([one, two], [0, 0])\n"));
+    assert!(e.contains("every weight is zero"), "got: {e}");
+}
+
+#[test]
+fn maybe_refuses_a_chance_outside_zero_to_one() {
+    let e = play_err(&format!("{ARR}one().maybe(1.5, one)\n"));
+    assert!(e.contains("between 0 and 1"), "got: {e}");
+}
+
+/// A nested choice keeps its own group rather than being swallowed by the
+/// outer one.
+#[test]
+fn a_choice_inside_an_arm_gets_its_own_group() {
+    let src = format!(
+        "{ARR}fn inner() = one().maybe(0.5, one)\n\
+         playn([c3], bass, 2).rthen([one, two])\n");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+    // `inner` is never called, so only the one choice exists; what matters is
+    // that indices are handed out before an arm is lowered, which the nested
+    // case below actually exercises.
+    assert_eq!(l.choices.len(), 1);
+
+    let src = format!(
+        "{ARR}fn inner() = playn([c3], bass, 2).maybe(0.5, one).take(4)\n\
+         one().rthen([inner, two])\n");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+    assert_eq!(l.choices.len(), 2, "the outer choice and the nested one");
+    let groups: Vec<_> = l.bindings.iter().filter_map(|b| b.choice.map(|c| c.group)).collect();
+    assert!(groups.contains(&0) && groups.contains(&1), "got: {groups:?}");
+}
+
+/// One arrangement using most of the family at once, as a guard against the
+/// combinators composing in principle but not in practice.
+#[test]
+fn a_whole_arrangement_lowers() {
+    let src = format!(
+        "{ARR}\
+fn groove() = playn([c3, `, c3, c3], bass, 4)
+fn verse() = playn([c4, e4, g4], lead, 2).with(groove)
+fn bridge() = playn([g3, b3], lead, 2)
+play_once([c2], bass)
+  .then_n(verse, 2)
+  .then_each([1, 2], faster)
+  .then(groove)
+  .then_fill([c2, c2, c2, c2])
+  .quantize(4)
+  .wthen([verse, bridge], [0.7, 0.3])
+  .take(16)
+  .then(one)
+");
+    let items = parse(src).expect("parse failed");
+    let l = lower_full(&items).expect("lower failed");
+
+    assert_eq!(l.choices.len(), 1, "one choice, from the wthen");
+    // Nothing may be left unbounded: `take` closed the choice, and every
+    // section before it was counted.
+    assert!(l.bindings.iter().all(|b| b.cycles.is_some()));
+    // The arms of the choice repeat; nothing before them does.
+    let repeating = l.bindings.iter().filter(|b| b.repeat.is_some()).count();
+    assert!(repeating > 0, "the choice's arms should repeat");
+    assert!(repeating < l.bindings.len(), "only the arms should repeat");
+
+    // And it realizes, so every instrument the arrangement named really builds.
+    assert!(crate::scree_graph::realizer::realize(&l.graph).is_ok());
+}
+
+
+/// The arrangement examples in the README, compiled.
+///
+/// Written after one of them turned out not to work: `.with(drums)` makes the
+/// handle cover two plays, so the `.then_fill` that followed it in the first
+/// draft could not find the one instrument a fill is played by. A snippet
+/// nobody compiles is a snippet that drifts.
+#[test]
+fn the_readme_arrangement_examples_compile() {
+    const NAMES: &str = "\
+fn lead(n) = sin(n)
+fn inst(n) = saw(n)
+let riff = [c4, e4, g4]
+let pat = [c3, e3]
+fn drums() = playn([c2, `, c2, c2], inst, 4)
+fn chorus() = playn([g4, b4], lead, 2)
+fn verse() = playn([c4, e4], lead, 2)
+fn outro() = play_once([c2], inst)
+";
+    for example in [
+        "playn(riff, lead, 4)\n  .then_fill([1, 1, 1, 1])\n  .then_n(chorus, 2)\n  .then(outro)",
+        "playn(riff, lead, 4).with(drums).then(chorus)",
+        "playn(pat, inst, 3, 2).then(chorus)",
+        "playn(pat, inst, 3, 2).quantize().then(chorus)",
+        "playn(riff, lead, 2)\n  .wthen([verse, chorus], [0.7, 0.3])\n  .take(32)\n  .then(outro)",
+    ] {
+        let src = format!("{NAMES}{example}\n");
+        let items = parse(src.clone())
+            .unwrap_or_else(|e| panic!("{example}\n  failed to parse: {e}"));
+        lower_full(&items)
+            .unwrap_or_else(|e| panic!("{example}\n  failed to lower: {e}"));
+    }
+}

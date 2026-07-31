@@ -91,16 +91,28 @@ impl Lowerer {
                     // Plays are neither summed nor collected: they all happen,
                     // and the loop as a whole finishes when the last does.
                     let mut ends_at = Some(self.play_start);
+                    let mut first = usize::MAX;
+                    let mut last = 0usize;
                     for v in &out {
-                        let Value::Play { ends_at: end } = v else {
+                        let Value::Play { ends_at: end, first: f, last: l, .. } = v else {
                             return Err(format!(
                                 "for {}: a loop cannot mix plays with other values", var.0));
                         };
                         // One that never stops makes the whole loop never stop,
                         // so nothing may follow it.
                         ends_at = crate::lowerer::play::later_end(ends_at, *end);
+                        first = first.min(*f);
+                        last = last.max(*l);
                     }
-                    return Ok(Value::Play { ends_at });
+                    return Ok(Value::Play {
+                        starts_at: self.play_start,
+                        ends_at,
+                        first: first.min(last),
+                        last,
+                        // Like `play_all`: a loop over plays has no one
+                        // instrument, unless it went round exactly once.
+                        template: (last == first + 1).then_some(first),
+                    });
                 }
 
                 if out.iter().any(|v| matches!(v, Value::Signal(_))) {

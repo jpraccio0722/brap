@@ -210,6 +210,116 @@ it.
 | `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called from the audio thread. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
 
+### Arrangement
+
+`then` is the root of a family. All of them chain from a play, and most work the
+same way underneath: the section is inlined *now*, while the program is being
+lowered, with its start moved to wherever it belongs. There is no runtime
+interpreter and no callback — the scheduler only ever sees bindings that happen
+to open later.
+
+Three of them are exceptions, and it is worth knowing which. `take` and `stop`
+reach *backwards*, shortening bindings already on the timeline — the only place
+in the language that edits a binding after it was written. `wthen` is the one
+that genuinely needs the scheduler's help; see [Choice](#choice-and-why-it-is-not-choice)
+below.
+
+A *section* is a no-parameter `fn`. It captures nothing, because closures do not
+exist here; whatever `play` calls it contains are written relative to where the
+section was placed, so nesting composes and the offsets add up as the code
+reads.
+
+Most of these need the section on their left to **finish**. A plain `play` never
+does, which is what `play_once`, `playn`, `take` and `stop` are for.
+
+```rust
+playn(riff, lead, 4)
+  .then_fill([1, 1, 1, 1])  // one bar of fill, on lead itself
+  .then_n(chorus, 2)        // twice through
+  .then(outro)
+```
+
+`with` lays a section alongside rather than after it, from the same downbeat:
+
+```rust
+playn(riff, lead, 4).with(drums).then(chorus)
+```
+
+Note that this makes the handle cover both plays, so a `then_fill` cannot follow
+it — a fill needs one instrument to be a fill *for*. Chain the fill onto the
+play itself.
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `then_after` | `then_after(play, cycles, section)` | `then`, with `cycles` of silence in between. The gap cannot be negative — `overlap` is how a section starts early. |
+| `overlap` | `overlap(play, cycles, section)` | `then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join. Never earlier than the receiver's own start. The chain carries on from whichever ends later. |
+| `with` | `with(play, section)` | Run a section alongside this one, from where it **began**. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. |
+| `at` | `at(cycle, section)` | Place a section at an absolute cycle from the origin. The escape hatch from chaining, for an arrangement whose shape you already know. |
+| `seq` | `seq(section, ...)` | Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. |
+| `then_n` | `then_n(play, section, times)` | A section `times` times, back to back. Inlined afresh each pass, so a `rand` inside it is a different number every time round — the same rule a voice follows. |
+| `then_each` | `then_each(play, list, body)` | One pass per element, with the element passed in: `.then_each([1, 2, 4], faster)` calls `faster(1)`, `faster(2)`, `faster(4)`. `body` takes exactly one parameter. Arrangement by list — every list function already builds the shape of a piece, and this is what spends one. |
+| `then_fill` | `then_fill(play, pattern, rate?)` | One pass of a pattern on this section's **own** instrument. No `fn` and no second `play`: a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. Needs a single `play` on the left — a group has no one instrument to fill for. |
+| `quantize` | `quantize(play, grid?)` | Round where the chain has reached up to a multiple of `grid` cycles (default 1), without shortening what is already playing. |
+| `take` | `take(play, cycles)` | This section, cut to `cycles`. What gives a plain `play` an end. A part that already stops sooner is left alone — a cut is a ceiling, not a length. |
+| `stop` | `stop(play)` | Cut everything still open in this section at the moment its last **counted** part finishes. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at. |
+| `wthen` | `wthen(play, sections, weights)` | Choose between sections, afresh each time round. Weights are relative and need not sum to 1. |
+| `rthen` | `rthen(play, sections)` | `wthen` with every section equally likely. |
+| `maybe` | `maybe(play, chance, section)` | A section with probability `chance` (0 to 1), decided afresh each time round. A `wthen` whose other arm is silence. |
+| `shuffle_then` | `shuffle_then(play, sections)` | Every section once each, in an order drawn now. The counterpart to `rthen` rather than a variant: a weighted choice may pass a section over for a long time, and this cannot. |
+
+#### Why `quantize` exists
+
+`rate` divides into the count, so a section's length need not be a whole number.
+`playn(pat, inst, 3, 2)` is three passes at double speed — 1.5 cycles — and
+every `.then` after it inherits that half-cycle offset for good:
+
+```rust
+playn(pat, inst, 3, 2).then(chorus)              // chorus starts at 1.5
+playn(pat, inst, 3, 2).quantize().then(chorus)   // chorus starts at 2
+```
+
+Quantizing moves where the *next* section starts. It does not shorten what is
+already playing, so the three passes still run their full 1.5 cycles and the
+chorus opens over the tail of them.
+
+#### Choice, and why it is not `choice`
+
+Everything else here settles while the program is lowered. `wthen`, `rthen` and
+`maybe` cannot: a draw that never changes is a draw made once, and the whole
+point is that it changes. So these are the one place the scheduler is told
+something new.
+
+Every arm is written to the timeline, all starting at the same cycle and all
+marked as arms of one choice. Which arm actually sounds is decided as the music
+reaches it. That has three consequences worth knowing:
+
+- **The block repeats forever**, because a choice with nowhere to come back to
+  would be drawn once and never again. `ends_at` is `None` for the same reason,
+  so nothing may follow a choice until `take` has given it a length.
+- **Every arm must finish**, and the block's period is the longest of them. A
+  shorter arm leaves silence rather than pulling the next repetition early, so
+  the arms stay interchangeable in time.
+- **The draw is a hash of `(seed, choice, repetition)`**, not a running
+  generator. The scheduler queries an overlapping lookahead window every pass,
+  so the same moment is asked about more than once; a stateful generator would
+  answer differently each time and the note would flicker in and out as the
+  horizon crept past it. Hashing gives a fresh draw each time round and the same
+  draw every time that repetition comes up.
+
+The seed is drawn once per eval, so re-evaluating deals a new hand — and `seed`
+pins an arrangement exactly as it pins `choice` and `scramble`.
+
+```rust
+playn(riff, lead, 2)
+  .wthen([verse, chorus], [0.7, 0.3])  // a new draw every time round
+  .take(32)                            // ...for 32 cycles
+  .then(outro)
+```
+
+`shuffle_then` is deliberately not part of this. It draws an order once, at eval
+time, like `scramble` — so it has a length, it plays every section exactly once,
+and a `.then` may follow it.
+
 ### Sample Functions
 
 Reading an audio file. See [Samples](#samples) above for what these are for; the

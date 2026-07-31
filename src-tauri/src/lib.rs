@@ -128,7 +128,7 @@ fn run_code(
         .patterns
         .lock()
         .map_err(|_| Diagnostic::message(Stage::Engine, "patterns lock poisoned"))? =
-        Patterns { bindings: lowered.bindings, origin };
+        Patterns { bindings: lowered.bindings, origin, choices: lowered.choices };
 
     let mut eng = engine
         .lock()

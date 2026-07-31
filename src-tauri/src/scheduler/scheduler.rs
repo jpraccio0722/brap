@@ -316,8 +316,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
 
@@ -350,8 +349,7 @@ mod pass_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
         s
@@ -577,8 +575,7 @@ mod pass_tests {
                 pattern: Pattern::steps(vec![Some(1.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
@@ -692,8 +689,7 @@ mod start_position_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
         s
@@ -799,10 +795,8 @@ mod start_position_tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: Some(1.0),
-            }],
-            origin: clock.now_cycles(),
-        };
+                cycles: Some(1.0), repeat: None, choice: None }],
+            origin: clock.now_cycles(), choices: Vec::new() };
 
         // One cycle is two seconds at this tempo.
         assert_eq!(steps_over(&s, &clock, 2.0), vec![1.0, 2.0]);
