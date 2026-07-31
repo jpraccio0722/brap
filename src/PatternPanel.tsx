@@ -67,6 +67,8 @@ interface PatternPanelProps {
   onChange: (patterns: GraphicalPattern[]) => void;
   /** Open one in the composer, as a tab. */
   onOpen: (id: string) => void;
+  /** Open the patterns file itself, as a tab. */
+  onOpenFile: (path: string) => void;
   /** False when no folder is open. Patterns still draw and still play — they
    *  travel with the eval — but there is nowhere to write them, so the panel
    *  has to say so rather than let the work look saved. */
@@ -81,6 +83,7 @@ export function PatternPanel({
   patterns,
   onChange,
   onOpen,
+  onOpenFile,
   path,
   hasProject,
 }: PatternPanelProps) {
@@ -95,9 +98,23 @@ export function PatternPanel({
   return (
     <section className="border-t border-neutral-800 px-4 py-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
-          Patterns
-        </h2>
+        {/* The heading opens the file behind it. There is a real file on disk
+            holding these, the panel already says so below, and the name of a
+            thing is the obvious handle for the thing itself. Without a project
+            there is no file to open, so it stays a plain heading. */}
+        {hasProject && path !== null ? (
+          <button
+            onClick={() => onOpenFile(path)}
+            title={`Open ${path}`}
+            className="text-xs font-semibold uppercase tracking-wide text-neutral-400 transition-colors hover:text-blue-400"
+          >
+            Patterns
+          </button>
+        ) : (
+          <h2 className="text-xs font-semibold uppercase tracking-wide text-neutral-400">
+            Patterns
+          </h2>
+        )}
         <button
           onClick={add}
           title="New pattern"

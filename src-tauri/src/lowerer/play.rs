@@ -199,6 +199,8 @@ impl Lowerer {
             ends_at: cycles.map(|c| start + c),
             first,
             last: self.bindings.len(),
+            // Nothing precedes a `play`, so this is where the chain begins.
+            chain_first: first,
             // A single play, so `.then_fill` has exactly one instrument to
             // inherit — the only place a template is ever set.
             template: Some(first),
@@ -344,6 +346,9 @@ impl Lowerer {
             ends_at,
             first: first.min(last),
             last,
+            // A group is its own beginning: the plays it gathers were written
+            // as its arguments, so there is no chain in front of it.
+            chain_first: first.min(last),
             // Gathering several plays is exactly what makes "the instrument"
             // ambiguous, so a group is never a template for a fill — unless it
             // gathered only one, where nothing was made ambiguous at all.

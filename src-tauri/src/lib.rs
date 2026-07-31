@@ -298,8 +298,42 @@ struct Entry {
     is_dir: bool,
 }
 
-/// What the app remembers the last project in, inside its own config folder.
+/// What the app remembers between launches, inside its own config folder.
+const SESSION: &str = "session.json";
+
+/// The single-line file earlier versions wrote, holding a project and nothing
+/// else. Read when there is no session yet, so an upgrade does not forget the
+/// project somebody had open.
 const RECENT_PROJECT: &str = "recent-project";
+
+/// One tab as the session remembers it: a file by path, or a composer by the
+/// name of the pattern it was drawing.
+///
+/// A composer cannot be remembered by id — ids are minted when a project's
+/// patterns are read and mean nothing across a launch — and the name is what
+/// the patterns file holds anyway. Exactly one of the two is set; a tab that
+/// has never been saved has neither, and is not remembered, because there is
+/// nothing on disk to reopen.
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq)]
+struct SessionTab {
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+}
+
+/// What was open last time.
+#[derive(serde::Serialize, serde::Deserialize, Default, Debug, PartialEq)]
+struct Session {
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    tabs: Vec<SessionTab>,
+    /// Which of `tabs` was in front, by position — the tabs have no ids that
+    /// outlive a launch either.
+    #[serde(default)]
+    active: Option<usize>,
+}
 
 /// Whether a remembered path is still worth opening.
 ///
@@ -315,40 +349,85 @@ fn usable_project(saved: &str) -> Option<String> {
     std::path::Path::new(saved).is_dir().then(|| saved.to_string())
 }
 
-fn recent_project_file(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+/// What a remembered session is still worth restoring of.
+///
+/// Everything in one is a path into a filesystem that has moved on since it
+/// was written, and none of the ways it can have moved on are errors: a
+/// project that is no longer a folder, or a file that has been renamed or
+/// deleted, simply does not come back. Filtering here rather than in the
+/// frontend keeps `active` meaning what it says — it is a position in `tabs`,
+/// so dropping a tab before it has to move it.
+fn usable_session(saved: Session) -> Session {
+    let project = saved.project.as_deref().and_then(usable_project);
+
+    let was_active = saved.active;
+    let mut tabs = Vec::with_capacity(saved.tabs.len());
+    let mut active = None;
+    for (i, tab) in saved.tabs.into_iter().enumerate() {
+        let keep = match (&tab.path, &tab.pattern) {
+            (Some(path), _) => std::path::Path::new(path).is_file(),
+            // A composer is restored against the project's patterns file, so
+            // it only means anything while there is a project to read it from.
+            (None, Some(_)) => project.is_some(),
+            // Neither, which a tab that was never saved would be. Nothing to
+            // reopen, so it was not written in the first place.
+            (None, None) => false,
+        };
+        if !keep {
+            continue;
+        }
+        if was_active == Some(i) {
+            active = Some(tabs.len());
+        }
+        tabs.push(tab);
+    }
+
+    Session { project, tabs, active }
+}
+
+fn config_file(app: &tauri::AppHandle, name: &str) -> Result<std::path::PathBuf, String> {
     app.path()
         .app_config_dir()
-        .map(|dir| dir.join(RECENT_PROJECT))
+        .map(|dir| dir.join(name))
         .map_err(|e| e.to_string())
 }
 
-/// The project to open on launch: whichever folder was last chosen, if it is
-/// still there.
+/// What to open on launch: the project last chosen, and the tabs last open,
+/// so far as they are all still there.
 ///
-/// Deliberately *not* the working directory. A launched binary's cwd says
-/// nothing about what someone is working on — under `tauri dev` it is the Rust
-/// crate, and a bundled app opened from the desktop gets `/` — so using it
-/// meant the app wrote the panel's `patterns.scree` into the source tree in
-/// development, and somewhere unwritable in a real build. `None` is a real
-/// answer here: the app is allowed to have no project open.
+/// The project is deliberately *not* the working directory. A launched
+/// binary's cwd says nothing about what someone is working on — under `tauri
+/// dev` it is the Rust crate, and a bundled app opened from the desktop gets
+/// `/` — so using it meant the app wrote the panel's `patterns.scree` into the
+/// source tree in development, and somewhere unwritable in a real build. An
+/// empty session is a real answer here: the app is allowed to open with no
+/// project and no files, which is what a first run does.
 #[tauri::command]
-fn recent_project(app: tauri::AppHandle) -> Result<Option<String>, String> {
-    let path = recent_project_file(&app)?;
-    // An unreadable file is a first run, not a failure.
-    let Ok(saved) = std::fs::read_to_string(&path) else {
-        return Ok(None);
+fn recent_session(app: tauri::AppHandle) -> Result<Session, String> {
+    let saved = match std::fs::read_to_string(config_file(&app, SESSION)?) {
+        // A file half-written by a crash, or written by a version that has
+        // since changed the shape, is a first run rather than a failure:
+        // there is nothing in one worth refusing to start over.
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        // No session yet. There may still be the older record, which knew
+        // only about the project.
+        Err(_) => Session {
+            project: std::fs::read_to_string(config_file(&app, RECENT_PROJECT)?).ok(),
+            ..Session::default()
+        },
     };
-    Ok(usable_project(&saved))
+    Ok(usable_session(saved))
 }
 
-/// Remember the project just opened, for the next launch.
+/// Remember what is open now, for the next launch.
 #[tauri::command]
-fn set_recent_project(app: tauri::AppHandle, root: String) -> Result<(), String> {
-    let path = recent_project_file(&app)?;
+fn set_recent_session(app: tauri::AppHandle, session: Session) -> Result<(), String> {
+    let path = config_file(&app, SESSION)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    std::fs::write(&path, root).map_err(|e| e.to_string())
+    let text = serde_json::to_string(&session).map_err(|e| e.to_string())?;
+    std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
 /// List one directory, for the project tree.
@@ -560,8 +639,8 @@ pub fn run() {
             read_file,
             read_patterns,
             write_patterns,
-            recent_project,
-            set_recent_project,
+            recent_session,
+            set_recent_session,
             list_dir,
             language_metadata
         ])
@@ -585,8 +664,114 @@ pub fn run() {
 }
 
 #[cfg(test)]
-mod recent_project_tests {
-    use super::usable_project;
+mod session_tests {
+    use super::{usable_project, usable_session, Session, SessionTab};
+
+    fn file_tab(path: &str) -> SessionTab {
+        SessionTab { path: Some(path.to_string()), pattern: None }
+    }
+
+    fn pattern_tab(name: &str) -> SessionTab {
+        SessionTab { path: None, pattern: Some(name.to_string()) }
+    }
+
+    /// A file that is really there, since that is the only thing a restored
+    /// tab is checked against.
+    fn a_real_file() -> String {
+        let path = std::env::temp_dir().join(format!("scree-session-{}.scree", std::process::id()));
+        std::fs::write(&path, "// open").expect("should write");
+        path.to_string_lossy().to_string()
+    }
+
+    /// A file left where it was comes back, and so does the one that was in
+    /// front — which is the whole of what a restored session is.
+    #[test]
+    fn tabs_that_still_exist_come_back() {
+        let here = a_real_file();
+        let session = usable_session(Session {
+            project: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            tabs: vec![file_tab(&here), file_tab(&here)],
+            active: Some(1),
+        });
+        assert_eq!(session.tabs.len(), 2);
+        assert_eq!(session.active, Some(1));
+        assert!(session.project.is_some());
+    }
+
+    /// A file that has moved or been deleted is not an error, and the tab in
+    /// front is still the tab that was in front — its position has moved, so
+    /// remembering the number rather than the tab would open the wrong one.
+    #[test]
+    fn a_missing_file_is_dropped_and_the_front_tab_follows() {
+        let here = a_real_file();
+        let session = usable_session(Session {
+            project: None,
+            tabs: vec![file_tab("/nowhere/gone.scree"), file_tab(&here)],
+            active: Some(1),
+        });
+        assert_eq!(session.tabs, vec![file_tab(&here)]);
+        assert_eq!(session.active, Some(0));
+    }
+
+    /// Dropping the tab that was in front leaves no answer to which one is,
+    /// rather than an index pointing at somebody else's tab.
+    #[test]
+    fn dropping_the_front_tab_leaves_none() {
+        let here = a_real_file();
+        let session = usable_session(Session {
+            project: None,
+            tabs: vec![file_tab(&here), file_tab("/nowhere/gone.scree")],
+            active: Some(1),
+        });
+        assert_eq!(session.tabs.len(), 1);
+        assert_eq!(session.active, None);
+    }
+
+    /// A composer draws a pattern out of the project's patterns file, so
+    /// without a project there is nothing for it to open on.
+    #[test]
+    fn composers_need_a_project() {
+        let with = usable_session(Session {
+            project: Some(std::env::temp_dir().to_string_lossy().to_string()),
+            tabs: vec![pattern_tab("hats")],
+            active: Some(0),
+        });
+        assert_eq!(with.tabs, vec![pattern_tab("hats")]);
+
+        let without = usable_session(Session {
+            project: Some("/nowhere/that/exists".to_string()),
+            tabs: vec![pattern_tab("hats")],
+            active: Some(0),
+        });
+        assert!(without.tabs.is_empty());
+        assert_eq!(without.active, None);
+    }
+
+    /// An untitled buffer names nothing on disk. It should never be written,
+    /// and is not restored if it somehow was.
+    #[test]
+    fn a_tab_naming_nothing_is_dropped() {
+        let session = usable_session(Session {
+            project: None,
+            tabs: vec![SessionTab::default()],
+            active: Some(0),
+        });
+        assert!(session.tabs.is_empty());
+    }
+
+    /// The record earlier versions wrote is a bare path, and is read as one:
+    /// an upgrade keeps the project it had, and starts remembering tabs from
+    /// the next launch.
+    #[test]
+    fn an_older_record_still_names_its_project() {
+        let dir = std::env::temp_dir().to_string_lossy().to_string();
+        let session = usable_session(Session {
+            project: Some(format!("{dir}\n")),
+            ..Session::default()
+        });
+        assert_eq!(session.project, Some(dir));
+        assert!(session.tabs.is_empty());
+    }
 
     /// A remembered folder that is still a folder is the one to open.
     #[test]

@@ -1187,6 +1187,15 @@ pub static SPECIALS: &[ListBuiltin] = &[
         doc: "Run a section `times` times, back to back: `play_once(intro, lead).then_n(verse, 4)`. Inlined afresh each pass rather than written once and repeated, so a `rand` inside the section is a different number every time round — the same rule a voice already follows.",
     },
     ListBuiltin {
+        name: "loop",
+        params: &["play", "times"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Play,
+        returns: ValueKind::Play,
+        doc: "Everything chained so far, `times` times through: `playn(groove, kit, 3).then_fill(roll).loop(4)` is four bars of groove-and-fill. The counterpart to `then_n` — that one names a `fn` and runs it *after* this section, this one takes no section at all because the section it repeats is the chain it is written on. The whole chain has to finish, so bound an endless part with `.take(n)` or `.stop()` first. The passes are copies, so a `rand` inside the chain was already spent and every pass is the same music; `then_n` is the one that draws afresh.",
+    },
+    ListBuiltin {
         name: "then_each",
         params: &["play", "list", "body"],
         arities: &[3],

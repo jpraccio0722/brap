@@ -43,11 +43,20 @@ pub enum Value {
     /// `play` a handle came from, which is where `.then_fill` gets the
     /// instrument it is a fill *for*; a group of several plays leaves it
     /// `None`, because then there is no one instrument to inherit.
+    ///
+    /// `chain_first` is the odd one out: every other field describes the *last*
+    /// link, but this one remembers where the whole chain began. `.then` and
+    /// its family deliberately narrow `first..last` to the section they just
+    /// wrote, so that `.take` after a `.then` cuts what followed and not what
+    /// came before — which leaves nothing able to say "all of this", and that
+    /// is exactly what `.loop` repeats. A fresh `play` starts a chain, so there
+    /// it is `first`; every combinator passes its receiver's along.
     Play {
         starts_at: f64,
         ends_at: Option<f64>,
         first: usize,
         last: usize,
+        chain_first: usize,
         template: Option<usize>,
     },
 }

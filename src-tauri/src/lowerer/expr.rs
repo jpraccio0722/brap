@@ -109,6 +109,9 @@ impl Lowerer {
                         ends_at,
                         first: first.min(last),
                         last,
+                        // Like `play_all`: the passes are the loop's own, so
+                        // the chain begins here.
+                        chain_first: first.min(last),
                         // Like `play_all`: a loop over plays has no one
                         // instrument, unless it went round exactly once.
                         template: (last == first + 1).then_some(first),

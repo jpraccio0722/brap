@@ -42,6 +42,10 @@ interface PatternsFile {
  *  reaches for the play key. */
 const PATTERN_SAVE_DELAY = 400;
 
+/** How long the app waits before writing the session out. Switching tabs and
+ *  closing them come in bursts, and none of it is worth a write each. */
+const SESSION_SAVE_DELAY = 400;
+
 interface Tab {
   id: string;
   /** Display name in the tab bar. */
@@ -62,6 +66,36 @@ interface Tab {
    * list in the panel, and both have to reach the file.
    */
   patternId?: string;
+  /**
+   * The pattern a restored composer is still waiting for, by name.
+   *
+   * A session cannot remember an id — ids are minted when a project's patterns
+   * are read, and mean nothing across a launch — so a restored composer opens
+   * holding the name from the file and takes its id once that read lands. See
+   * the effect that resolves these.
+   */
+  patternName?: string;
+}
+
+/** One tab as `recent_session` remembers it: a file by path, or a composer by
+ *  the name of the pattern it draws. */
+interface SessionTab {
+  path: string | null;
+  pattern: string | null;
+}
+
+/** What was open when the app last closed. */
+interface Session {
+  project: string | null;
+  tabs: SessionTab[];
+  /** Which of `tabs` was in front, by position. */
+  active: number | null;
+}
+
+/** True for a tab holding code, as against a composer — including one that is
+ *  still waiting for its pattern, which has no buffer to run either. */
+function isCode(tab: Tab): boolean {
+  return !tab.patternId && !tab.patternName;
 }
 
 const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
@@ -133,10 +167,13 @@ function basename(path: string): string {
 }
 
 function App() {
-  const [tabs, setTabs] = useState<Tab[]>(() => [
-    makeTab({ content: STARTER_CONTENT }),
-  ]);
-  const [activeId, setActiveId] = useState<string | null>(() => tabs[0].id);
+  // Empty until the last session has been read, which is a moment rather than
+  // a state anyone sees: opening on a starter buffer and then replacing it
+  // would flash a file that was never theirs, and — worse — the writer below
+  // would have a window in which to save that buffer over the real session.
+  const [tabs, setTabs] = useState<Tab[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
+  const [restoring, setRestoring] = useState(true);
   // Which file tab was last in front, so a composer can hand an eval back to
   // it. A ref rather than state: nothing renders from it.
   const lastCodeId = useRef<string | null>(null);
@@ -193,7 +230,7 @@ function App() {
 
   // Null when every tab has been closed, which the editor is built to show.
   const activeTab = tabs.find((t) => t.id === activeId) ?? null;
-  if (activeTab && !activeTab.patternId) lastCodeId.current = activeTab.id;
+  if (activeTab && isCode(activeTab)) lastCodeId.current = activeTab.id;
 
   /**
    * The tab an eval runs. A composer holds no code, so playing from one runs
@@ -202,10 +239,10 @@ function App() {
    * every time to hear what you just drew.
    */
   const codeTab =
-    activeTab && !activeTab.patternId
+    activeTab && isCode(activeTab)
       ? activeTab
-      : (tabs.find((t) => t.id === lastCodeId.current && !t.patternId) ??
-         tabs.find((t) => !t.patternId) ??
+      : (tabs.find((t) => t.id === lastCodeId.current && isCode(t)) ??
+         tabs.find(isCode) ??
          null);
 
   /** Show a failure. Everything that can fail comes through here, so nothing
@@ -236,19 +273,63 @@ function App() {
     };
   }, []);
 
-  // The default project, fetched once. Only the initial value: a folder picked
-  // from the File menu afterwards is the frontend's own, and must not be
-  // overwritten by a late answer.
+  // What was open last time, fetched once. Restoring a file tab is reading the
+  // file again — nothing about a buffer is kept, so a restored tab is what is
+  // on disk and says so by opening clean.
+  //
+  // A composer is restored by name against the project's patterns, which are
+  // read separately and land after this: those tabs open holding a name, and
+  // the effect below gives them their pattern when it arrives.
   useEffect(() => {
     let live = true;
-    invoke<string | null>("recent_project")
-      .then((root) => {
-        // Null is a real answer — a first run, or a folder that has since
-        // moved. The app is allowed to have no project open, and everything
-        // that reads one already guards for it.
-        if (live && root) setProjectRoot((current) => current ?? root);
-      })
-      .catch((e) => console.error("could not read the remembered project:", e));
+
+    void (async () => {
+      let session: Session = { project: null, tabs: [], active: null };
+      try {
+        session = await invoke<Session>("recent_session");
+      } catch (e) {
+        // A session that cannot be read costs this launch its tabs and
+        // nothing else, so it is logged rather than shown: the app opens as
+        // it would on a first run.
+        console.error("could not read the last session:", e);
+      }
+      if (!live) return;
+
+      // Before the tabs, so the patterns panel starts its own read as early as
+      // possible — the composers below are waiting on it.
+      if (session.project) setProjectRoot(session.project);
+
+      const restored: Tab[] = [];
+      let active: string | null = null;
+      for (const [i, record] of session.tabs.entries()) {
+        let tab: Tab | null = null;
+        if (record.path) {
+          try {
+            const content = await invoke<string>("read_file", { path: record.path });
+            tab = makeTab({ title: basename(record.path), path: record.path, content });
+          } catch (e) {
+            // Unreadable since — a permission change, or something that is no
+            // longer text. Nothing has been lost: the file is still there, and
+            // the open dialog will say why if it is asked again.
+            console.error(`could not reopen ${record.path}:`, e);
+          }
+        } else if (record.pattern) {
+          tab = makeTab({ title: record.pattern, patternName: record.pattern });
+        }
+        if (!tab) continue;
+        if (session.active === i) active = tab.id;
+        restored.push(tab);
+      }
+      if (!live) return;
+
+      // A first run, or a session whose files have all gone: open on an empty
+      // buffer, which is what the app has always started with.
+      const opened = restored.length > 0 ? restored : [makeTab({ content: STARTER_CONTENT })];
+      setTabs(opened);
+      setActiveId(active ?? opened[0].id);
+      setRestoring(false);
+    })();
+
     return () => {
       live = false;
     };
@@ -318,6 +399,73 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [patterns, projectRoot, report]);
+
+  // A restored composer arrives holding a name and nothing else. The id it
+  // needs exists only once the project's patterns have been read, so it is
+  // handed over here — and if the pattern is not in that file, the tab goes:
+  // it was an editor for something that has since been deleted.
+  useEffect(() => {
+    if (!tabs.some((t) => t.patternName)) return;
+    // Only once the panel has actually read *this* project. Before that the
+    // list is empty because nothing has been read, which is not the same as a
+    // project whose patterns file no longer names these rows.
+    if (projectRoot === null || patternsFrom.current !== projectRoot) return;
+
+    const next = tabs.flatMap((tab) => {
+      if (!tab.patternName) return [tab];
+      const pattern = patterns.find((p) => p.name === tab.patternName);
+      if (!pattern) return [];
+      return [{ ...tab, patternName: undefined, patternId: pattern.id, title: pattern.name }];
+    });
+    setTabs(next);
+    // Dropping the tab that was in front leaves the editor pointing at
+    // nothing, so it falls back to a neighbour the way closing one does.
+    if (!next.some((t) => t.id === activeId)) {
+      setActiveId(next.length === 0 ? null : next[next.length - 1].id);
+    }
+  }, [tabs, patterns, projectRoot, activeId]);
+
+  // What the session file already says, so an app that is only being clicked
+  // around in does not rewrite it.
+  const sessionOnDisk = useRef<string | null>(null);
+
+  // And back out again as tabs are opened, closed, switched and saved, so the
+  // next launch opens on this. Debounced for the same reason the patterns file
+  // is: closing four tabs is one session, not four.
+  useEffect(() => {
+    // Nothing to remember before the last session has been read — and an empty
+    // list written here would be it, forgetting everything.
+    if (restoring) return;
+
+    const records: SessionTab[] = [];
+    let active: number | null = null;
+    for (const tab of tabs) {
+      const pattern = tab.patternId
+        ? (patterns.find((p) => p.id === tab.patternId)?.name ?? null)
+        : (tab.patternName ?? null);
+      // A tab that has never been saved names nothing on disk, so there is
+      // nothing to reopen: its buffer lives here and only here.
+      if (!tab.path && !pattern) continue;
+      if (tab.id === activeId) active = records.length;
+      records.push({ path: pattern ? null : tab.path, pattern });
+    }
+
+    const session: Session = { project: projectRoot, tabs: records, active };
+    const json = JSON.stringify(session);
+    if (json === sessionOnDisk.current) return;
+
+    const timer = setTimeout(() => {
+      invoke("set_recent_session", { session })
+        .then(() => {
+          sessionOnDisk.current = json;
+        })
+        // Costs the next launch its tabs and nothing this one, so it is logged
+        // rather than shown — and left un-synced, so the next change retries.
+        .catch((e) => console.error("could not remember this session:", e));
+    }, SESSION_SAVE_DELAY);
+
+    return () => clearTimeout(timer);
+  }, [tabs, activeId, projectRoot, patterns, restoring]);
 
   // The completion source reads the drawn patterns through a ref so a rename
   // in the panel shows up in the next completion without touching the
@@ -459,11 +607,8 @@ function App() {
       setProjectVersion((v) => v + 1);
       setSideOpen(true);
       setSideTab("project");
-      // Remembered for the next launch. A failure here costs nothing this
-      // session, so it is logged rather than shown.
-      invoke("set_recent_project", { root: selected }).catch((e) =>
-        console.error("could not remember this project:", e),
-      );
+      // Remembering it for the next launch is the session writer's job — this
+      // is a change to what is open, like any other.
     } catch (e) {
       report(toDiagnostic(e, "could not open that folder"), null);
     }
@@ -516,7 +661,10 @@ function App() {
 
   const saveTab = useCallback(async () => {
     const tab = activeTab;
-    if (!tab) return;
+    // A composer has no buffer to save — its pattern is written to the
+    // project's file as it is drawn — so ⌘S over one does nothing rather than
+    // asking where to put an empty file.
+    if (!tab || !isCode(tab)) return;
     try {
       let path = tab.path;
       if (!path) {
@@ -803,6 +951,14 @@ function App() {
                 />
               );
             })()
+          ) : activeTab?.patternName ? (
+            // A restored composer whose patterns have not arrived yet, or
+            // whose project could not be read at all. Never an editor: this
+            // tab has no buffer, and one shown here could be typed into and
+            // saved over something.
+            <div className="flex h-full items-center justify-center text-sm text-neutral-500">
+              Opening {activeTab.patternName}…
+            </div>
           ) : activeTab ? (
             <CodeMirror
               key={activeTab.id}
@@ -814,6 +970,11 @@ function App() {
               extensions={extensions}
               className="h-full text-sm"
             />
+          ) : restoring ? (
+            // The last session is still being read. Blank rather than "no file
+            // open", which would be advice about a state nobody is in — the
+            // tabs are on their way.
+            <div className="h-full" />
           ) : (
             // Closing the last tab is allowed to leave nothing open. The two
             // ways back are both in the File menu, so name them rather than
@@ -839,6 +1000,7 @@ function App() {
               patterns={patterns}
               onPatternsChange={setPatterns}
               onOpenPattern={openComposer}
+              onOpenFile={(path) => void openPath(path)}
               patternsPath={patternsPath}
               hasProject={projectRoot !== null}
             />
