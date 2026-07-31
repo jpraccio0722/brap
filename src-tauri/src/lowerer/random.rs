@@ -361,6 +361,7 @@ mod tests {
             rng: SmallRng::seed_from_u64(0x5EED),
             // Nothing here reads a buffer.
             samples: Default::default(),
+            choices: Vec::new(),
         }
     }
 

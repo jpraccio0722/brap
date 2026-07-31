@@ -28,12 +28,28 @@ pub enum Value {
     Rest,
     /// A sounding step carrying no value. Only meaningful inside a pattern.
     Trigger,
-    /// What a `play` call evaluates to: a handle onto the binding it made.
+    /// What a `play` call evaluates to: a handle onto the bindings it made.
     ///
     /// `ends_at` is the cycle, counted from the pattern origin, at which the
-    /// binding falls silent — `None` for plain `play`, which never does. It is
+    /// section falls silent — `None` for plain `play`, which never does. It is
     /// what `.then` needs to know when to start what follows.
-    Play { ends_at: Option<f64> },
+    ///
+    /// The rest of it is what the combinators beyond `.then` need. `starts_at`
+    /// is where the section opened, so `.with` can lay something alongside it
+    /// rather than after it. `first..last` is the slice of `Lowerer::bindings`
+    /// the section wrote, so `.take` and `.stop` can reach back and shorten
+    /// what is already on the timeline — the two of them are the only things
+    /// here that edit a binding after the fact. And `template` is the single
+    /// `play` a handle came from, which is where `.then_fill` gets the
+    /// instrument it is a fill *for*; a group of several plays leaves it
+    /// `None`, because then there is no one instrument to inherit.
+    Play {
+        starts_at: f64,
+        ends_at: Option<f64>,
+        first: usize,
+        last: usize,
+        template: Option<usize>,
+    },
 }
 
 /// One element of a list, and the length `;` gave it.

@@ -45,11 +45,13 @@ impl Lowerer {
                 "{}: named arguments only work on a user `fn`", func.0));
         }
 
-        // `then` needs its arguments evaluated — unlike `play`, which needs
-        // its instrument syntactically — so it is dispatched here rather than
-        // above.
-        if Lowerer::is_then(&func.0) {
-            return self.then(&arg_vals);
+        // The arrangement combinators need their arguments evaluated — unlike
+        // `play`, which needs its instrument syntactically — so they are
+        // dispatched here rather than above. A `fn` passed as a section is
+        // just a `Value::Function` by the time it arrives, which is all any of
+        // them wants.
+        if Lowerer::is_section(&func.0) {
+            return self.section_builtin(&func.0, &arg_vals);
         }
 
         // Likewise `play_all`, which only gathers handles its arguments have

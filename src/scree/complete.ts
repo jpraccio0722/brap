@@ -208,6 +208,8 @@ function accepts(receives: ValueKind, receiver: ValueKind): boolean {
       return receiver === "list" || receiver === "number";
     case "play":
       return receiver === "play";
+    case "section":
+      return receiver === "section";
     case "buffer":
       return receiver === "buffer";
     default:
@@ -291,6 +293,13 @@ function kindOf(expr: string, scope: Scope, depth = 4): ValueKind {
   if (scope.patterns.has(word)) return "list";
 
   const local = scope.locals.get(word);
+  // A `fn` named rather than called is a section, which is what `seq` takes on
+  // its left. Only a no-parameter one: everything that sequences sections
+  // inlines them with no arguments, so a `fn` that declares any could not be
+  // written there.
+  if (local?.type === "function" && (local.params?.length ?? 0) === 0) {
+    return "section";
+  }
   if (local?.value !== undefined) return kindOf(local.value, scope, depth - 1);
   // A `for` variable holds one element, and a parameter could be anything.
   if (local !== undefined) return "any";

@@ -5,7 +5,7 @@ use crate::scree_graph::environment::{Env, FunctionDef, Value};
 use crate::scree_graph::graph::ScreeGraph;
 use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::parser::parser::ScreeItem;
-use crate::pattern::patterns::Binding;
+use crate::pattern::patterns::{Binding, ChoiceGroup};
 use crate::samples::Samples;
 
 pub struct Lowerer {
@@ -26,6 +26,9 @@ pub struct Lowerer {
     /// began. Empty for a program that names no file — and for every caller
     /// that has no business reading one.
     pub samples: Samples,
+    /// One entry per `wthen`, `rthen` or `maybe`, which its arms' bindings
+    /// refer to by index. Empty for a program that never chooses.
+    pub choices: Vec<ChoiceGroup>,
 }
 
 /// One eval produces two artifacts: the persistent graph, which is crossfaded
@@ -33,6 +36,7 @@ pub struct Lowerer {
 pub struct Lowered {
     pub graph: ScreeGraph,
     pub bindings: Vec<Binding>,
+    pub choices: Vec<ChoiceGroup>,
 }
 
 /// A fresh RNG for one eval.
@@ -94,6 +98,7 @@ fn lower_inner(
         play_start: 0.0,
         rng: fresh_rng(),
         samples,
+        choices: Vec::new(),
     };
 
     if let Some(dur) = dur {
@@ -104,7 +109,7 @@ fn lower_inner(
         lw.item(item)?;
     }
 
-    Ok(Lowered { graph: lw.graph, bindings: lw.bindings })
+    Ok(Lowered { graph: lw.graph, bindings: lw.bindings, choices: lw.choices })
 }
 
 /// Lower a program that is only expected to produce a graph.

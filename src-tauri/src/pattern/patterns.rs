@@ -50,6 +50,89 @@ pub struct Binding {
     /// `play_once` and `playn` set it, and it is measured in cycles rather than
     /// repeats because `rate` has already been folded into the pattern.
     pub cycles: Option<f64>,
+    /// How often the whole window comes back around, in cycles. `None` is
+    /// every binding written before `wthen` existed: the window opens once.
+    ///
+    /// A repeating binding sounds during `[start, start + cycles)` and again
+    /// every `repeat` cycles after that, forever. It is what makes a choice
+    /// worth rerolling — without somewhere to come back to, a branch would be
+    /// picked once and that would be the end of it.
+    pub repeat: Option<f64>,
+    /// Which arm of which choice this binding belongs to, if it belongs to
+    /// one. The window is gated on the arm being the one drawn for that
+    /// repetition, so of a choice's arms exactly one sounds each time around.
+    pub choice: Option<ChoiceRef>,
+}
+
+/// A binding's membership of a choice: which choice, and which of its arms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChoiceRef {
+    pub group: usize,
+    pub arm: usize,
+}
+
+/// One `wthen`: the weights its arms were given, and the seed its draws come
+/// from.
+///
+/// The draw is a *hash*, not a running RNG, and that is the whole design.
+/// `query` is called once per scheduler pass over a lookahead window that
+/// overlaps the last one, and a binding near a boundary is asked about more
+/// than once — so the answer has to depend only on which repetition is being
+/// asked about, never on how many times it has been asked. A hash of
+/// `(seed, group, repetition)` gives a fresh draw each time around and the
+/// same draw every time that repetition comes up, which is what keeps a note
+/// from flickering in and out as the horizon creeps past it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChoiceGroup {
+    /// Non-negative, summing to something positive. Normalised at draw time
+    /// rather than at build time, so weights need not be given as fractions.
+    pub weights: Vec<f64>,
+    /// Fixed per eval, so re-evaluating deals a new hand and `seed` pins one.
+    pub seed: u64,
+}
+
+impl ChoiceGroup {
+    /// Which arm sounds on repetition `n`.
+    ///
+    /// Returns `arm == weights.len()` for the "nothing" arm `maybe` adds, so a
+    /// choice can also come up silent.
+    pub fn arm_at(&self, group: usize, n: u64) -> usize {
+        let total: f64 = self.weights.iter().filter(|w| w.is_finite() && **w > 0.0).sum();
+        if !(total > 0.0) {
+            return usize::MAX; // no arm can match: the choice is silent
+        }
+        let r = unit_hash(self.seed, group as u64, n) * total;
+        let mut acc = 0.0;
+        for (i, w) in self.weights.iter().enumerate() {
+            if !w.is_finite() || *w <= 0.0 {
+                continue;
+            }
+            acc += w;
+            if r < acc {
+                return i;
+            }
+        }
+        // Only reachable when the running sum falls a bit short of `total`
+        // through rounding, and then the last positive arm is the right answer.
+        self.weights.iter().rposition(|w| w.is_finite() && *w > 0.0).unwrap_or(usize::MAX)
+    }
+}
+
+/// SplitMix64, the finalising mix. Cheap, and it decorrelates the low bits —
+/// which matters here because two of the three inputs are small integers that
+/// differ by one.
+fn mix(mut z: u64) -> u64 {
+    z = z.wrapping_add(0x9E3779B97F4A7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+/// A number in `[0, 1)` from three integers. 53 bits, the most an `f64` holds
+/// without a gap.
+fn unit_hash(seed: u64, group: u64, n: u64) -> f64 {
+    let h = mix(seed ^ mix(group.wrapping_mul(0x9E3779B97F4A7C15) ^ mix(n)));
+    (h >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// Everything currently playing. An eval replaces this wholesale.
@@ -65,6 +148,9 @@ pub struct Patterns {
     /// republish immediately after (an eval from silence) or clear the
     /// bindings entirely (stop).
     pub origin: f64,
+    /// The choices this set's bindings refer to by index. Empty for a program
+    /// with no `wthen` in it, which is most of them.
+    pub choices: Vec<ChoiceGroup>,
 }
 
 /// An event with its instrument attached — what the scheduler consumes.
@@ -85,16 +171,19 @@ impl Patterns {
 
     pub fn query(&self, span: Span) -> Vec<BoundEvent> {
         self.bindings.iter().flat_map(|b| {
-            // Before it opens, or past where it closed.
-            let Some(span) = self.window(b.start, b.cycles, span) else {
+            // Before it opens, past where it closed, or — for a binding under
+            // a choice — in a repetition where a different arm was drawn.
+            let windows = self.windows(b, span);
+            if windows.is_empty() {
                 return Vec::new();
-            };
+            }
             // Flattened once per binding rather than per event: a lane is the
             // same line of values whichever note is asking.
             let lanes: Vec<(&str, Vec<Option<f64>>)> = b.lanes.iter()
                 .map(|l| (l.name.as_str(), l.pattern.values()))
                 .collect();
 
+            windows.into_iter().flat_map(|span| {
             b.pattern.query(span).into_iter().map(|mut event| {
                 // Which note this is, counted from the origin — the lane's
                 // position, not a time to look up.
@@ -116,7 +205,66 @@ impl Patterns {
                 }
                 BoundEvent { instrument: b.instrument.clone(), event, args }
             }).collect::<Vec<_>>()
+            }).collect::<Vec<_>>()
         }).collect()
+    }
+
+    /// Every part of `span` a binding may sound in.
+    ///
+    /// One window for everything that opens once, which is `window` unchanged.
+    /// A repeating binding gets one per repetition the span reaches, and a
+    /// binding under a choice keeps only the repetitions its own arm was drawn
+    /// for. Several, rather than one, because a lookahead window is free to
+    /// straddle a repetition boundary — and at fast tempos it often does.
+    fn windows(&self, b: &Binding, span: Span) -> Vec<Span> {
+        let Some(period) = b.repeat else {
+            // Nothing repeats, so a choice would be drawn once and stay drawn;
+            // `wthen` always sets both, and this is the path everything else
+            // takes.
+            return self.window(b.start, b.cycles, span).into_iter().collect();
+        };
+        // A repetition is only meaningful against a window that closes: an
+        // open-ended one already covers every later repetition of itself.
+        let (Some(cycles), true) = (b.cycles, period.is_finite() && period > 0.0) else {
+            return self.window(b.start, b.cycles, span).into_iter().collect();
+        };
+
+        let opens = self.origin.ceil() + b.start;
+        // Which repetitions can overlap the span at all. The window is
+        // `cycles` long, so one starting up to `cycles` before the span may
+        // still reach into it.
+        let first = ((span.begin - opens - cycles) / period).floor().max(0.0);
+        let last = ((span.end - opens) / period).floor();
+        if !first.is_finite() || !last.is_finite() || last < first {
+            return Vec::new();
+        }
+        // Cheap insurance against a tiny period and a distant span asking for
+        // millions of windows: past this many the repetitions are far shorter
+        // than a note and nobody could hear them apart.
+        const MAX_REPETITIONS: f64 = 4096.0;
+        let last = last.min(first + MAX_REPETITIONS);
+
+        let mut out = Vec::new();
+        let mut n = first;
+        while n <= last {
+            let repetition = n as u64;
+            let sounds = match b.choice {
+                None => true,
+                Some(ChoiceRef { group, arm }) => self
+                    .choices
+                    .get(group)
+                    .is_some_and(|c| c.arm_at(group, repetition) == arm),
+            };
+            if sounds {
+                let begin = span.begin.max(opens + n * period);
+                let end = span.end.min(opens + n * period + cycles);
+                if end > begin {
+                    out.push(Span::new(begin, end));
+                }
+            }
+            n += 1.0;
+        }
+        out
     }
 
     /// The part of `span` a binding bounded to `cycles` may still sound in, or
@@ -160,15 +308,13 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0), None]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None,
-                },
+                    cycles: None, repeat: None, choice: None },
                 Binding {
                     instrument: "hat".into(),
                     pattern: Pattern::steps([Some(1.0), Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None,
-                },
+                    cycles: None, repeat: None, choice: None },
             ],
             ..Default::default()
         };
@@ -190,7 +336,7 @@ mod tests {
 
     fn bound(pattern: Pattern, lanes: Vec<Lane>) -> Vec<super::BoundEvent> {
         Patterns {
-            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None }],
+            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None, repeat: None, choice: None }],
             ..Default::default()
         }
         .query(Span::new(0.0, 1.0))
@@ -236,8 +382,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: vec![lane("cut", (1..=6).map(|i| Some(i as f64 * 100.0)).collect())],
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
 
@@ -264,8 +409,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
 
@@ -290,8 +434,7 @@ mod tests {
                 pattern: Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)])),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None,
-            }],
+                cycles: None, repeat: None, choice: None }],
             ..Default::default()
         };
 
@@ -385,10 +528,8 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles,
-            }],
-            origin,
-        }
+                cycles, repeat: None, choice: None }],
+            origin, choices: Vec::new() }
         .query(span)
         .iter()
         .map(|e| e.event.begin)
@@ -462,18 +603,15 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: Some(1.0),
-                },
+                    cycles: Some(1.0), repeat: None, choice: None },
                 Binding {
                     instrument: "loop".into(),
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None,
-                },
+                    cycles: None, repeat: None, choice: None },
             ],
-            origin: 0.0,
-        };
+            origin: 0.0, choices: Vec::new() };
 
         let names: Vec<_> = pats
             .query(Span::new(5.0, 6.0))
@@ -502,10 +640,8 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start,
-                cycles,
-            }],
-            origin: 0.0,
-        }
+                cycles, repeat: None, choice: None }],
+            origin: 0.0, choices: Vec::new() }
         .query(span)
         .iter()
         .map(|e| e.event.begin)
@@ -553,10 +689,8 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0)]),
                 lanes: Vec::new(),
                 start: 2.0,
-                cycles: Some(1.0),
-            }],
-            origin: 3.2,
-        };
+                cycles: Some(1.0), repeat: None, choice: None }],
+            origin: 3.2, choices: Vec::new() };
         // Origin 3.2 rounds up to 4, plus two cycles of waiting.
         let onsets: Vec<f64> = pats
             .query(Span::new(3.2, 9.0))
@@ -564,5 +698,180 @@ mod tests {
             .map(|e| e.event.begin)
             .collect();
         assert_eq!(onsets, vec![6.0]);
+    }
+
+    // ---- repeating windows and choice ----
+
+    /// One arm of a two-armed choice, sounding once per cycle.
+    fn arm(instrument: &str, group: usize, index: usize, period: f64) -> Binding {
+        Binding {
+            instrument: instrument.into(),
+            pattern: Pattern::steps([Some(1.0)]),
+            lanes: Vec::new(),
+            start: 0.0,
+            cycles: Some(1.0),
+            repeat: Some(period),
+            choice: Some(ChoiceRef { group, arm: index }),
+        }
+    }
+
+    fn two_armed(seed: u64, weights: Vec<f64>) -> Patterns {
+        Patterns {
+            bindings: vec![arm("a", 0, 0, 1.0), arm("b", 0, 1, 1.0)],
+            origin: 0.0,
+            choices: vec![ChoiceGroup { weights, seed }],
+        }
+    }
+
+    /// Which instrument sounded in each of the first `n` cycles.
+    fn drawn(pats: &Patterns, n: i64) -> Vec<String> {
+        (0..n)
+            .map(|i| {
+                let evs = pats.query(Span::new(i as f64, i as f64 + 1.0));
+                assert_eq!(evs.len(), 1, "exactly one arm sounds in cycle {i}");
+                evs[0].instrument.clone()
+            })
+            .collect()
+    }
+
+    /// The property the whole design rests on: of a choice's arms, exactly one
+    /// sounds each time round — never both, never neither.
+    #[test]
+    fn exactly_one_arm_sounds_per_repetition() {
+        for seed in [0u64, 1, 0x5EED, u64::MAX] {
+            let pats = two_armed(seed, vec![1.0, 1.0]);
+            // `drawn` asserts the count; reaching the end is the test.
+            assert_eq!(drawn(&pats, 32).len(), 32);
+        }
+    }
+
+    /// A choice really does come back around: over enough repetitions both
+    /// arms are drawn, which a window that opened once could not manage.
+    #[test]
+    fn a_choice_rerolls_rather_than_settling() {
+        let pats = two_armed(0x5EED, vec![1.0, 1.0]);
+        let seen = drawn(&pats, 64);
+        assert!(seen.iter().any(|i| i == "a"), "arm a never came up");
+        assert!(seen.iter().any(|i| i == "b"), "arm b never came up");
+    }
+
+    /// Why the draw is a hash and not a running RNG.
+    ///
+    /// The scheduler queries an overlapping lookahead window every pass, so the
+    /// same cycle is asked about several times. A stateful generator would
+    /// answer differently each time and the note would flicker; this asks the
+    /// same span three ways and insists all three agree.
+    #[test]
+    fn the_same_repetition_draws_the_same_arm_however_it_is_queried() {
+        let pats = two_armed(0x9E3779B9, vec![1.0, 1.0]);
+
+        // One sweep, cycle by cycle.
+        let once = drawn(&pats, 24);
+
+        // The whole span in a single query.
+        let mut whole: Vec<(f64, String)> = pats
+            .query(Span::new(0.0, 24.0))
+            .into_iter()
+            .map(|e| (e.event.begin, e.instrument))
+            .collect();
+        whole.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+        let whole: Vec<String> = whole.into_iter().map(|(_, i)| i).collect();
+        assert_eq!(once, whole, "one big query disagreed with cycle-by-cycle");
+
+        // Overlapping windows that straddle every boundary, as the lookahead
+        // does at speed.
+        for cycle in 0..23 {
+            let straddle = pats.query(Span::new(cycle as f64 + 0.5, cycle as f64 + 1.5));
+            assert_eq!(straddle.len(), 1, "cycle {cycle} boundary");
+            assert_eq!(
+                straddle[0].instrument, once[cycle + 1],
+                "a window straddling cycle {cycle} drew a different arm"
+            );
+        }
+    }
+
+    /// Weights are relative and need not be fractions; over enough draws the
+    /// split tracks them. Loose bounds — this is testing that the weighting is
+    /// wired up at all, not the quality of the hash.
+    #[test]
+    fn weights_bias_the_draw() {
+        let pats = two_armed(0xC0FFEE, vec![9.0, 1.0]);
+        let seen = drawn(&pats, 1000);
+        let a = seen.iter().filter(|i| *i == "a").count();
+        assert!((820..=980).contains(&a), "expected ~900 of 1000, got {a}");
+    }
+
+    /// A weight of zero is never drawn, and the arm that keeps it is simply
+    /// never heard.
+    #[test]
+    fn a_zero_weight_is_never_drawn() {
+        let pats = two_armed(42, vec![1.0, 0.0]);
+        assert!(drawn(&pats, 200).iter().all(|i| i == "a"));
+    }
+
+    /// `maybe`'s silent arm owns no bindings, so the choice can come up empty —
+    /// and does, at roughly its weight.
+    #[test]
+    fn a_choice_may_draw_an_arm_that_owns_nothing() {
+        let pats = Patterns {
+            bindings: vec![arm("a", 0, 0, 1.0)],
+            origin: 0.0,
+            // Arm 1 is silence: nothing refers to it.
+            choices: vec![ChoiceGroup { weights: vec![0.25, 0.75], seed: 7 }],
+        };
+        let sounded = (0..400)
+            .filter(|i| !pats.query(Span::new(*i as f64, *i as f64 + 1.0)).is_empty())
+            .count();
+        assert!((60..=140).contains(&sounded), "expected ~100 of 400, got {sounded}");
+    }
+
+    /// A repeating window with no choice on it simply comes back every period,
+    /// which is what the arm gating is layered on top of.
+    #[test]
+    fn a_repeating_window_reopens_every_period() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "a".into(),
+                pattern: Pattern::steps([Some(1.0)]),
+                lanes: Vec::new(),
+                start: 0.0,
+                // Sounds for one cycle in every four.
+                cycles: Some(1.0),
+                repeat: Some(4.0),
+                choice: None,
+            }],
+            origin: 0.0,
+            choices: Vec::new(),
+        };
+        let onsets: Vec<f64> = pats
+            .query(Span::new(0.0, 12.0))
+            .into_iter()
+            .map(|e| e.event.begin)
+            .collect();
+        assert_eq!(onsets, vec![0.0, 4.0, 8.0]);
+    }
+
+    /// A binding that repeats still respects where it opens.
+    #[test]
+    fn a_repeating_window_does_not_open_before_its_start() {
+        let pats = Patterns {
+            bindings: vec![Binding {
+                instrument: "a".into(),
+                pattern: Pattern::steps([Some(1.0)]),
+                lanes: Vec::new(),
+                start: 3.0,
+                cycles: Some(1.0),
+                repeat: Some(2.0),
+                choice: None,
+            }],
+            origin: 0.0,
+            choices: Vec::new(),
+        };
+        let onsets: Vec<f64> = pats
+            .query(Span::new(0.0, 8.0))
+            .into_iter()
+            .map(|e| e.event.begin)
+            .collect();
+        assert_eq!(onsets, vec![3.0, 5.0, 7.0]);
     }
 }

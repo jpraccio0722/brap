@@ -27,6 +27,10 @@ export type ValueKind =
   | "list"
   | "pattern"
   | "play"
+  /** A `fn` named rather than called — what the arrangement combinators take as
+   *  a section, and what `seq` takes on its left. Never a result: naming a
+   *  function is the only way to produce one, so nothing answers with it. */
+  | "section"
   /** A loaded audio file, from `load`. */
   | "buffer"
   /** A double-quoted string. Only `load` takes one, and only written out, so
