@@ -1200,6 +1200,41 @@ fn list_builtins_feed_patterns() {
     ]));
 }
 
+/// A generated list is a pattern like any other — the reason `randis` and
+/// friends answer with a list rather than with something of their own.
+#[test]
+fn random_lists_feed_patterns() {
+    let bs = bindings_of("fn lead(n) = sin(n.m2h)\nplay(randis(4, 60, 72), lead)\n");
+    assert_eq!(bs.len(), 1);
+    let Pattern::Steps(slots) = &bs[0].pattern else { panic!("expected a sequence") };
+    assert_eq!(slots.len(), 4);
+    for slot in slots {
+        let Step::Value(n) = slot.step else { panic!("expected a plain value") };
+        assert!(n.fract() == 0.0 && (60.0..72.0).contains(&n), "{n} is not a note in range");
+    }
+}
+
+/// The draw happens once, while the program is lowered — so the riff a pattern
+/// is bound to is settled, and plays the same until the next eval. Something
+/// re-rolled per cycle would be a different feature, and not this one.
+#[test]
+fn a_random_pattern_is_settled_at_eval() {
+    let bs = bindings_of("fn lead(n) = sin(n)\nplay(rands(6, 100, 900), lead)\n");
+    let Pattern::Steps(slots) = &bs[0].pattern else { panic!("expected a sequence") };
+    // Every step is already a number, not a thunk to be evaluated later.
+    assert!(slots.iter().all(|s| matches!(s.step, Step::Value(_))));
+    assert_eq!(slots.len(), 6);
+}
+
+/// Seeding reaches the scheduler too: the same program binds the same riff.
+#[test]
+fn a_seeded_pattern_binds_the_same_notes_twice() {
+    let src = "fn lead(n) = sin(n)\nseed(1234)\nplay(randis(8, 48, 72), lead)\n";
+    assert_eq!(bindings_of(src)[0].pattern, bindings_of(src)[0].pattern);
+    let other = src.replace("seed(1234)", "seed(1235)");
+    assert_ne!(bindings_of(src)[0].pattern, bindings_of(&other)[0].pattern);
+}
+
 // ---- triggers and zero-parameter instruments ----
 
 /// `\` is a sounding step that carries no data.

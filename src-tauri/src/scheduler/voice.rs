@@ -134,6 +134,26 @@ mod tests {
         assert_eq!(net.outputs(), 2);
     }
 
+    /// A voice is lowered afresh for each note, so a random draw written inside
+    /// an instrument is a new number every time it sounds — the counterpart to
+    /// a draw in a *pattern*, which settles once per eval. Both are documented
+    /// behaviour, and this is the half that only exists here.
+    #[test]
+    fn a_draw_inside_an_instrument_is_rerolled_per_note() {
+        // Detune is inaudible but moves the pitch, so counting zero crossings
+        // reads back what the draw was.
+        let ins = instruments("fn tone(f) = sin(f + randi(0, 40))\n");
+        let crossings = |_| {
+            let mut net = build_voice(&ins, "tone", 200.0, &[], 1.0).expect("should build");
+            net.set_sample_rate(44100.0);
+            let samples: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+            samples.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
+        };
+        let counts: std::collections::HashSet<usize> = (0..12).map(crossings).collect();
+        assert!(counts.len() > 1, "every note drew the same number: {counts:?}");
+        assert!(counts.iter().all(|c| (200..=240).contains(c)), "out of range: {counts:?}");
+    }
+
     #[test]
     fn unknown_instrument_is_an_error() {
         let ins = instruments("fn kick(f) = sin(f)\n");

@@ -39,6 +39,7 @@ Alone this dosn't do anything. But add below:
 fn synth(freq) {
   saw(freq) + saw(freq*2) * 0.5
 }
+
 synth(220)
 ```
 

@@ -6,7 +6,12 @@ import { invoke } from "@tauri-apps/api/core";
  * hand-maintained on this side: adding a UGen in Rust adds it to the editor.
  */
 
-export type BuiltinCategory = "ugen" | "list" | "math" | "special";
+export type BuiltinCategory =
+  | "ugen"
+  | "list"
+  | "math"
+  | "random"
+  | "special";
 
 /**
  * A kind of value, as `lang::ValueKind` in the backend defines it. Both sides

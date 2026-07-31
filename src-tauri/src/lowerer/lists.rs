@@ -6,11 +6,13 @@
 
 use std::rc::Rc;
 
+use rand::seq::SliceRandom;
+
 use crate::scree_graph::environment::{Item, Value};
 use crate::scree_graph::ugen_nodes::NodeKind;
 use crate::lowerer::lower::Lowerer;
 
-fn as_list(func: &str, v: &Value) -> Result<Rc<Vec<Item>>, String> {
+pub(crate) fn as_list(func: &str, v: &Value) -> Result<Rc<Vec<Item>>, String> {
     match v {
         Value::List(items) => Ok(items.clone()),
         _ => Err(format!("{func} expects a list")),
@@ -93,27 +95,6 @@ fn relist(items: Vec<Item>) -> Result<Option<Value>, String> {
 }
 
 impl Lowerer {
-    /// Advance the lowering RNG. Seeded once per eval, so re-running a program
-    /// with `choice` or `scramble` in it gives a fresh result each time.
-    pub fn next_rand(&mut self) -> u64 {
-        // xorshift64*
-        let mut x = self.rng | 1;
-        x ^= x >> 12;
-        x ^= x << 25;
-        x ^= x >> 27;
-        self.rng = x;
-        x.wrapping_mul(0x2545_F491_4F6C_DD1D)
-    }
-
-    /// A uniform float in `[0, 1)`.
-    fn next_unit(&mut self) -> f64 {
-        (self.next_rand() >> 11) as f64 / (1u64 << 53) as f64
-    }
-
-    fn next_index(&mut self, len: usize) -> usize {
-        (self.next_rand() % len as u64) as usize
-    }
-
     pub fn list_builtin(&mut self, func: &str, args: &[Value]) -> Result<Option<Value>, String> {
         match func {
             "len" => {
@@ -271,7 +252,7 @@ impl Lowerer {
                 if items.is_empty() {
                     return Err("choice: the list is empty".into());
                 }
-                let i = self.next_index(items.len());
+                let i = self.index(items.len());
                 Ok(Some(items[i].value.clone()))
             }
 
@@ -302,7 +283,7 @@ impl Lowerer {
                     return Err("wchoice: the weights are all zero".into());
                 }
 
-                let mut point = self.next_unit() * total;
+                let mut point = self.unit() * total;
                 for (i, w) in ws.iter().enumerate() {
                     point -= w;
                     if point < 0.0 {
@@ -316,11 +297,7 @@ impl Lowerer {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
                 let mut out: Vec<Item> = items.iter().cloned().collect();
-                // Fisher-Yates.
-                for i in (1..out.len()).rev() {
-                    let j = self.next_index(i + 1);
-                    out.swap(i, j);
-                }
+                out.shuffle(&mut self.rng);
                 relist(out)
             }
 
@@ -381,6 +358,7 @@ impl Lowerer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::SeedableRng;
     use crate::scree_graph::environment::Env;
     use crate::scree_graph::graph::ScreeGraph;
 
@@ -391,7 +369,8 @@ mod tests {
             depth: 0,
             bindings: Vec::new(),
             play_start: 0.0,
-            rng: 0x9E37_79B9_7F4A_7C15,
+            // Fixed, so a failure here is reproducible.
+            rng: rand::rngs::SmallRng::seed_from_u64(0x9E37_79B9_7F4A_7C15),
         }
     }
 

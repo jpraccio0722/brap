@@ -71,6 +71,7 @@ changes.
 - [Patterns and Playback](#patterns-and-playback)
 - [List Functions](#list-functions)
 - [Math Functions](#math-functions)
+- [Random Numbers](#random-numbers)
 - [Oscillators and Sources](#oscillators-and-sources)
 - [Noise and Chaos](#noise-and-chaos)
 - [Filters](#filters)
@@ -134,7 +135,10 @@ Lists are immutable. List functions generate a new list and leave the existing l
 | `filter` | `filter(list, predicate) -> list` | Keeps elements the predicate answers non-zero for. The predicate is an ordinary user `fn`; it must return a compile-time number. |
 | `choice` | `choice(list) -> value` | One random element. Errors on an empty list. |
 | `wchoice` | `wchoice(values, weights) -> value` | Weighted random pick. Parallel lists of equal length, like `zip`. Weights must be finite and ≥ 0, and not all zero. |
-| `scramble` | `scramble(list) -> list` | Fisher-Yates shuffle. |
+| `scramble` | `scramble(list) -> list` | Shuffled. |
+
+The last three re-roll on every eval, and draw from the same generator as
+[the random numbers](#random-numbers) — so `seed` pins them too.
 
 ### Math Functions
 | Name | Signature | Notes |
@@ -158,6 +162,34 @@ Lists are immutable. List functions generate a new list and leave the existing l
 | `pow` | `pow(x, exponent) -> number` | `2.pow(10)` is 1024. For exponential curve shaping. |
 | `sqrt` | `sqrt(x) -> number` | `x` must not be negative. |
 | `log2` | `log2(x) -> number` | `x` must be above zero. |
+
+### Random Numbers
+
+```rust
+play(randis(8, 60, 72), lead)          // eight notes, settled until you eval again
+play(riff, bass, cut: rands(4, 400, 2000))
+fn snare(n) = noise() * perc(0.001, 0.1) * rand(0.7, 1)   // a new draw per note
+```
+
+| Name | Signature | Notes |
+| --- | --- | --- |
+| `rand` | `rand(lo?, hi?) -> number` | A uniform number. `rand()` draws from 0..1; `rand(lo, hi)` — or `60.rand(72)` — draws from `lo..hi`, `hi` excluded. An empty range is an error. |
+| `randi` | `randi(lo, hi) -> number` | A uniform whole number in `lo..hi`, `hi` excluded: `randi(60, 72)` is an octave of notes that never repeats the root. Both bounds must be whole. |
+| `coin` | `coin(probability?) -> number` | 1 or 0 at odds you choose. `coin()` is even; `coin(0.25)` answers 1 one time in four. Multiply by it to drop a note. |
+| `seed` | `seed(seed) -> number` | Fix every draw made after it, and answer with the seed. Any number will do — `seed(0.5)` is a seed like any other. |
+| `gauss` | `gauss(mean?, deviation?) -> number` | Normally distributed: clustered around `mean`, two thirds within one `deviation`. Both default to the standard 0 and 1. **Unbounded** — `clamp` it if a stray value would hurt. |
+| `humanize` | `humanize(x, amount) -> number` | `x` plus a normal draw of deviation `amount`, so most nudges are small and a few are not. `0.5.humanize(0.05)` is a velocity that no longer sounds typed in. |
+| `expo` | `expo(mean?) -> number` | Exponential, above zero, averaging `mean` (default 1). Short values common, long ones rare — the shape of a wait between events. |
+| `tri` | `tri(lo, hi, mode?) -> number` | Triangular over `lo..hi`, peaking at `mode` (the midpoint if omitted). Bounded like `rand` but with a centre. |
+| `cauchy` | `cauchy(median?, spread?) -> number` | Heavy-tailed around `median` (default 0). Mostly close in, but far likelier than `gauss` to lurch — which is the point. |
+| `pareto` | `pareto(scale?, shape?) -> number` | Power-law at or above `scale` (default 1). A smaller `shape` (default 1) makes big values likelier. |
+| `poisson` | `poisson(mean?) -> number` | A whole count averaging `mean` (default 1) — how many things happened, when each was independent. |
+| `rands` | `rands(count, lo?, hi?) -> list` | `count` uniform numbers, from 0..1 or from `lo..hi`. A lane in one line. |
+| `randis` | `randis(count, lo, hi) -> list` | `count` whole numbers in `lo..hi`, `hi` excluded. |
+| `walk` | `walk(count, start, step) -> list` | A random walk: `count` numbers beginning at `start`, each drifting from the one before by up to `step` either way. **Neighbours stay close**, so it moves rather than jumps — which `rands` does not. Good for a cutoff or a pan. |
+| `walki` | `walki(count, start, step) -> list` | `walk` in whole steps, so it stays on the semitone grid. `walki(16, 60, 2)` wanders a melody around middle C. `step` must be whole. |
+| `sample` | `sample(list, count) -> list` | `count` elements without replacement, in a random order — no element twice, unlike `count` calls to `choice`. Taking the whole list is `scramble`; asking for more than it holds is an error. |
+| `randscale` | `randscale(count, scale, lo?, hi?) -> list` | `count` notes drawn **evenly** from the tones of a scale, given as semitone offsets within an octave, between MIDI `lo` and `hi` (60..72 by default). Unlike snapping a uniform draw with `scale`, every degree is equally likely and nothing lands outside the range. |
 
 ### Oscillators and Sources
 

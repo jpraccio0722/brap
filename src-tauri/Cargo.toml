@@ -12,6 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
+# Audio runs on a real-time deadline, and an unoptimized fundsp misses it: a
+# debug build costs ~47% of real time per pad voice, so a three-note chord
+# underruns and crackles. Optimizing dependencies fully — fundsp is where all
+# the DSP time goes — buys that back while this crate stays cheap to rebuild.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
 [dependencies]
 cpal = "0.18.1"
 chumsky = "0.13.0"
@@ -22,4 +32,6 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2.7.2"
+rand = "0.10"
+rand_distr = "0.6"
 
