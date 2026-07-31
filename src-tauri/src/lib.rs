@@ -11,6 +11,7 @@ use crate::engine::AudioEngine;
 use crate::imports::Workspace;
 use crate::pattern::graphical::{self, GraphicalPattern};
 use crate::pattern::patterns::Patterns;
+use crate::project::Project;
 use crate::scheduler::clock::{bpm_from_cps, cps_from_bpm};
 use crate::scheduler::scheduler::SchedulerState;
 use crate::scheduler::voice::Instruments;
@@ -28,6 +29,7 @@ mod parser;
 mod scree_graph;
 mod lowerer;
 mod lang;
+mod project;
 mod samples;
 
 /// Backend hook for the editor's "play" button.
@@ -288,6 +290,82 @@ fn write_patterns(root: String, patterns: Vec<GraphicalPattern>) -> Result<Strin
     Ok(path.display().to_string())
 }
 
+/// A project's saved settings, and the file they came from.
+///
+/// The path is returned rather than composed on the frontend for the same
+/// reason `PatternsFile`'s is: one answer to where the file is, and the editor
+/// can recognise it when it is opened as an ordinary tab.
+#[derive(serde::Serialize, Debug)]
+struct ProjectFile {
+    path: String,
+    project: Project,
+}
+
+/// Read a project's settings, and put the transport where they say.
+///
+/// The engine is moved here rather than by the frontend because this is the
+/// moment the file is known to be good: a project that could not be read must
+/// not half-apply, leaving the tempo from its file and the volume from the last
+/// one. What the editor gets back is what the engine is now set to, so the
+/// faders it draws are never a guess.
+///
+/// A folder with no settings file keeps the transport exactly where it is and
+/// is described that way. That is not a fallback — it is the right answer for
+/// every folder opened for the first time, and it means picking a project can
+/// never move a fader under a performer's hands.
+#[tauri::command]
+fn open_project(
+    root: String,
+    engine: tauri::State<Mutex<AudioEngine>>,
+) -> Result<ProjectFile, Diagnostic> {
+    let root = std::path::Path::new(&root);
+    let saved = project::read(root)?;
+
+    let mut eng = engine
+        .lock()
+        .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?;
+
+    let project = match saved {
+        Some(project) => {
+            eng.clock.set_cps(cps_from_bpm(project.bpm));
+            eng.master.set(project.volume as f32);
+            project
+        }
+        None => Project::new(root, bpm_from_cps(eng.clock.cps()), eng.master.value() as f64),
+    };
+
+    Ok(ProjectFile { path: project::file_path(root).display().to_string(), project })
+}
+
+/// Start a project in a folder, which is what File ▸ New Project… does.
+///
+/// The only difference from opening one is that this writes the file: a folder
+/// that already has settings is adopted exactly as `open_project` would adopt
+/// it, and one that does not gets the transport as it stands written into a new
+/// file. That is the whole of what "new" means here — there is nothing else to
+/// create, since a project is still just a folder.
+#[tauri::command]
+fn create_project(
+    root: String,
+    engine: tauri::State<Mutex<AudioEngine>>,
+) -> Result<ProjectFile, Diagnostic> {
+    let file = open_project(root.clone(), engine)?;
+    project::write(std::path::Path::new(&root), &file.project)?;
+    Ok(file)
+}
+
+/// Write a project's settings out, and say where they went.
+///
+/// Called as the tempo, the volume or the name changes. Like the patterns file
+/// it is only persistence: the engine has already been told, so a folder that
+/// cannot be written to costs you the memory of the setting rather than the
+/// setting itself.
+#[tauri::command]
+fn save_project(root: String, project: Project) -> Result<String, Diagnostic> {
+    project::write(std::path::Path::new(&root), &project)
+        .map(|path| path.display().to_string())
+}
+
 /// One entry in a project directory, as the project panel draws it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -401,10 +479,17 @@ const MENU_NEW: &str = "file-new";
 const MENU_OPEN: &str = "file-open";
 const MENU_SAVE: &str = "file-save";
 const MENU_NEW_PROJECT: &str = "project-new";
+const MENU_OPEN_PROJECT: &str = "project-open";
 
 /// Every id the File menu can raise. The event handler forwards these and
 /// ignores anything else, so the platform's own items keep working.
-const FILE_ITEMS: [&str; 4] = [MENU_NEW, MENU_OPEN, MENU_SAVE, MENU_NEW_PROJECT];
+const FILE_ITEMS: [&str; 5] = [
+    MENU_NEW,
+    MENU_OPEN,
+    MENU_SAVE,
+    MENU_NEW_PROJECT,
+    MENU_OPEN_PROJECT,
+];
 
 /// The platform's default menu with New, Open and Save added to the top of
 /// File. Each one carries the accelerator the toolbar buttons used to advertise.
@@ -417,20 +502,23 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     let new_item = MenuItem::with_id(app, MENU_NEW, "New", true, Some("CmdOrCtrl+N"))?;
     let open_item = MenuItem::with_id(app, MENU_OPEN, "Open…", true, Some("CmdOrCtrl+O"))?;
     let save_item = MenuItem::with_id(app, MENU_SAVE, "Save", true, Some("CmdOrCtrl+S"))?;
-    // No accelerator: picking a project is a once-a-session act, and the
+    // No accelerators: picking a project is a once-a-session act, and the
     // obvious shortcuts are all spoken for by the file items above.
     let new_project_item =
         MenuItem::with_id(app, MENU_NEW_PROJECT, "New Project…", true, None::<&str>)?;
+    let open_project_item =
+        MenuItem::with_id(app, MENU_OPEN_PROJECT, "Open Project…", true, None::<&str>)?;
 
     // Three groups, because there are three kinds of act here: making or
     // fetching a file, choosing which folder the project panel shows, and
     // saving. The trailing rule keeps all of it off whatever the platform put
     // in File.
-    let items: [&dyn IsMenuItem<tauri::Wry>; 7] = [
+    let items: [&dyn IsMenuItem<tauri::Wry>; 8] = [
         &new_item,
         &open_item,
         &PredefinedMenuItem::separator(app)?,
         &new_project_item,
+        &open_project_item,
         &PredefinedMenuItem::separator(app)?,
         &save_item,
         &PredefinedMenuItem::separator(app)?,
@@ -445,7 +533,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         Some(file) => file.insert_items(&items, 0)?,
         // No File submenu on this platform's default: make one. Nothing to sit
         // below it, so the trailing separator goes.
-        None => menu.append(&Submenu::with_items(app, "File", true, &items[..6])?)?,
+        None => menu.append(&Submenu::with_items(app, "File", true, &items[..7])?)?,
     }
 
     Ok(menu)
@@ -560,6 +648,9 @@ pub fn run() {
             read_file,
             read_patterns,
             write_patterns,
+            open_project,
+            create_project,
+            save_project,
             recent_project,
             set_recent_project,
             list_dir,
