@@ -7,4 +7,5 @@ mod tests;
 pub mod play;
 pub mod lists;
 pub mod math;
+pub mod random;
 pub mod sample;

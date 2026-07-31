@@ -24,7 +24,9 @@ const A4_HZ: f64 = 440.0;
 const SEMITONES_PER_OCTAVE: f64 = 12.0;
 const CENTS_PER_OCTAVE: f64 = 1200.0;
 
-fn number(func: &str, what: &str, v: &Value) -> Result<f64, String> {
+/// Shared with `lowerer::random`, which draws numbers into the same fold and so
+/// has to reject a signal in the same words.
+pub(crate) fn number(func: &str, what: &str, v: &Value) -> Result<f64, String> {
     match v {
         Value::Number(n) => Ok(*n),
         _ => Err(format!(
@@ -33,21 +35,21 @@ fn number(func: &str, what: &str, v: &Value) -> Result<f64, String> {
     }
 }
 
-fn positive(func: &str, what: &str, n: f64) -> Result<f64, String> {
+pub(crate) fn positive(func: &str, what: &str, n: f64) -> Result<f64, String> {
     if n <= 0.0 {
         return Err(format!("{func}: {what} must be above zero, got {n}"));
     }
     Ok(n)
 }
 
-fn range(func: &str, lo: f64, hi: f64) -> Result<(), String> {
+pub(crate) fn range(func: &str, lo: f64, hi: f64) -> Result<(), String> {
     if !(hi > lo) {
         return Err(format!("{func}: the range {lo}..{hi} is empty"));
     }
     Ok(())
 }
 
-fn scale_tones(func: &str, v: &Value) -> Result<Vec<f64>, String> {
+pub(crate) fn scale_tones(func: &str, v: &Value) -> Result<Vec<f64>, String> {
     let Value::List(items) = v else {
         return Err(format!("{func}: the scale must be a list of semitone offsets"));
     };
@@ -427,28 +429,29 @@ mod tests {
     }
 
     /// A name must not appear in two tables: dispatch tries list, then math,
-    /// then UGens, so a duplicate would silently shadow.
+    /// then random, then UGens, so a duplicate would silently shadow.
     #[test]
     fn builtin_names_do_not_collide() {
-        use crate::lang::{LIST_BUILTINS, UGENS};
-        for b in MATH_BUILTINS {
-            assert!(
-                crate::lang::list_builtin(b.name).is_none(),
-                "`{}` is in both MATH_BUILTINS and LIST_BUILTINS",
-                b.name
-            );
-            assert!(
-                crate::lang::ugen(b.name).is_none(),
-                "`{}` is in both MATH_BUILTINS and UGENS",
-                b.name
-            );
-        }
-        for b in LIST_BUILTINS {
-            assert!(
-                crate::lang::ugen(b.name).is_none(),
-                "`{}` is in both LIST_BUILTINS and UGENS",
-                b.name
-            );
+        use crate::lang::{LIST_BUILTINS, RANDOM_BUILTINS, UGENS};
+
+        // Every table paired with every later one, in dispatch order — so a
+        // name added to two of them names both here.
+        let tables: [(&str, Vec<&str>); 4] = [
+            ("LIST_BUILTINS", LIST_BUILTINS.iter().map(|b| b.name).collect()),
+            ("MATH_BUILTINS", MATH_BUILTINS.iter().map(|b| b.name).collect()),
+            ("RANDOM_BUILTINS", RANDOM_BUILTINS.iter().map(|b| b.name).collect()),
+            ("UGENS", UGENS.iter().map(|u| u.name).collect()),
+        ];
+
+        for (i, (this, names)) in tables.iter().enumerate() {
+            for (other, later) in &tables[i + 1..] {
+                for name in names {
+                    assert!(
+                        !later.contains(name),
+                        "`{name}` is in both {this} and {other}"
+                    );
+                }
+            }
         }
         assert!(!UGENS.is_empty());
     }

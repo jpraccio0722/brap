@@ -940,6 +940,181 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
     },
 ];
 
+/// Random number generators, drawn while the program is lowered.
+///
+/// Same shape as the math builtins, and the same story: they fold to a value
+/// during lowering and emit no node. Which is what makes them useful — a draw
+/// becomes a constant in the graph, so a pattern built from one is a *fixed*
+/// riff for that evaluation rather than something that squirms while it plays.
+/// Re-evaluating rolls again.
+///
+/// The one exception falls out of how voices work: an instrument body is
+/// lowered afresh for every note, so a draw written *inside* a `fn` used as an
+/// instrument is a new number on each note. That is the difference between
+/// `rands(8, 60, 72) >> play(lead)` — eight notes, settled — and a `lead` whose
+/// own body says `rand(0, 1)`, which wanders note to note.
+///
+/// Audio-rate randomness is a different thing entirely and already has names:
+/// `noise`, `pink`, `brown`, `mls`, and `hold` to step them.
+pub static RANDOM_BUILTINS: &[ListBuiltin] = &[
+    // --- uniform ---
+    ListBuiltin {
+        name: "rand",
+        params: &["lo", "hi"],
+        arities: &[0, 2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A uniform number. `rand()` draws from 0..1; `rand(lo, hi)` — or `60.rand(72)` — draws from `lo..hi`, with `hi` excluded.",
+    },
+    ListBuiltin {
+        name: "randi",
+        params: &["lo", "hi"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A uniform whole number in `lo..hi`, with `hi` excluded: `randi(60, 72)` is an octave of notes that never repeats the root. Both bounds must be whole.",
+    },
+    ListBuiltin {
+        name: "coin",
+        params: &["probability"],
+        arities: &[0, 1],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "1 or 0, at odds you choose. `coin()` is even; `coin(0.25)` answers 1 one time in four. Multiply by it to drop a note, or add it to a velocity.",
+    },
+    ListBuiltin {
+        name: "seed",
+        params: &["seed"],
+        arities: &[1],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "Fix every draw made after it, and answer with the seed. `seed(42)` at the top of a program makes its lists, lanes and patterns come out the same on every evaluation — which is how a happy accident gets kept. A voice is lowered per note and does not see a top-level seed, so a `seed` inside an instrument pins that instrument instead, identically on every note.",
+    },
+    // --- shaped ---
+    ListBuiltin {
+        name: "gauss",
+        params: &["mean", "deviation"],
+        arities: &[0, 1, 2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A normally distributed number: clustered around `mean`, two thirds of it within one `deviation`. Both default to the standard 0 and 1. Unbounded — `clamp` it if a stray value would hurt.",
+    },
+    ListBuiltin {
+        name: "humanize",
+        params: &["x", "amount"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "Nudge a number off its grid: `x` plus a normal draw of deviation `amount`, so most nudges are small and a few are not. `0.5.humanize(0.05)` is a velocity that no longer sounds typed in.",
+    },
+    ListBuiltin {
+        name: "expo",
+        params: &["mean"],
+        arities: &[0, 1],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "An exponentially distributed number above zero with the given `mean` (default 1). Short values are common and long ones rare — the shape of a wait between events.",
+    },
+    ListBuiltin {
+        name: "tri",
+        params: &["lo", "hi", "mode"],
+        arities: &[2, 3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A triangular draw over `lo..hi`, peaking at `mode` — the midpoint if you leave it out. Bounded like `rand` but with a centre, so it favours a value without ever leaving the range.",
+    },
+    ListBuiltin {
+        name: "cauchy",
+        params: &["median", "spread"],
+        arities: &[0, 1, 2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A heavy-tailed draw around `median` (default 0) with the given `spread` (default 1). Mostly close in, but far more prone to a wild outlier than `gauss` — which is the point when you want the occasional lurch.",
+    },
+    ListBuiltin {
+        name: "pareto",
+        params: &["scale", "shape"],
+        arities: &[0, 1, 2],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A power-law draw at or above `scale` (default 1). A smaller `shape` (default 1) makes big values likelier. Everything is near the floor, with rare excursions far above it.",
+    },
+    ListBuiltin {
+        name: "poisson",
+        params: &["mean"],
+        arities: &[0, 1],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Number,
+        doc: "A whole count averaging `mean` (default 1) — how many things happened, when each was independent. Good for deciding how many hits land in a bar.",
+    },
+    // --- lists ---
+    ListBuiltin {
+        name: "rands",
+        params: &["count", "lo", "hi"],
+        arities: &[1, 3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::List,
+        doc: "A list of `count` uniform numbers, from 0..1 or from `lo..hi`. A pattern in one line: `rands(8, 0.2, 0.9)` is eight velocities.",
+    },
+    ListBuiltin {
+        name: "randis",
+        params: &["count", "lo", "hi"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::List,
+        doc: "A list of `count` whole numbers in `lo..hi`, `hi` excluded: `randis(8, 60, 72) >> play(lead)` is an eight-note riff.",
+    },
+    ListBuiltin {
+        name: "walk",
+        params: &["count", "start", "step"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::List,
+        doc: "A random walk: `count` numbers beginning at `start`, each drifting from the one before by up to `step` either way. Neighbours stay close, so it moves rather than jumps — what `rands` is not. Good for a cutoff or a pan.",
+    },
+    ListBuiltin {
+        name: "walki",
+        params: &["count", "start", "step"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::List,
+        doc: "`walk` in whole steps: each move is a whole number from `-step` to `step`, so the result stays on the semitone grid. `walki(16, 60, 2)` wanders a melody around middle C. `step` must be whole.",
+    },
+    ListBuiltin {
+        name: "choices",
+        params: &["list", "count"],
+        arities: &[2],
+        variadic: false,
+        receives: ValueKind::List,
+        returns: ValueKind::List,
+        doc: "`count` elements drawn without replacement, in a random order — `choice` several times over may repeat itself, and this cannot. Asking for the whole list is `scramble`; asking for more than it holds is an error.",
+    },
+    ListBuiltin {
+        name: "randscale",
+        params: &["count", "scale", "lo", "hi"],
+        arities: &[2, 4],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::List,
+        doc: "`count` notes drawn evenly from the tones of a scale, given as semitone offsets within an octave, between MIDI `lo` and `hi` (60..72 by default). Unlike snapping a uniform draw with `scale`, every degree is equally likely and nothing lands outside the range: `randscale(8, [0, 3, 5, 7, 10], 48, 72)` is a pentatonic riff over two octaves.",
+    },
+];
+
 /// Names that exist but belong to neither table: `play` is intercepted before
 /// evaluation because it needs its instrument argument syntactically, and `dur`
 /// is not a function at all — it is the note length, bound only inside a voice.
@@ -1053,6 +1228,12 @@ pub fn math_builtin(name: &str) -> Option<&'static ListBuiltin> {
     MATH_BUILTINS.iter().find(|b| b.name == name)
 }
 
+/// Look up a random builtin by name. `lowerer::random` reads its arities from
+/// here.
+pub fn random_builtin(name: &str) -> Option<&'static ListBuiltin> {
+    RANDOM_BUILTINS.iter().find(|b| b.name == name)
+}
+
 // ---------------------------------------------------------------------------
 // Note names.
 // ---------------------------------------------------------------------------
@@ -1133,8 +1314,8 @@ pub struct BuiltinInfo {
     pub arities: Vec<usize>,
     /// True when any count above the largest listed arity is also accepted.
     pub variadic: bool,
-    /// `"ugen"`, `"list"`, `"math"` or `"special"` — the editor colours and
-    /// ranks by this.
+    /// `"ugen"`, `"list"`, `"math"`, `"random"` or `"special"` — the editor
+    /// colours and ranks by this.
     pub category: &'static str,
     /// What may be written to the left of the dot that calls this name. The
     /// editor offers a name in method position only when the receiver it can
@@ -1187,6 +1368,17 @@ pub fn metadata() -> LanguageMetadata {
         doc: b.doc,
     });
 
+    let randoms = RANDOM_BUILTINS.iter().map(|b| BuiltinInfo {
+        name: b.name,
+        params: b.params,
+        arities: b.arities.to_vec(),
+        variadic: b.variadic,
+        category: "random",
+        receives: b.receives,
+        returns: b.returns,
+        doc: b.doc,
+    });
+
     let specials = SPECIALS.iter().map(|b| BuiltinInfo {
         name: b.name,
         params: b.params,
@@ -1199,7 +1391,7 @@ pub fn metadata() -> LanguageMetadata {
     });
 
     LanguageMetadata {
-        builtins: ugens.chain(lists).chain(maths).chain(specials).collect(),
+        builtins: ugens.chain(lists).chain(maths).chain(randoms).chain(specials).collect(),
         keywords: KEYWORDS,
     }
 }
@@ -1218,6 +1410,8 @@ mod tests {
             .iter()
             .map(|u| u.name)
             .chain(LIST_BUILTINS.iter().map(|b| b.name))
+            .chain(MATH_BUILTINS.iter().map(|b| b.name))
+            .chain(RANDOM_BUILTINS.iter().map(|b| b.name))
             .chain(SPECIALS.iter().map(|b| b.name))
         {
             assert!(!name.is_empty(), "a builtin has an empty name");
@@ -1303,7 +1497,7 @@ mod tests {
     /// signature help would run out of names mid-call.
     #[test]
     fn list_builtin_params_cover_their_arities() {
-        for b in LIST_BUILTINS.iter().chain(SPECIALS) {
+        for b in LIST_BUILTINS.iter().chain(MATH_BUILTINS).chain(RANDOM_BUILTINS).chain(SPECIALS) {
             assert!(!b.arities.is_empty() || b.params.is_empty(), "{}", b.name);
             if let Some(max) = b.arities.iter().max() {
                 assert!(
@@ -1328,8 +1522,21 @@ mod tests {
         let builtins = json["builtins"].as_array().unwrap();
         assert_eq!(
             builtins.len(),
-            UGENS.len() + LIST_BUILTINS.len() + MATH_BUILTINS.len() + SPECIALS.len()
+            UGENS.len()
+                + LIST_BUILTINS.len()
+                + MATH_BUILTINS.len()
+                + RANDOM_BUILTINS.len()
+                + SPECIALS.len()
         );
+
+        let rand = builtins
+            .iter()
+            .find(|b| b["name"] == "rand")
+            .expect("rand is missing");
+        assert_eq!(rand["category"], "random");
+        // The one shape no other table has: callable with no arguments at all,
+        // *and* with a receiver before the dot.
+        assert_eq!(rand["arities"], serde_json::json!([0, 2]));
 
         let m2h = builtins
             .iter()
@@ -1361,6 +1568,8 @@ mod tests {
             .iter()
             .map(|u| (u.name, u.doc))
             .chain(LIST_BUILTINS.iter().map(|b| (b.name, b.doc)))
+            .chain(MATH_BUILTINS.iter().map(|b| (b.name, b.doc)))
+            .chain(RANDOM_BUILTINS.iter().map(|b| (b.name, b.doc)))
             .chain(SPECIALS.iter().map(|b| (b.name, b.doc)))
         {
             assert!(!doc.trim().is_empty(), "{name} has no documentation");
@@ -1445,6 +1654,7 @@ mod receives_tests {
             "buffer" => "load(\"test.wav\")",
             "path" => "\"test.wav\"",
             "channel" => "0",
+            // A probability has to stay inside 0..=1, and 1 is in range.
             _ => "1",
         }
     }
@@ -1476,6 +1686,11 @@ mod receives_tests {
         params: &'static [&'static str],
         /// The fewest arguments it can be called with.
         arity: usize,
+        /// The fewest it can be called with *and still have a receiver*, which
+        /// is not the same number: `rand` takes none or two, so `rand()` is its
+        /// smallest call but `x.rand(y)` is its smallest one after a dot. Zero
+        /// only for `dur`, which has no call form at all.
+        method_arity: usize,
         /// False for `dur`, which is a binding rather than a function and so
         /// has no call form to probe.
         callable: bool,
@@ -1490,18 +1705,33 @@ mod receives_tests {
                 name: u.name,
                 params: u.params,
                 arity: u.params.len(),
+                method_arity: u.params.len(),
                 callable: true,
                 receives: u.receives,
                 returns: u.returns,
             })
-            .chain(LIST_BUILTINS.iter().chain(MATH_BUILTINS).chain(SPECIALS).map(|b| Entry {
-                name: b.name,
-                params: b.params,
-                arity: b.arities.iter().min().copied().unwrap_or(0),
-                callable: !b.arities.is_empty(),
-                receives: b.receives,
-                returns: b.returns,
-            }))
+            .chain(
+                LIST_BUILTINS
+                    .iter()
+                    .chain(MATH_BUILTINS)
+                    .chain(RANDOM_BUILTINS)
+                    .chain(SPECIALS)
+                    .map(|b| Entry {
+                        name: b.name,
+                        params: b.params,
+                        arity: b.arities.iter().min().copied().unwrap_or(0),
+                        method_arity: b
+                            .arities
+                            .iter()
+                            .copied()
+                            .filter(|a| *a >= 1)
+                            .min()
+                            .unwrap_or(0),
+                        callable: !b.arities.is_empty(),
+                        receives: b.receives,
+                        returns: b.returns,
+                    }),
+            )
             .collect()
     }
 
@@ -1513,13 +1743,13 @@ mod receives_tests {
     /// the bug this field exists to prevent.
     #[test]
     fn every_builtin_receives_what_it_declares() {
-        for Entry { name, params, arity, receives, .. } in callables() {
+        for Entry { name, params, method_arity, receives, .. } in callables() {
             if receives == ValueKind::Nothing {
                 continue;
             }
             for (receiver, src) in RECEIVERS {
                 let declared = accepts(receives, receiver);
-                let actual = compiles(src, name, params, arity);
+                let actual = compiles(src, name, params, method_arity);
                 assert_eq!(
                     declared, actual,
                     "{name} declares {receives:?}, so `{src}.{name}(..)` should {}, \
@@ -1534,8 +1764,9 @@ mod receives_tests {
     fn minimal_call(name: &str, params: &[&str], arity: usize) -> String {
         let args: Vec<&str> = params[..arity].iter().map(|p| filler(p)).collect();
         // The first parameter is filled here like any other, since nothing
-        // precedes this call.
-        let args = if params.is_empty() {
+        // precedes this call. A name callable with no arguments — `rand()` —
+        // has none to fill, even though it does have parameters.
+        let args = if args.is_empty() {
             Vec::new()
         } else {
             let mut a = args;

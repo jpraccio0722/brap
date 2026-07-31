@@ -1,4 +1,6 @@
 use std::rc::Rc;
+use rand::SeedableRng;
+use rand::rngs::SmallRng;
 use crate::scree_graph::environment::{Env, FunctionDef, Value};
 use crate::scree_graph::graph::ScreeGraph;
 use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
@@ -16,8 +18,10 @@ pub struct Lowerer {
     /// Zero at the top level; `.then` raises it while inlining the function it
     /// was handed, which is the whole of "start when the last one finished".
     pub play_start: f64,
-    /// Seeded per eval, so `choice` and `scramble` differ each time.
-    pub rng: u64,
+    /// Seeded per eval, so `choice`, `scramble` and the `rand` family differ
+    /// each time. `seed` replaces it with a fixed one, which is the whole of
+    /// how a lucky roll gets kept.
+    pub rng: SmallRng,
     /// The buffers this program's `load` calls name, decoded before lowering
     /// began. Empty for a program that names no file — and for every caller
     /// that has no business reading one.
@@ -31,14 +35,13 @@ pub struct Lowered {
     pub bindings: Vec<Binding>,
 }
 
-/// A nonzero seed that changes between evals.
-fn seed_from_clock() -> u64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0x9E37_79B9_7F4A_7C15)
-        | 1
+/// A fresh RNG for one eval.
+///
+/// Drawn from the system source rather than the clock: two evals a keystroke
+/// apart used to be able to land in the same nanosecond and repeat themselves,
+/// which reads as a broken `choice` rather than as bad luck.
+pub fn fresh_rng() -> SmallRng {
+    SmallRng::from_rng(&mut rand::rng())
 }
 
 /// Lower a program that names no audio files.
@@ -89,7 +92,7 @@ fn lower_inner(
         depth: 0,
         bindings: Vec::new(),
         play_start: 0.0,
-        rng: seed_from_clock(),
+        rng: fresh_rng(),
         samples,
     };
 
