@@ -29,10 +29,9 @@ use std::path::{Path, PathBuf};
 use crate::imports::EXTENSION;
 use reroute::Unfollowed;
 
-/// Folders a walk never goes into.
+/// Folders a walk never goes into, on top of the hidden ones every walk skips.
 ///
-/// Hidden ones because a project's `.git` is not part of the project, and these
-/// two because a walk that reads them costs more than everything else put
+/// These two because a walk that reads them costs more than everything else put
 /// together — and finds only files nobody wrote.
 const SKIPPED: [&str; 2] = ["node_modules", "target"];
 
@@ -65,8 +64,15 @@ pub fn walk(root: &Path) -> Vec<PathBuf> {
             let name = name.to_string_lossy();
             let Ok(kind) = entry.file_type() else { continue };
 
+            // Hidden either way: a search that turned up a line in a file the
+            // tree does not show is a result nobody can open from where they
+            // are standing.
+            if name.starts_with('.') {
+                continue;
+            }
+
             if kind.is_dir() {
-                if name.starts_with('.') || SKIPPED.contains(&name.as_ref()) {
+                if SKIPPED.contains(&name.as_ref()) {
                     continue;
                 }
                 folders.push(entry.path());

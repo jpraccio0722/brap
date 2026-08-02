@@ -195,6 +195,8 @@ fn a_walk_skips_hidden_and_generated_folders() {
     std::fs::write(root.join("song.scree"), "").expect("should write");
     std::fs::create_dir_all(root.join(".git")).expect("should create");
     std::fs::write(root.join(".git/HEAD"), "").expect("should write");
+    // A hidden file out in the open, which the tree does not show either.
+    std::fs::write(root.join(".env"), "").expect("should write");
     std::fs::create_dir_all(root.join("node_modules/thing")).expect("should create");
     std::fs::write(root.join("node_modules/thing/index.js"), "").expect("should write");
     std::fs::create_dir_all(root.join("lib")).expect("should create");
