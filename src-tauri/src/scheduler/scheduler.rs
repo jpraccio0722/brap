@@ -5,12 +5,13 @@
 //! inversion is what keeps the clock running across re-evals.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use fundsp::prelude64::AudioUnit;
 use fundsp::sequencer::{EventId, Fade, Sequencer};
 
+use crate::diagnostic::{Diagnostic, Stage};
 use crate::pattern::pattern::Span;
 use crate::pattern::patterns::Patterns;
 use crate::scheduler::clock::Clock;
@@ -26,6 +27,10 @@ pub(crate) const TICK: Duration = Duration::from_millis(25);
 const FADE_IN_SECS: f64 = 0.005;
 const FADE_OUT_SECS: f64 = 0.02;
 
+/// Where a failure the scheduler cannot recover from is sent. The app sets one
+/// that emits to the editor; tests set one that records.
+type Reporter = Box<dyn Fn(Diagnostic) + Send + Sync>;
+
 /// Shared handles the scheduler reads each pass. An eval swaps their contents.
 #[derive(Clone)]
 pub struct SchedulerState {
@@ -35,6 +40,10 @@ pub struct SchedulerState {
     /// patterns stops *new* voices; only the thread that owns the sequencer
     /// can cut the ones already pushed into the lookahead window.
     stop: Arc<AtomicBool>,
+    /// Installed once at startup. A `OnceLock` rather than a field set at
+    /// construction because the thing it reports to — the Tauri handle — does
+    /// not exist until after this state has been made.
+    report: Arc<OnceLock<Reporter>>,
 }
 
 impl SchedulerState {
@@ -43,7 +52,14 @@ impl SchedulerState {
             patterns: Arc::new(Mutex::new(Patterns::default())),
             instruments: Arc::new(Mutex::new(Instruments::default())),
             stop: Arc::new(AtomicBool::new(false)),
+            report: Arc::new(OnceLock::new()),
         }
+    }
+
+    /// Say where a playback failure should go. Call once, at startup; a second
+    /// call is ignored rather than replacing a live handler mid-performance.
+    pub fn on_error(&self, report: impl Fn(Diagnostic) + Send + Sync + 'static) {
+        let _ = self.report.set(Box::new(report));
     }
 
     /// Ask the scheduler thread to silence everything it has pushed.
@@ -57,6 +73,30 @@ impl SchedulerState {
 
     fn take_stop(&self) -> bool {
         self.stop.swap(false, Ordering::Acquire)
+    }
+
+    /// Halt playback and say why.
+    ///
+    /// A pattern that cannot be turned into a voice fails on every event of
+    /// every cycle, for as long as it is bound: logging and carrying on means
+    /// an error nobody sees, scrolling past in a console, while the music
+    /// silently drops the notes it names. So the bindings go — which is what
+    /// `stop_audio` does to end a performance — the pushed voices are cut by
+    /// the flag, and the editor is told what happened.
+    fn fail(&self, message: impl Into<String>) {
+        let diagnostic = Diagnostic::message(Stage::Scheduler, message);
+        eprintln!("scheduler: {diagnostic}");
+
+        // A poisoned lock is one of the things reported here, so a failure to
+        // clear must not stop the rest: the stop flag alone still silences.
+        if let Ok(mut patterns) = self.patterns.lock() {
+            *patterns = Patterns::default();
+        }
+        self.request_stop();
+
+        if let Some(report) = self.report.get() {
+            report(diagnostic);
+        }
     }
 }
 
@@ -134,6 +174,10 @@ fn retire(live: &mut Vec<Live>, now_secs: f64) {
 /// One pass of the loop: query the horizon, push whatever falls in it, and
 /// return the new watermark. Split out from `run` so it can be tested without
 /// threads or sleeping.
+///
+/// `None` means the pass was abandoned — by a stop, or by a failure that raised
+/// one. Either way the loop's next tick sees the flag and cuts what is still
+/// sounding, so a pass never has to unwind what it pushed.
 fn schedule_pass(
     seq: &mut Sequencer,
     clock: &Clock,
@@ -171,8 +215,8 @@ fn schedule_pass(
             p.query(Span::new(from, horizon))
         }
         Err(e) => {
-            eprintln!("scheduler: patterns lock poisoned: {e}");
-            return next;
+            state.fail(format!("patterns lock poisoned: {e}"));
+            return None;
         }
     };
     if events.is_empty() {
@@ -183,8 +227,8 @@ fn schedule_pass(
     let instruments = match state.instruments.lock() {
         Ok(i) => i.clone(),
         Err(e) => {
-            eprintln!("scheduler: instruments lock poisoned: {e}");
-            return next;
+            state.fail(format!("instruments lock poisoned: {e}"));
+            return None;
         }
     };
 
@@ -201,9 +245,14 @@ fn schedule_pass(
         match build_voice(
             &instruments, &bound.instrument, bound.event.value, &bound.args, dur_secs,
         ) {
-            // A bad instrument must not kill the thread: log it and let the
-            // rest of the pattern keep playing.
-            Err(e) => eprintln!("scheduler: {}: {e}", bound.instrument),
+            // An instrument that will not build is a broken program, and it
+            // will not build for the next event either — the same failure once
+            // per step, forever. Halting on the first one puts it in front of
+            // the person who can fix it instead.
+            Err(e) => {
+                state.fail(format!("{}: {e}", bound.instrument));
+                return None;
+            }
             Ok(net) => {
                 if let Some(id) = push_voice(seq, begin_secs, dur_secs, net) {
                     live.push(Live { id, end_secs: begin_secs + dur_secs });
@@ -564,11 +613,87 @@ mod pass_tests {
         assert!(peak_over(&mut seq, 4410) == 0.0);
     }
 
-    /// A pattern naming an instrument that does not exist logs and continues.
+    /// Everything a reporter was told, in order.
+    fn recording(state: &SchedulerState) -> Arc<Mutex<Vec<Diagnostic>>> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        state.on_error(move |d| sink.lock().unwrap().push(d));
+        seen
+    }
+
+    /// A binding whose instrument cannot be built, which is what a program with
+    /// a typo inside an `fn` reaches the scheduler as.
+    fn state_with_broken_instrument() -> SchedulerState {
+        let s = SchedulerState::new();
+        let ast = parse("fn kick808(f) = sin(onsset)\n".to_string()).unwrap();
+        *s.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *s.patterns.lock().unwrap() = Patterns {
+            bindings: vec![Binding {
+                instrument: "kick808".into(),
+                pattern: Pattern::steps(vec![Some(50.0), Some(50.0)]),
+                lanes: Vec::new(),
+                start: 0.0,
+                cycles: None, repeat: None, choice: None }],
+            ..Default::default()
+        };
+        s
+    }
+
+    /// The reported behaviour: an instrument that will not build used to log
+    /// `scheduler: kick808: unbound name: onsset` once per step and play on
+    /// silently. It must stop instead, and say so.
     #[test]
-    fn missing_instrument_does_not_stop_the_pass() {
+    fn a_broken_instrument_halts_playback_and_is_reported() {
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let state = state_with_broken_instrument();
+        let seen = recording(&state);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        let mut live = Vec::new();
+
+        let mark = schedule_pass(&mut seq, &clock, &state, None, &mut live);
+        assert!(mark.is_none(), "a failed pass must not claim a watermark");
+        assert!(live.is_empty(), "nothing should have been pushed");
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "one failure, one report: {seen:?}");
+        assert_eq!(seen[0].stage, Stage::Scheduler);
+        assert!(
+            seen[0].message.contains("kick808") && seen[0].message.contains("unbound name"),
+            "the message should name the instrument and the fault: {}",
+            seen[0].message,
+        );
+    }
+
+    /// Ceasing means ceasing: the bindings are dropped and the stop flag is up,
+    /// so the loop's next tick cuts the lookahead window and no later pass
+    /// finds the same broken instrument to report again.
+    #[test]
+    fn a_failure_stops_the_patterns_rather_than_reporting_every_step() {
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let state = state_with_broken_instrument();
+        let seen = recording(&state);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+
+        pass(&mut seq, &clock, &state, None);
+        assert!(state.patterns.lock().unwrap().is_empty(), "the bindings should be gone");
+        assert!(state.take_stop(), "the pushed voices should have been marked for cutting");
+
+        // Several ticks on, with the clock moving under it.
+        for _ in 0..4 {
+            clock.advance(44100 / 4);
+            pass(&mut seq, &clock, &state, None);
+        }
+        assert_eq!(seen.lock().unwrap().len(), 1, "the failure should be reported once");
+    }
+
+    /// A pattern naming an instrument that does not exist is the same kind of
+    /// fault, reached by a different route: nothing to build rather than
+    /// something that will not build.
+    #[test]
+    fn a_missing_instrument_is_reported_too() {
         let clock = Clock::with_cps(44100.0, 1.0);
         let state = SchedulerState::new();
+        let seen = recording(&state);
         *state.patterns.lock().unwrap() = Patterns {
             bindings: vec![Binding {
                 instrument: "ghost".into(),
@@ -580,8 +705,36 @@ mod pass_tests {
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
 
-        let mark = pass(&mut seq, &clock, &state, None);
-        assert!(mark.is_some(), "pass should complete despite the bad instrument");
+        assert!(pass(&mut seq, &clock, &state, None).is_none());
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert!(seen[0].message.contains("ghost"), "got: {}", seen[0].message);
+    }
+
+    /// A scheduler nobody is listening to must still stop — the reporter is
+    /// installed by the app, and every test above this one runs without it.
+    #[test]
+    fn a_failure_without_a_reporter_still_halts() {
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let state = state_with_broken_instrument();
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+
+        assert!(pass(&mut seq, &clock, &state, None).is_none());
+        assert!(state.patterns.lock().unwrap().is_empty());
+    }
+
+    /// A working pattern reports nothing, which is what says the reports above
+    /// come from the fault rather than from playing at all.
+    #[test]
+    fn a_good_pass_reports_nothing() {
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let state = state_with_kick(vec![Some(220.0)]);
+        let seen = recording(&state);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+
+        assert!(pass(&mut seq, &clock, &state, None).is_some());
+        assert!(seen.lock().unwrap().is_empty());
     }
 
     /// The bug this guards: a stop that clears the patterns still leaves the

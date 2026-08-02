@@ -560,6 +560,14 @@ const MENU_SAVE: &str = "file-save";
 const MENU_NEW_PROJECT: &str = "project-new";
 const MENU_OPEN_PROJECT: &str = "project-open";
 
+/// The event a playback failure reaches the editor on.
+///
+/// Not a command's return value, because nothing asked: the scheduler free-runs
+/// on its own thread, and the note that fails to build is being built cycles
+/// after the eval that bound it. The payload is a `Diagnostic`, the same shape
+/// a refused eval comes back as, so the problems panel needs no second reader.
+const SCHEDULER_ERROR: &str = "scheduler-error";
+
 /// Every id the File menu can raise. The event handler forwards these and
 /// ignores anything else, so the platform's own items keep working.
 const FILE_ITEMS: [&str; 5] = [
@@ -739,6 +747,13 @@ pub fn run() {
             let (engine, seq) = engine::start()?;
             let clock = engine.clock.clone();
             let sched = SchedulerState::new();
+
+            // Before the thread starts, so a failure in its very first pass
+            // has somewhere to go.
+            let handle = app.handle().clone();
+            sched.on_error(move |diagnostic| {
+                let _ = handle.emit(SCHEDULER_ERROR, diagnostic);
+            });
 
             // Free-runs for the life of the app; evals only swap what it reads.
             scheduler::scheduler::start(seq, clock, sched.clone());

@@ -16,6 +16,7 @@ import { DocsPanel, type DocsFocus } from "./DocsPanel";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
 import { ProjectPanel } from "./ProjectPanel";
 import { PatternComposer } from "./PatternComposer";
+import { PlaybackAlert } from "./PlaybackAlert";
 import { RightPanel, type RightTab } from "./RightPanel";
 import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
@@ -219,6 +220,11 @@ function App() {
   // Which tab the diagnostics describe. They outlive the run, and the editor
   // may well have moved to another file by the time they are read.
   const [sourceTabId, setSourceTabId] = useState<string | null>(null);
+  // A failure the scheduler raised while playing, which is the one kind that
+  // arrives without anyone having asked for it. It goes to the problems panel
+  // like every other, and is also said out loud over the editor — see
+  // `PlaybackAlert`. Null when there is nothing to say.
+  const [playbackError, setPlaybackError] = useState<Diagnostic | null>(null);
 
   // Drawn patterns belong to the project rather than to any one tab: they live
   // in its `patterns.scree`, which every file in the project can name without
@@ -821,6 +827,9 @@ function App() {
     // stop, which is about what the engine is holding, not about a tab.
     if (!codeTab) return;
     const tabId = codeTab.id;
+    // The last performance's failure is about a program that is no longer
+    // playing. Whether this one works or not, that notice is spent.
+    setPlaybackError(null);
     try {
       // The drawn patterns go with the code: they are bindings the program can
       // name, and an eval is the only moment they mean anything.
@@ -852,6 +861,31 @@ function App() {
       report(toDiagnostic(e, "could not stop the engine"), null);
     }
   }, [report]);
+
+  /**
+   * A note that would not build, raised by the scheduler thread mid-pattern.
+   *
+   * It has already dropped the bindings and cut what it had pushed — a voice it
+   * cannot build is one it cannot build for any later step either, so carrying
+   * on would be the same failure every cycle with nothing to hear for it. This
+   * side finishes the job: `stop_audio` takes down the persistent graph too and
+   * puts the clock back, so what is left is a real stop rather than a scheduler
+   * sitting out a performance the rest of the engine thinks is still going.
+   *
+   * Subscribed once. `report` and `stop` are stable, so this never re-binds —
+   * which matters here more than elsewhere, because re-subscribing is
+   * asynchronous and the event it might fall between is the one that says the
+   * music has stopped.
+   */
+  useEffect(() => {
+    const subscription = listen<Diagnostic>("scheduler-error", (event) => {
+      const diagnostic = toDiagnostic(event.payload, "playback failed");
+      setPlaybackError(diagnostic);
+      report(diagnostic, null);
+      void stop();
+    });
+    return () => void subscription.then((unlisten) => unlisten());
+  }, [report, stop]);
 
   const saveTab = useCallback(async () => {
     const tab = activeTab;
@@ -1143,7 +1177,13 @@ function App() {
             />
           }
         />
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {/* Positioned against this rather than the window: a playback failure
+              is about the code, and this is where the code is. */}
+          <PlaybackAlert
+            diagnostic={playbackError}
+            onDismiss={() => setPlaybackError(null)}
+          />
           {activeTab?.patternId ? (
             (() => {
               const pattern = patterns.find((p) => p.id === activeTab.patternId);

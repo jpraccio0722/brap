@@ -14,6 +14,7 @@ export type Stage =
   | "import"
   | "lower"
   | "realize"
+  | "scheduler"
   | "engine";
 
 export interface Diagnostic {
@@ -37,6 +38,7 @@ const STAGES: Stage[] = [
   "import",
   "lower",
   "realize",
+  "scheduler",
   "engine",
 ];
 
@@ -53,6 +55,9 @@ export const STAGE_LABEL: Record<Stage, string> = {
   import: "import",
   lower: "compile",
   realize: "audio graph",
+  // A note that failed while the pattern was playing, rather than a program
+  // that was refused before it ever started.
+  scheduler: "playback",
   // Broader here than the backend's own name for it: this side also files a
   // failed save, a failed open and a dead IPC call under the stage that is not
   // a compiler pass, and none of those are the audio engine.

@@ -28,6 +28,9 @@ pub enum Stage {
     Lower,
     /// Building the audio graph the engine runs.
     Realize,
+    /// Raised while a pattern was playing rather than while it compiled: an
+    /// instrument that only fails once a note asks it for a voice.
+    Scheduler,
     /// Not the program's fault: the engine or a lock was in a bad way.
     Engine,
 }
@@ -40,6 +43,7 @@ impl Stage {
             Stage::Import => "import error",
             Stage::Lower => "compile error",
             Stage::Realize => "audio graph error",
+            Stage::Scheduler => "playback error",
             Stage::Engine => "engine error",
         }
     }
