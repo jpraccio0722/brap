@@ -312,8 +312,11 @@ function Row({ entry, depth }: { entry: Entry; depth: number }) {
           if (!canDrop(ctx, dropInto)) {
             // Over a row nothing can land on — the dragged row itself, or a
             // folder inside it. Whatever was lit up a moment ago is not where
-            // this would go, so it stops being lit up.
+            // this would go, so it stops being lit up. The event stops here
+            // rather than reaching the panel behind, which would otherwise
+            // offer the project folder for a drop the pointer is not over.
             ctx.setDropTarget(null);
+            e.stopPropagation();
             return;
           }
           // Both, and the preventDefault on *over* rather than only on *enter*:
@@ -325,7 +328,12 @@ function Row({ entry, depth }: { entry: Entry; depth: number }) {
           ctx.setDropTarget(dropInto);
         }}
         onDrop={(e) => {
-          if (!canDrop(ctx, dropInto) || ctx.dragging === null || dropInto === null) return;
+          if (!canDrop(ctx, dropInto) || ctx.dragging === null || dropInto === null) {
+            // A drop the row cannot take is a drop that means nothing, not one
+            // for the panel behind it to take as a move to the top level.
+            e.stopPropagation();
+            return;
+          }
           e.preventDefault();
           e.stopPropagation();
           ctx.move(ctx.dragging, dropInto);
