@@ -15,8 +15,10 @@ import {
 import { DocsPanel, type DocsFocus } from "./DocsPanel";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
 import { ProjectPanel } from "./ProjectPanel";
+import { isWithin } from "./projectTree";
 import { PatternComposer } from "./PatternComposer";
 import { RightPanel, type RightTab } from "./RightPanel";
+import { SearchPanel } from "./SearchPanel";
 import { SidePanel, type SideTab } from "./SidePanel";
 import { toDiagnostic, type Diagnostic } from "./diagnostics";
 import { TransportPanel } from "./TransportPanel";
@@ -285,10 +287,12 @@ function App() {
          tabs.find(isCode) ??
          null);
 
-  /** Show a failure. Everything that can fail comes through here, so nothing
-   *  can fail quietly — which is what this panel exists to prevent. */
-  const report = useCallback((diagnostic: Diagnostic, tabId: string | null) => {
-    setDiagnostics([diagnostic]);
+  /** Show a set of failures. Everything that can fail comes through here or
+   *  through `report`, so nothing can fail quietly — which is what this panel
+   *  exists to prevent. */
+  const reportAll = useCallback((diagnostics: Diagnostic[], tabId: string | null) => {
+    if (diagnostics.length === 0) return;
+    setDiagnostics(diagnostics);
     setRunStatus("error");
     setSourceTabId(tabId);
     // Both, since the panel may well be open on the project tree instead: an
@@ -296,6 +300,12 @@ function App() {
     setSideOpen(true);
     setSideTab("problems");
   }, []);
+
+  /** Show one failure, which is what almost everything has. */
+  const report = useCallback(
+    (diagnostic: Diagnostic, tabId: string | null) => reportAll([diagnostic], tabId),
+    [reportAll],
+  );
 
   // The language's builtins, fetched once. Until it arrives the editor runs on
   // EMPTY_METADATA: syntax highlighting is already correct, only the builtin
@@ -600,6 +610,64 @@ function App() {
     return () => clearTimeout(timer);
   }, [projectName, transport, projectRoot, report]);
 
+  /**
+   * A file or folder has been renamed or dragged somewhere else in the tree.
+   *
+   * Open tabs follow it. A tab is a file, and it does not stop being the same
+   * file because the tree beside it moved — losing your place, or saving over
+   * the path it used to have, are both worse than any amount of bookkeeping.
+   *
+   * The project's own two files are re-read when the move touched either of
+   * them, because both have an editor here as well as a path: the patterns
+   * panel and the transport are showing what those files said, and after a
+   * rename that is no longer what they say.
+   */
+  const onMoved = useCallback(
+    (from: string, to: string) => {
+      setTabs((prev) =>
+        prev.map((tab) => {
+          if (tab.path === null || !isWithin(tab.path, from)) return tab;
+          const path = to + tab.path.slice(from.length);
+          return { ...tab, path, title: basename(path) };
+        }),
+      );
+
+      // Either end: a patterns file renamed away, or an ordinary file renamed
+      // into the name the project reads its patterns from.
+      const touched = (path: string | null) =>
+        path !== null && (isWithin(path, from) || path === to);
+
+      if (projectRoot !== null && touched(patternsPath)) void loadPatterns(projectRoot);
+      if (projectRoot !== null && touched(projectPath)) void loadProject(projectRoot);
+    },
+    [projectRoot, patternsPath, projectPath, loadPatterns, loadProject],
+  );
+
+  /**
+   * A file or folder has gone to the trash.
+   *
+   * Its tabs stay open, and are marked dirty. The buffer is the last copy of
+   * that work in the app, and closing the tab would throw it away on top of a
+   * delete the user may well have meant for the file on disk and not for what
+   * they had been typing — ⌘S writes it back out.
+   */
+  const onDeleted = useCallback(
+    (path: string) => {
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.path !== null && isWithin(tab.path, path) ? { ...tab, dirty: true } : tab,
+        ),
+      );
+      if (projectRoot !== null && patternsPath !== null && isWithin(patternsPath, path)) {
+        void loadPatterns(projectRoot);
+      }
+      if (projectRoot !== null && projectPath !== null && isWithin(projectPath, path)) {
+        void loadProject(projectRoot);
+      }
+    },
+    [projectRoot, patternsPath, projectPath, loadPatterns, loadProject],
+  );
+
   // The completion source reads the drawn patterns through a ref so a rename
   // in the panel shows up in the next completion without touching the
   // extension array — whose identity must stay stable, since CodeMirror
@@ -722,6 +790,15 @@ function App() {
    *  that file's editor exists to take the keyboard. */
   const [pendingFocus, setPendingFocus] = useState(false);
 
+  /** Where the cursor is on its way to, from a click in the problems panel or
+   *  the search results. Pending because both may have to open a tab first, and
+   *  the view for that tab does not exist until it has mounted — so the jump is
+   *  held here and made once there is somewhere to jump in. */
+  const [pendingReveal, setPendingReveal] = useState<{
+    line: number | null;
+    column: number | null;
+  } | null>(null);
+
   /**
    * Open the project's patterns file from the panel's heading.
    *
@@ -733,6 +810,22 @@ function App() {
   const openPatternsFile = useCallback(
     async (path: string) => {
       if (await openPath(path)) setPendingFocus(true);
+    },
+    [openPath],
+  );
+
+  /**
+   * Open a file at a position, which is what a search result is a link to.
+   *
+   * The focus goes with it: clicking a result is asking to be at that line,
+   * not to look at it from the panel. Both wait for the tab the way the
+   * diagnostic jump does — a tab that has just been added has no editor yet.
+   */
+  const openAt = useCallback(
+    async (path: string, line: number, column: number) => {
+      if (!(await openPath(path))) return;
+      setPendingReveal({ line, column });
+      setPendingFocus(true);
     },
     [openPath],
   );
@@ -970,25 +1063,21 @@ function App() {
     showErrorLines(activeView, sourceTabId === activeId ? errorLines : []);
   }, [activeView, errorLines, sourceTabId, activeId]);
 
-  // A click in the panel may have to switch tabs first, and the view for that
-  // tab does not exist until it has mounted — so the jump is left pending and
-  // made once there is somewhere to jump in.
-  const [pendingReveal, setPendingReveal] = useState<Diagnostic | null>(null);
-
   const revealDiagnostic = useCallback(
     (diagnostic: Diagnostic) => {
+      const at = { line: diagnostic.line, column: diagnostic.column };
       // A diagnostic from an imported module is about that file, so the click
       // opens it. The jump waits for the open: until the tab exists there is
       // no editor to move the cursor in, and moving it in the old one would
       // put it on an unrelated line.
       if (diagnostic.file !== null) {
         void openPath(diagnostic.file).then((opened) => {
-          if (opened) setPendingReveal(diagnostic);
+          if (opened) setPendingReveal(at);
         });
         return;
       }
       if (sourceTabId && sourceTabId !== activeId) setActiveId(sourceTabId);
-      setPendingReveal(diagnostic);
+      setPendingReveal(at);
     },
     [openPath, sourceTabId, activeId],
   );
@@ -1158,15 +1247,25 @@ function App() {
           }
           project={
             <ProjectPanel
-              // Remounts the tree, which is how a refresh throws away every
-              // listing it is holding.
-              key={projectVersion}
               root={projectRoot}
               name={projectName}
               onRename={setProjectName}
+              // Throws away every listing the tree is holding, which is how a
+              // refresh — or a new project — is picked up.
+              version={projectVersion}
               activePath={activeTab?.path ?? null}
               onOpenFile={(path) => void openPath(path)}
               onRefresh={() => setProjectVersion((v) => v + 1)}
+              onMoved={onMoved}
+              onDeleted={onDeleted}
+              onProblems={(diagnostics) => reportAll(diagnostics, null)}
+            />
+          }
+          search={
+            <SearchPanel
+              root={projectRoot}
+              version={projectVersion}
+              onOpen={(path, line, column) => void openAt(path, line, column)}
             />
           }
         />

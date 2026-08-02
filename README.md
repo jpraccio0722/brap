@@ -42,6 +42,31 @@ where you left it, and the file appears the first time you move something (or
 straight away, for `New Project…`).
 
 
+## The project panel
+
+The panel on the left shows the folder, and you can work in it rather than
+switching to Finder to do so.
+
+| | |
+|---|---|
+| New file, new folder | The two buttons at the top, or the right-click menu. Both make whatever folders the name asks for, so `lib/drums.scree` is one step. |
+| Rename | Right-click ▸ Rename, or `F2`. The extension is left out of the selection, and a name with a `/` in it moves the file as well as renaming it. |
+| Move | Drag a row onto a folder. The folder lights up when it will take the drop; dropping below the tree moves to the top level. |
+| Delete | Right-click ▸ Delete, or `⌘⌫`. Goes to the Trash, so the way back is the one you already know. |
+
+Nothing is overwritten: a rename or a drop onto a name that already exists is
+refused, and says so in the problems panel.
+
+Open tabs follow their files. Renaming a file you are editing renames its tab;
+deleting one leaves the tab open and marks it unsaved, so `⌘S` writes your work
+back out rather than the delete taking it with it.
+
+**Search** is the second tab, and looks through the text of every file in the
+project. Results are grouped by file and each one is a link — click it and the
+file opens with the cursor on that line. `Aa` matches case and `ab` matches
+whole words.
+
+
 ## Imports
 
 A file can use another file's definitions. The spelling is Rust's:
@@ -59,6 +84,22 @@ Top level expressions and `play`s in the imported file do not run.
 
 Imports resolve relative to the file on disk, and read what is saved: save a
 module before playing a file that uses it.
+
+Because a path is a route rather than a name, renaming or moving a file in the
+project panel would change what every `use` of it means. So the panel corrects
+them: the paths are rewritten to point where the file went, and nothing else in
+those files is touched. A whole-module import keeps the name it was bound
+under, so the body of the importing file still reads the same —
+
+```rust
+use drums               // rename drums.scree to percussion.scree, and this
+use percussion as drums // becomes this, so every drums::kick still resolves
+```
+
+A `use` path only goes downward: there is no way to name a folder above the one
+you are in. Drag a module somewhere its importer cannot reach and no rewrite is
+honest, so the move still happens and the imports that broke are named in the
+problems panel.
 
 Everything else follows from names. An imported `fn` is an instrument like any
 other, qualified or not:

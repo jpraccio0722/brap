@@ -24,6 +24,7 @@ mod pattern;
 mod scheduler;
 mod diagnostic;
 mod engine;
+mod files;
 mod imports;
 mod parser;
 mod scree_graph;
@@ -741,6 +742,11 @@ pub fn run() {
             recent_session,
             set_recent_session,
             list_dir,
+            files::create_dir,
+            files::create_file,
+            files::move_path,
+            files::delete_path,
+            files::search::search_project,
             language_metadata
         ])
         .setup(|app| {
