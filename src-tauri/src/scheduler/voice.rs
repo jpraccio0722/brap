@@ -3,7 +3,7 @@
 
 use fundsp::net::Net;
 
-use crate::scree_graph::realizer::realize;
+use crate::scree_graph::realizer::{realize, tail_secs};
 use crate::lowerer::lower::lower_voice;
 use crate::parser::parser::{Arg, ScreeItem, Expr, Ident};
 use crate::pattern::patterns::PAN;
@@ -70,6 +70,17 @@ impl Instruments {
 /// takes 3 dB of gain and the other is silent.
 const CENTRE_UNITY: f32 = std::f32::consts::SQRT_2;
 
+/// A built voice: the network to play, and how long it goes on after its note.
+///
+/// The tail is the instrument's business rather than the pattern's — it comes
+/// out of the envelopes inside it — but only the scheduler can act on it, by
+/// giving the sequencer event that much more room than the note itself. Zero
+/// for an instrument that ends with its note, which is most of them.
+pub struct Voice {
+    pub net: Net,
+    pub tail_secs: f64,
+}
+
 /// Lower and realize `instrument(value, name: v, ...)` into a playable
 /// 0-in / 2-out network.
 ///
@@ -87,7 +98,7 @@ pub fn build_voice(
     value: f64,
     lanes: &[(String, f64)],
     dur_secs: f64,
-) -> Result<Net, String> {
+) -> Result<Voice, String> {
     let Some(params) = instruments.param_count(instrument) else {
         return Err(format!("no instrument named `{instrument}`"));
     };
@@ -108,11 +119,14 @@ pub fn build_voice(
     }));
 
     let lowered = lower_voice(&items, dur_secs, instruments.samples.clone())?;
-    let voice = realize(&lowered.graph)?;
+    let net = realize(&lowered.graph)?;
 
     // `play` refuses a lane given twice, so at most one of these exists.
     let pan = lanes.iter().find(|(name, _)| name == PAN).map(|(_, v)| *v);
-    Ok(place(voice, pan.unwrap_or(0.0)))
+    Ok(Voice {
+        net: place(net, pan.unwrap_or(0.0)),
+        tail_secs: tail_secs(&lowered.graph, dur_secs),
+    })
 }
 
 /// Put a finished voice somewhere in the stereo field.
@@ -164,7 +178,7 @@ mod tests {
     #[test]
     fn voice_is_stereo_and_sourceless() {
         let ins = instruments("fn kick(f) = sin(f) / 4\n");
-        let net = build_voice(&ins, "kick", 220.0, &[], 1.0).expect("should build");
+        let net = build_voice(&ins, "kick", 220.0, &[], 1.0).expect("should build").net;
         assert_eq!(net.inputs(), 0);
         assert_eq!(net.outputs(), 2);
     }
@@ -173,7 +187,7 @@ mod tests {
     #[test]
     fn event_value_reaches_the_instrument() {
         let ins = instruments("fn tone(f) = sin(f)\n");
-        let mut net = build_voice(&ins, "tone", 110.0, &[], 1.0).expect("should build");
+        let mut net = build_voice(&ins, "tone", 110.0, &[], 1.0).expect("should build").net;
         net.set_sample_rate(44100.0);
 
         let samples: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
@@ -194,7 +208,7 @@ mod tests {
     #[test]
     fn voices_may_use_language_features() {
         let ins = instruments("fn rich(f) = for i in 1..=3 { sin(f * i) / 6 }\n");
-        let net = build_voice(&ins, "rich", 110.0, &[], 1.0).expect("should build");
+        let net = build_voice(&ins, "rich", 110.0, &[], 1.0).expect("should build").net;
         assert_eq!(net.outputs(), 2);
     }
 
@@ -208,7 +222,7 @@ mod tests {
         // reads back what the draw was.
         let ins = instruments("fn tone(f) = sin(f + randi(0, 40))\n");
         let crossings = |_| {
-            let mut net = build_voice(&ins, "tone", 200.0, &[], 1.0).expect("should build");
+            let mut net = build_voice(&ins, "tone", 200.0, &[], 1.0).expect("should build").net;
             net.set_sample_rate(44100.0);
             let samples: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
             samples.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
@@ -240,7 +254,7 @@ mod tests {
     // ---- lanes ----
 
     fn rising_crossings(ins: &Instruments, lanes: &[(String, f64)]) -> usize {
-        let mut net = build_voice(ins, "tone", 110.0, lanes, 1.0).expect("should build");
+        let mut net = build_voice(ins, "tone", 110.0, lanes, 1.0).expect("should build").net;
         net.set_sample_rate(44100.0);
         let s: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
         s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count()
@@ -302,7 +316,7 @@ mod tests {
     /// hide the whole feature.
     fn peaks(lanes: &[(String, f64)]) -> (f32, f32) {
         let ins = instruments("fn tone(n) = sin(n)\n");
-        let mut net = build_voice(&ins, "tone", 110.0, lanes, 1.0).expect("should build");
+        let mut net = build_voice(&ins, "tone", 110.0, lanes, 1.0).expect("should build").net;
         net.set_sample_rate(44100.0);
 
         let mut frame = [0.0f32; 2];
@@ -449,7 +463,7 @@ mod tests {
         let ins = sampling_instruments(
             "fn chop(n) = sample(load(\"break.wav\"), ramp(n))\n");
 
-        let mut net = build_voice(&ins, "chop", 1.0, &[], 1.0).expect("should build");
+        let mut net = build_voice(&ins, "chop", 1.0, &[], 1.0).expect("should build").net;
         assert_eq!(net.outputs(), 2);
         net.set_sample_rate(44100.0);
 
@@ -480,7 +494,7 @@ mod tests {
 
         let render = |at: f64| {
             let lanes = vec![("at".to_string(), at)];
-            let mut net = build_voice(&ins, "chop", 1.0, &lanes, 1.0).expect("should build");
+            let mut net = build_voice(&ins, "chop", 1.0, &lanes, 1.0).expect("should build").net;
             net.set_sample_rate(44100.0);
             // A tenth of a second in, well inside the quarter being read.
             (0..4410).map(|_| net.get_mono()).last().expect("a sample")
@@ -530,25 +544,69 @@ play([110, 165], bass, 0.5)
         assert!(ins.has("kick") && ins.has("bass"));
     }
 
-    /// Both instruments build into playable voices and go quiet by note end.
+    /// Both instruments build into playable voices, sound at once, and are
+    /// finished by the time the voice's own lifetime is up — the note plus
+    /// whatever tail it declared.
     #[test]
     fn enveloped_voices_start_immediately_and_decay() {
         let ins = Instruments::from_program(&parse(PROGRAM.to_string()).unwrap());
 
         for (name, freq, dur) in [("kick", 55.0, 1.0), ("bass", 110.0, 1.0)] {
-            let mut net = build_voice(&ins, name, freq, &[], dur).expect("should build");
+            let voice = build_voice(&ins, name, freq, &[], dur).expect("should build");
+            let mut net = voice.net;
             assert_eq!(net.outputs(), 2);
             net.set_sample_rate(44100.0);
 
-            let s: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+            let frames = ((dur + voice.tail_secs) * 44100.0) as usize;
+            let s: Vec<f32> = (0..frames).map(|_| net.get_mono()).collect();
             // Audible within the first 50 ms — no swallowed first note.
             let onset = s[..2205].iter().fold(0.0f32, |m, v| m.max(v.abs()));
-            // The last millisecond: `env`'s release lands exactly on `dur`, so
-            // anything earlier is still legitimately ringing out.
-            let tail = s[44050..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+            // The last millisecond: the release lands exactly on the end of the
+            // voice, so anything earlier is still legitimately ringing out.
+            let tail = s[frames - 50..].iter().fold(0.0f32, |m, v| m.max(v.abs()));
             assert!(onset > 0.05, "{name} should sound immediately, got {onset}");
-            assert!(tail < 0.02, "{name} should be quiet by the note end, got {tail}");
+            assert!(tail < 0.02, "{name} should be quiet by the voice's end, got {tail}");
         }
+    }
+
+    /// A voice says how much longer than its note it needs, and the scheduler
+    /// gives it that and no more. The two envelopes answer differently: the
+    /// `env` in the bass always wants its release, while the `perc` in the
+    /// kick wants nothing from a note its shape already fits inside.
+    #[test]
+    fn a_voice_reports_the_time_it_needs_after_its_note() {
+        let ins = Instruments::from_program(&parse(PROGRAM.to_string()).unwrap());
+
+        let kick = build_voice(&ins, "kick", 55.0, &[], 1.0).expect("should build");
+        let bass = build_voice(&ins, "bass", 110.0, &[], 1.0).expect("should build");
+
+        assert_eq!(kick.tail_secs, 0.0, "a second is room enough for a 0.251 s drum");
+        assert!((bass.tail_secs - 0.2).abs() < 1e-6, "got {}", bass.tail_secs);
+    }
+
+    /// `legato` shortens the held part of the note and leaves the release
+    /// alone: the same instrument on a shorter note still rings out as long.
+    #[test]
+    fn a_shorter_note_keeps_the_same_release() {
+        let ins = Instruments::from_program(&parse(PROGRAM.to_string()).unwrap());
+
+        let long = build_voice(&ins, "bass", 110.0, &[], 1.0).expect("should build");
+        let short = build_voice(&ins, "bass", 110.0, &[], 0.05).expect("should build");
+        assert_eq!(long.tail_secs, short.tail_secs);
+    }
+
+    /// A drum on a step shorter than its own shape asks for the difference,
+    /// so a slow kick on a fast pattern rings out instead of being clipped.
+    #[test]
+    fn a_drum_asks_for_room_only_when_the_step_is_too_short() {
+        let ins = Instruments::from_program(&parse(PROGRAM.to_string()).unwrap());
+
+        // perc(0.001, 0.25) is 0.251 s of shape, against a 0.125 s step.
+        let cramped = build_voice(&ins, "kick", 55.0, &[], 0.125).expect("should build");
+        assert!((cramped.tail_secs - 0.126).abs() < 1e-6, "got {}", cramped.tail_secs);
+
+        let roomy = build_voice(&ins, "kick", 55.0, &[], 0.5).expect("should build");
+        assert_eq!(roomy.tail_secs, 0.0, "half a second already covers it");
     }
 }
 
@@ -572,7 +630,7 @@ fn kick(f) = {
         let ins = Instruments::from_program(
             &crate::parser::parser::parse(KICK.to_string()).expect("parse failed"),
         );
-        let mut net = build_voice(&ins, "kick", freq, &[], dur).expect("should build");
+        let mut net = build_voice(&ins, "kick", freq, &[], dur).expect("should build").net;
         net.set_sample_rate(44100.0);
         (0..(secs * 44100.0) as usize).map(|_| net.get_mono()).collect()
     }
@@ -631,7 +689,7 @@ mod zero_param_tests {
         let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
         assert_eq!(ins.param_count("kick"), Some(0));
 
-        let mut net = build_voice(&ins, "kick", 1.0, &[], 1.0).expect("should build");
+        let mut net = build_voice(&ins, "kick", 1.0, &[], 1.0).expect("should build").net;
         assert_eq!(net.outputs(), 2);
         net.set_sample_rate(44100.0);
 
@@ -646,7 +704,7 @@ mod zero_param_tests {
         let ins = instruments("fn kick() = sin(50) * perc(0.002, 0.3)\n");
 
         let render = |v: f64| {
-            let mut net = build_voice(&ins, "kick", v, &[], 1.0).unwrap();
+            let mut net = build_voice(&ins, "kick", v, &[], 1.0).unwrap().net;
             net.set_sample_rate(44100.0);
             (0..4410).map(|_| net.get_mono()).collect::<Vec<f32>>()
         };

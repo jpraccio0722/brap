@@ -30,6 +30,62 @@ fn ads_level(t: f64, attack: f64, decay: f64, sustain: f64) -> f64 {
     }
 }
 
+/// The input indices the two time-based envelopes take their times from.
+const ENV_RELEASE_INPUT: usize = 3;
+const PERC_ATTACK_INPUT: usize = 0;
+const PERC_RELEASE_INPUT: usize = 1;
+
+/// A construction-time constant that is a usable length in seconds.
+///
+/// `None` for anything else, which is a graph the realizer is about to refuse
+/// or a time that would mean nothing anyway — either way not a reason to hold
+/// a voice open.
+fn const_secs(n: &UGenNode, idx: usize) -> Option<f64> {
+    match n.inputs.get(idx) {
+        Some(NodeInput::Const(v)) if v.is_finite() && *v >= 0.0 => Some(*v),
+        _ => None,
+    }
+}
+
+/// How long one envelope goes on past the end of its note, or `None` for a
+/// node that is not one.
+///
+/// The two shapes are anchored differently, which is the whole of why this is
+/// not simply "the release time": `env` hangs its release off the end of the
+/// note, so that release is the tail whatever the note was, while `perc`
+/// measures its own shape from the onset and does not know the note exists —
+/// it asks for room only when it does not fit. Must be kept in step with
+/// `NodeKind::Env` and `NodeKind::Perc` below.
+fn envelope_tail(n: &UGenNode, dur_secs: f64) -> Option<f64> {
+    match n.kind {
+        NodeKind::Env => Some(const_secs(n, ENV_RELEASE_INPUT)?),
+        NodeKind::Perc => Some(
+            (const_secs(n, PERC_ATTACK_INPUT)? + const_secs(n, PERC_RELEASE_INPUT)? - dur_secs)
+                .max(0.0),
+        ),
+        _ => None,
+    }
+}
+
+/// How long a graph goes on sounding past the end of its note.
+///
+/// A voice is only rendered for as long as its sequencer event lasts, so an
+/// envelope that has not finished by then is cut off mid-shape — a rest after
+/// a long `env` release, or a drum whose `perc` outlasts the step it sits on,
+/// used to be silence where the instrument should still have been ringing.
+/// This is what the scheduler adds to the note to give it room.
+///
+/// The longest tail wins: several envelopes in one voice all have to finish.
+/// Zero for a voice that ends with its note, which is the usual case and why
+/// most voices stop exactly on their step.
+pub fn tail_secs(graph: &ScreeGraph, dur_secs: f64) -> f64 {
+    graph
+        .nodes
+        .iter()
+        .filter_map(|n| envelope_tail(n, dur_secs))
+        .fold(0.0, f64::max)
+}
+
 /// Pull input `idx` as a construction-time constant. Parameters like ADSR
 /// times are baked into the unit when it is built — they are not ports, so a
 /// signal wired here has nothing to connect to.
@@ -127,27 +183,30 @@ pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
             NodeKind::Div => (Box::new(map(|i: &Frame<f32, U2>| i[0] / i[1])), 2),
             NodeKind::DsfSaw => (Box::new(dsf_saw()), 2),
 
-            // Time-based ADSR for one-shot voices. The release lands exactly on
-            // `dur`, so the shape fits inside the sequencer event and needs no
-            // tail. Computed as ads * release_mult so degenerate cases (release
-            // longer than the note, attack+decay overrunning it, zero-length
-            // segments) fall out without special-casing.
+            // Time-based ADSR for one-shot voices. The note holds the gate open
+            // for `duration`; the release begins where the note ends and rings
+            // on for its own time past it, so the whole shape lasts
+            // `duration + release` and the voice is scheduled for that long
+            // (see `tail_secs`). Computed as ads * release_mult so degenerate
+            // cases (a note shorter than its own attack, zero-length segments)
+            // fall out without special-casing — freezing the level at the gate
+            // means such a note releases from wherever it got to rather than
+            // jumping to a level it never reached.
             NodeKind::Env => {
                 let attack = const_param(n, 0, "env attack")? as f64;
                 let decay = const_param(n, 1, "env decay")? as f64;
                 let sustain = const_param(n, 2, "env sustain")? as f64;
                 let release = const_param(n, 3, "env release")? as f64;
-                let dur = const_param(n, 4, "env duration")? as f64;
-                let rel_start = (dur - release).max(0.0);
+                let gate = (const_param(n, 4, "env duration")? as f64).max(0.0);
                 (
                     Box::new(An(Envelope::new(ENV_INTERVAL, move |t: f64| -> f64 {
-                        let level = ads_level(t, attack, decay, sustain);
-                        let mult = if t < rel_start {
+                        let level = ads_level(t.min(gate), attack, decay, sustain);
+                        let mult = if t < gate {
                             1.0
                         } else if release <= 0.0 {
                             0.0
                         } else {
-                            (1.0 - (t - rel_start) / release).clamp(0.0, 1.0)
+                            (1.0 - (t - gate) / release).clamp(0.0, 1.0)
                         };
                         level * mult
                     }))),
@@ -483,28 +542,77 @@ mod envelope_tests {
         assert!(realize(&g).is_ok());
     }
 
-    /// env holds at its sustain level, then releases to zero exactly at `dur`.
+    /// env holds its sustain level for the whole note, and only then releases
+    /// — the release is time *after* `dur`, not time taken out of it.
     #[test]
-    fn env_sustains_then_releases_at_the_note_end() {
+    fn env_sustains_for_the_note_then_releases_after_it() {
         // attack 0.1, decay 0.1, sustain 0.5, release 0.2, over a 1s note.
-        let s = render_voice("env(0.1, 0.1, 0.5, 0.2, dur)\n", 1.0, 1.2);
+        let s = render_voice("env(0.1, 0.1, 0.5, 0.2, dur)\n", 1.0, 1.4);
 
         assert!((at(&s, 0.1) - 1.0).abs() < 0.02, "peak at attack end: {}", at(&s, 0.1));
         assert!((at(&s, 0.2) - 0.5).abs() < 0.02, "sustain after decay: {}", at(&s, 0.2));
         assert!((at(&s, 0.5) - 0.5).abs() < 0.02, "still sustaining: {}", at(&s, 0.5));
-        assert!((at(&s, 0.9) - 0.25).abs() < 0.03, "mid-release: {}", at(&s, 0.9));
-        assert!(at(&s, 0.999) < 0.02, "silent by the note end, got {}", at(&s, 0.999));
+        // The bug this guards: 0.9 used to be halfway down the release.
+        assert!((at(&s, 0.9) - 0.5).abs() < 0.02, "sustaining to the end: {}", at(&s, 0.9));
+        assert!((at(&s, 0.999) - 0.5).abs() < 0.02, "still up at the note end: {}", at(&s, 0.999));
+        assert!((at(&s, 1.1) - 0.25).abs() < 0.03, "mid-release: {}", at(&s, 1.1));
+        assert!(at(&s, 1.2) < 0.02, "silent a release after the note: {}", at(&s, 1.2));
     }
 
-    /// The note length really comes from `dur`, not a baked constant.
+    /// The note length really comes from `dur`, not a baked constant — and the
+    /// release that follows is the same length whatever the note was.
     #[test]
     fn env_tracks_the_note_length() {
-        let short = render_voice("env(0.01, 0.01, 0.8, 0.1, dur)\n", 0.3, 0.5);
-        let long = render_voice("env(0.01, 0.01, 0.8, 0.1, dur)\n", 0.8, 1.0);
+        let short = render_voice("env(0.01, 0.01, 0.8, 0.1, dur)\n", 0.3, 0.6);
+        let long = render_voice("env(0.01, 0.01, 0.8, 0.1, dur)\n", 0.8, 1.1);
 
-        assert!(at(&short, 0.299) < 0.02, "short note done by 0.3s");
+        assert!(at(&short, 0.299) > 0.5, "short note still held at its end");
+        assert!(at(&short, 0.399) < 0.02, "short note done a release later");
         assert!(at(&long, 0.3) > 0.5, "long note still sustaining at 0.3s");
-        assert!(at(&long, 0.799) < 0.02, "long note done by 0.8s");
+        assert!(at(&long, 0.799) > 0.5, "long note still held at its end");
+        assert!(at(&long, 0.899) < 0.02, "long note done a release later");
+    }
+
+    /// A note shorter than its own attack releases from the level it reached,
+    /// rather than jumping to one it never got to.
+    #[test]
+    fn a_note_cut_short_releases_from_where_it_got_to() {
+        // Attack 0.4 over a 0.2s note: the gate closes halfway up.
+        let s = render_voice("env(0.4, 0.1, 0.5, 0.2, dur)\n", 0.2, 0.5);
+
+        assert!((at(&s, 0.199) - 0.5).abs() < 0.02, "halfway up at the gate: {}", at(&s, 0.199));
+        assert!((at(&s, 0.3) - 0.25).abs() < 0.03, "halfway down again: {}", at(&s, 0.3));
+        assert!(at(&s, 0.41) < 0.02, "silent a release later, got {}", at(&s, 0.41));
+    }
+
+    /// What the scheduler asks a voice for: how much longer than the note it
+    /// needs to finish what it started.
+    #[test]
+    fn the_tail_is_how_far_an_envelope_outlasts_the_note() {
+        let tail_of = |src: &str, dur: f64| {
+            let items = parse(src.to_string()).expect("parse failed");
+            let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
+            tail_secs(&lowered.graph, dur)
+        };
+
+        // Nothing time-shaped: the voice ends with its note.
+        assert_eq!(tail_of("sin(220)\n", 1.0), 0.0);
+
+        // `env` releases from the end of the note, so it always asks for the
+        // release however long or short the note was.
+        assert!((tail_of("sin(220) * env(0.01, 0.1, 0.5, 0.3, dur)\n", 1.0) - 0.3).abs() < 1e-6);
+        assert!((tail_of("sin(220) * env(0.01, 0.1, 0.5, 0.3, dur)\n", 0.05) - 0.3).abs() < 1e-6);
+
+        // `perc` is measured from the onset, so it only asks for room when the
+        // shape is longer than the note it landed on.
+        assert_eq!(tail_of("sin(220) * perc(0.01, 0.4)\n", 1.0), 0.0, "the note covers it");
+        let cramped = tail_of("sin(220) * perc(0.01, 0.4)\n", 0.125);
+        assert!((cramped - 0.285).abs() < 1e-6, "0.41 of shape on a 0.125 step: {cramped}");
+
+        // Several in one voice: they all have to finish, so the latest wins.
+        let two = "sin(220) * perc(0.01, 0.4) + sin(330) * env(0.01, 0.1, 0.5, 0.05, dur)\n";
+        assert!((tail_of(two, 0.125) - 0.285).abs() < 1e-6, "got {}", tail_of(two, 0.125));
+        assert!((tail_of(two, 1.0) - 0.05).abs() < 1e-6, "got {}", tail_of(two, 1.0));
     }
 
     /// Degenerate shapes must not panic, go negative, or exceed 1.
