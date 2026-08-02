@@ -525,6 +525,11 @@ fn list_dir(path: String) -> Result<Vec<Entry>, String> {
         // A name or path that isn't text is one the editor could not open
         // either, so it is left out rather than drawn as mojibake.
         if let (Some(name), Some(path)) = (entry.file_name().to_str(), full.to_str()) {
+            // A project's `.git` and `.DS_Store` are not part of the project,
+            // and the walk behind search already reads the tree this way.
+            if name.starts_with('.') {
+                continue;
+            }
             entries.push(Entry {
                 name: name.to_string(),
                 path: path.to_string(),
@@ -625,6 +630,37 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
     }
 
     Ok(menu)
+}
+
+#[cfg(test)]
+mod list_dir_tests {
+    use super::*;
+
+    /// What the tree shows of a folder, and what it leaves out: dotfiles and
+    /// dot-folders, which are the project's plumbing rather than the project.
+    #[test]
+    fn a_listing_leaves_out_hidden_files_and_folders() {
+        let root = std::env::temp_dir().join(format!(
+            "scree-list-dir-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::create_dir_all(root.join(".git")).expect("should create");
+        std::fs::create_dir_all(root.join("lib")).expect("should create");
+        std::fs::write(root.join("song.scree"), "").expect("should write");
+        std::fs::write(root.join(".DS_Store"), "").expect("should write");
+
+        let names: Vec<String> = list_dir(root.display().to_string())
+            .expect("should list")
+            .into_iter()
+            .map(|e| e.name)
+            .collect();
+
+        // Folders first, then by name — and neither hidden one at all.
+        assert_eq!(names, vec!["lib".to_string(), "song.scree".to_string()]);
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
 
 #[cfg(test)]
