@@ -853,6 +853,33 @@ function App() {
     }
   }, [report]);
 
+  /**
+   * A note that would not build, raised by the scheduler thread mid-pattern.
+   *
+   * It has already dropped the bindings and cut what it had pushed — a voice it
+   * cannot build is one it cannot build for any later step either, so carrying
+   * on would be the same failure every cycle with nothing to hear for it. This
+   * side finishes the job: `stop_audio` takes down the persistent graph too and
+   * puts the clock back, so what is left is a real stop rather than a scheduler
+   * sitting out a performance the rest of the engine thinks is still going.
+   *
+   * It goes to the problems panel like every other failure — `report` opens the
+   * panel on that tab, which is what makes an error nobody asked for visible
+   * without anything else on screen having to move.
+   *
+   * Subscribed once. `report` and `stop` are stable, so this never re-binds —
+   * which matters here more than elsewhere, because re-subscribing is
+   * asynchronous and the event it might fall between is the one that says the
+   * music has stopped.
+   */
+  useEffect(() => {
+    const subscription = listen<Diagnostic>("scheduler-error", (event) => {
+      report(toDiagnostic(event.payload, "playback failed"), null);
+      void stop();
+    });
+    return () => void subscription.then((unlisten) => unlisten());
+  }, [report, stop]);
+
   const saveTab = useCallback(async () => {
     const tab = activeTab;
     // A composer has no buffer to save — its pattern is written to the

@@ -124,7 +124,7 @@ export function ProblemsPanel({
     return (
       <div className="px-4 py-4 text-xs leading-relaxed text-neutral-500">
         {status === "ok" ? (
-          <p className="text-blue-500">Compiled. Nothing to report.</p>
+          <p className="text-blue-400">Compiled. Nothing to report.</p>
         ) : (
           <p>
             Nothing has failed yet. Run with{" "}

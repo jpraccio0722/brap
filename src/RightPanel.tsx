@@ -52,7 +52,7 @@ export function RightPanel({
         title="Drag to resize"
         role="separator"
         aria-orientation="vertical"
-        className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize hover:bg-blue-600/40 active:bg-blue-600/60"
+        className="absolute inset-y-0 -left-1 z-10 w-2 cursor-col-resize hover:bg-blue-400/40 active:bg-blue-600/60"
       />
 
       {/* No close control of its own: the header's hamburger works both ways,
