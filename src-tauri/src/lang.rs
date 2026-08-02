@@ -239,7 +239,7 @@ pub static UGENS: &[Ugen] = &[
         params: &["attack", "decay", "sustain", "release", "duration"],
         receives: ValueKind::Number,
         returns: ValueKind::Signal,
-        doc: "Time-based ADSR for one-shot voices, with the release landing exactly on `duration`. Pass the voice-bound `dur` as the duration. All arguments are constants.",
+        doc: "Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice lasts `duration + release`. Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants.",
     },
     Ugen {
         name: "dsf_square",
@@ -431,7 +431,7 @@ pub static UGENS: &[Ugen] = &[
         params: &["attack", "release"],
         receives: ValueKind::Number,
         returns: ValueKind::Signal,
-        doc: "Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph. Both times are constants.",
+        doc: "Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph — and in a voice the shape is measured from the onset and always finishes, so a drum longer than the step it sits on rings on into the next rather than being cut off. Both times are constants.",
     },
     Ugen {
         name: "pink",

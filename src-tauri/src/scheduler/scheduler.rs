@@ -253,9 +253,16 @@ fn schedule_pass(
                 state.fail(format!("{}: {e}", bound.instrument));
                 return None;
             }
-            Ok(net) => {
-                if let Some(id) = push_voice(seq, begin_secs, dur_secs, net) {
-                    live.push(Live { id, end_secs: begin_secs + dur_secs });
+            // An instrument's envelopes may outlast the note the pattern gave
+            // it — an `env` releases from the note's end, and a `perc` shape
+            // can simply be longer than the step it sits on. The event has to
+            // cover that or the sequencer cuts it off mid-shape, which is the
+            // rest after a note being silent where it should still be ringing.
+            Ok(voice) => {
+                let end_secs = begin_secs + dur_secs + voice.tail_secs;
+                if let Some(id) = push_voice(seq, begin_secs, dur_secs + voice.tail_secs, voice.net)
+                {
+                    live.push(Live { id, end_secs });
                 }
             }
         }
@@ -500,6 +507,131 @@ mod pass_tests {
 
         assert!(held > 0.5, "the held note should still be sounding, got {held}");
         assert!(short < 0.01, "legato should have cut it short, got {short}");
+    }
+
+    /// The reported bug: an instrument with a long `env` release went silent at
+    /// the step boundary — a rest after it was silence where the note should
+    /// still have been ringing out into it. The release sits after the note
+    /// now, and the sequencer event is given that much more room to hold it.
+    #[test]
+    fn an_env_release_rings_on_past_the_note() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let render = |src: &str| {
+            let ast = parse(src.to_string()).unwrap();
+            let lowered = lower(&ast).expect("lower failed");
+            let state = SchedulerState::new();
+            *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+            *state.patterns.lock().unwrap() =
+                Patterns { bindings: lowered.bindings, ..Default::default() };
+
+            // cps 1.0 over two steps: the note is [0, 0.5) and a rest follows.
+            let clock = Clock::with_cps(44100.0, 1.0);
+            let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+            seq.set_sample_rate(44100.0);
+            pass(&mut seq, &clock, &state, None);
+
+            (0..44100).map(|_| seq.get_stereo().0).collect::<Vec<f32>>()
+        };
+
+        // Sustains flat for the note, then releases over 0.3 s — done at 0.8.
+        let s = render("fn tone(n) = sin(n) * env(0.005, 0.005, 1, 0.3, dur)\nplay([220, `], tone)\n");
+        let peak = |from: f64, to: f64| {
+            s[(from * 44100.0) as usize..(to * 44100.0) as usize]
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+
+        assert!(peak(0.1, 0.4) > 0.5, "the note itself should sound, got {}", peak(0.1, 0.4));
+        assert!(peak(0.55, 0.6) > 0.3, "the release should ring into the rest, got {}",
+                peak(0.55, 0.6));
+        assert!(peak(0.85, 1.0) < 0.02, "the release should be over, got {}", peak(0.85, 1.0));
+
+        // Without an envelope nothing is added: the note ends with its step,
+        // which is what says the tail above came from the `env`.
+        let bare = render("fn tone(n) = sin(n)\nplay([220, `], tone)\n");
+        let after = bare[(0.55 * 44100.0) as usize..(0.6 * 44100.0) as usize]
+            .iter()
+            .fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(after < 0.02, "a voice with no release should stop at its step, got {after}");
+    }
+
+    /// The same fault reached the other way: a `perc` drum shapes itself from
+    /// the onset, so on a step shorter than the shape it was cut off partway
+    /// down rather than ringing into the next step.
+    #[test]
+    fn a_drum_longer_than_its_step_rings_into_the_next() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        // A 0.3 s drum on 16ths at cps 1.0, which is a 0.0625 s step.
+        let src = "fn kick(f) = sin(f) * perc(0.001, 0.3)\n\
+                   play([55, `, `, `, `, `, `, `, `, `, `, `, `, `, `, `], kick)\n";
+        let ast = parse(src.to_string()).unwrap();
+        let lowered = lower(&ast).expect("lower failed");
+        let state = SchedulerState::new();
+        *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *state.patterns.lock().unwrap() =
+            Patterns { bindings: lowered.bindings, ..Default::default() };
+
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+        let mut live = Vec::new();
+        schedule_pass(&mut seq, &clock, &state, None, &mut live);
+
+        assert_eq!(live.len(), 1, "one drum should have been pushed");
+        assert!(
+            (live[0].end_secs - 0.301).abs() < 1e-6,
+            "the voice should last the whole shape, got {}",
+            live[0].end_secs,
+        );
+
+        // Well past the 0.0625 s step, halfway down a shape that used to have
+        // been cut off there.
+        let s: Vec<f32> = (0..22050).map(|_| seq.get_stereo().0).collect();
+        let peak = |from: f64, to: f64| {
+            s[(from * 44100.0) as usize..(to * 44100.0) as usize]
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+        assert!(peak(0.1, 0.15) > 0.3, "the drum should still be falling, got {}", peak(0.1, 0.15));
+        assert!(peak(0.35, 0.5) < 0.02, "and be finished by 0.35 s, got {}", peak(0.35, 0.5));
+    }
+
+    /// The tail is added to the note the pattern gave, so `legato` shortens
+    /// what is held and the release still gets its own time afterwards.
+    #[test]
+    fn legato_shortens_the_note_and_keeps_the_release() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let ast = parse(
+            "fn tone(n) = sin(n) * env(0.005, 0.005, 1, 0.3, dur)\n\
+             play([220], tone, legato: 0.2)\n"
+                .to_string(),
+        )
+        .unwrap();
+        let lowered = lower(&ast).expect("lower failed");
+        let state = SchedulerState::new();
+        *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *state.patterns.lock().unwrap() =
+            Patterns { bindings: lowered.bindings, ..Default::default() };
+
+        // One step a cycle at cps 1.0: a legato of 0.2 holds it for 0.2 s.
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+        let mut live = Vec::new();
+        schedule_pass(&mut seq, &clock, &state, None, &mut live);
+
+        assert_eq!(live.len(), 1, "one note should have been pushed");
+        assert!(
+            (live[0].end_secs - 0.5).abs() < 1e-6,
+            "0.2 s held plus a 0.3 s release, got {}",
+            live[0].end_secs,
+        );
     }
 
     /// A pan lane rides through the binding as an ordinary lane value and is

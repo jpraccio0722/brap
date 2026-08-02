@@ -564,8 +564,8 @@ fn snare(n) = noise() * perc(0.001, 0.1) * rand(0.7, 1)   // a new draw per note
 ### Envelopes and Dynamics
 | Name | Arguments | Notes |
 | --- | --- | --- |
-| `perc` | `(→ attack, release)` | Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph. Both times are constants. |
-| `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices, with the release landing exactly on `duration`. Pass the voice-bound `dur` as the duration. All arguments are constants. |
+| `perc` | `(→ attack, release)` | Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph — and in a voice the shape is measured from the onset and always finishes, so a drum longer than the step it sits on rings on into the next rather than being cut off. Both times are constants. |
+| `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice lasts `duration + release`. Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants. |
 | `adsr` | `(gate → attack, decay, sustain, release)` | Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1. |
 | `follow` | `(signal → response_time)` | Parameter follower. Smooths the signal with the given halfway response time, in seconds. |
 | `afollow` | `(signal → attack, release)` | Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds). |
