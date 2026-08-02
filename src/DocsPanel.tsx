@@ -14,16 +14,26 @@ interface DocsPanelProps {
 }
 
 /**
- * The categories in the order they are worth reading, with the headings the
- * README uses. The tables carry four; the reference splits the UGens further,
- * which is a distinction only prose can make.
+ * A heading for every category, in the order they are worth reading. The
+ * reference splits the UGens further than the one `Signals` table does, which
+ * is a distinction only prose can make.
+ *
+ * A record rather than a list because the panel renders these headings and
+ * nothing else: a category with no entry here would be a whole table of names
+ * silently missing from the reference — and unfindable by its search, which
+ * only reaches what a heading holds. This way a new one in `BuiltinCategory`
+ * is a compile error rather than a quietly shorter list.
  */
-const CATEGORIES: { key: BuiltinCategory; label: string }[] = [
-  { key: "special", label: "Patterns and Playback" },
-  { key: "list", label: "Lists" },
-  { key: "math", label: "Math" },
-  { key: "ugen", label: "Signals" },
-];
+const HEADINGS: Record<BuiltinCategory, string> = {
+  special: "Patterns and Playback",
+  list: "Lists",
+  math: "Math",
+  random: "Random",
+  ugen: "Signals",
+};
+
+/** The headings paired with their categories, in the order written above. */
+const CATEGORIES = Object.entries(HEADINGS) as [BuiltinCategory, string][];
 
 /** Everything a search can match: the name, the doc, and the parameter names —
  *  `cutoff` should find the filters even though none of them is called that. */
@@ -75,10 +85,11 @@ export function DocsPanel({ builtins, focus }: DocsPanelProps) {
 
   const groups = useMemo(
     () =>
-      CATEGORIES.map((c) => ({
-        ...c,
+      CATEGORIES.map(([key, label]) => ({
+        key,
+        label,
         members: matches
-          .filter((b) => b.category === c.key)
+          .filter((b) => b.category === key)
           .sort((a, b) => a.name.localeCompare(b.name)),
       })).filter((g) => g.members.length > 0),
     [matches],
@@ -235,8 +246,8 @@ function Entry({
         onClick={onToggle}
         aria-expanded={expanded}
         className={
-          "block w-full px-4 py-1 text-left font-mono text-xs leading-relaxed transition-colors " +
-          (expanded ? "text-teal-200" : "text-teal-300 hover:bg-neutral-900/60")
+          "block w-full px-4 py-1 text-left font-mono text-sm leading-relaxed transition-colors " +
+          (expanded ? "text-[#66B9C1]" : "text-blue-400 hover:bg-neutral-900/60")
         }
       >
         {signature(builtin)}

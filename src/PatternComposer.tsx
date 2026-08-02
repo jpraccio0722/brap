@@ -163,7 +163,7 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
           className={
             "w-40 rounded border bg-neutral-900 px-2 py-1 font-mono text-sm text-neutral-100 " +
             "outline-none " +
-            (error ? "border-red-500" : "border-neutral-700 focus:border-blue-600")
+            (error ? "border-red-500" : "border-neutral-700 focus:border-blue-400")
           }
         />
 
@@ -175,7 +175,7 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
               className={
                 "px-3 py-1 text-xs font-semibold uppercase tracking-wide transition-colors " +
                 (pattern.mode === m
-                  ? "bg-blue-600 text-white"
+                  ? "bg-blue-400 text-white"
                   : "text-neutral-400 hover:bg-neutral-800")
               }
             >
@@ -189,7 +189,7 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
           <select
             value={cells}
             onChange={(e) => setSteps(resize(pattern.steps, Number(e.target.value)))}
-            className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 font-mono text-xs text-neutral-100 outline-none focus:border-blue-600"
+            className="rounded border border-neutral-700 bg-neutral-900 px-1.5 py-1 font-mono text-xs text-neutral-100 outline-none focus:border-blue-400"
           >
             {(RESOLUTIONS as readonly number[]).map((n) => (
               <option key={n} value={n}>
@@ -307,7 +307,7 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
                   width: (Math.abs(drag.to - drag.from) + 1) * CELL_W - 2,
                   height: LANE_H - 2,
                 }}
-                className="pointer-events-none absolute rounded-sm bg-blue-500/60"
+                className="pointer-events-none absolute rounded-sm bg-blue-400/60"
               />
             )}
           </div>

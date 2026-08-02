@@ -168,7 +168,7 @@ export function ValueControl({
             className="relative flex h-4 w-full touch-none select-none items-center"
           >
             <RadixSlider.Track className="relative h-1.5 w-full grow rounded-full bg-neutral-700">
-              <RadixSlider.Range className="absolute h-full rounded-full bg-blue-600" />
+              <RadixSlider.Range className="absolute h-full rounded-full bg-blue-400" />
             </RadixSlider.Track>
             <RadixSlider.Thumb
               aria-label={label}
