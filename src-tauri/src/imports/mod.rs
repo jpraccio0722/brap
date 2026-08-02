@@ -512,7 +512,11 @@ impl<'a> Resolver<'a> {
 }
 
 /// `dir/a/b/c.scree`, for the path `a::b::c`.
-fn module_file(dir: &Path, path: &[crate::parser::parser::Ident]) -> PathBuf {
+///
+/// Shared with the explorer, which has to answer the same question in reverse:
+/// a file that has been dragged somewhere else needs the path that reaches it
+/// from where it is now, and the two must agree about what a path means.
+pub(crate) fn module_file(dir: &Path, path: &[crate::parser::parser::Ident]) -> PathBuf {
     let mut file = dir.to_path_buf();
     for segment in path {
         file.push(&segment.0);

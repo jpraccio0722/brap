@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { PanelTab, PanelTabs } from "./PanelTabs";
 
-/** Which of the panel's two views is on top. */
-export type SideTab = "problems" | "project";
+/** Which of the panel's views is on top. */
+export type SideTab = "problems" | "project" | "search";
 
 interface SidePanelProps {
   open: boolean;
@@ -12,19 +12,21 @@ interface SidePanelProps {
   onResizeStart: (e: React.PointerEvent) => void;
   tab: SideTab;
   onTabChange: (tab: SideTab) => void;
-  /** Drawn on the Problems tab, so a failure is visible from the other one. */
+  /** Drawn on the Problems tab, so a failure is visible from the others. */
   problemCount: number;
   problems: ReactNode;
   project: ReactNode;
+  search: ReactNode;
 }
 
 /**
- * The left-hand panel: the last run's problems, and the project's files.
+ * The left-hand panel: the project's files, what is in them, and the last
+ * run's problems.
  *
- * Both views stay mounted and the hidden one is only taken off screen, so
+ * Every view stays mounted and the hidden ones are only taken off screen, so
  * switching tabs keeps what each was showing — the folders opened in the tree
- * are worth as much as the errors above them, and rebuilding either on every
- * click would be a tax on looking at the other.
+ * and a set of search results are worth as much as the errors beside them, and
+ * rebuilding any of them on every click would be a tax on looking at the rest.
  */
 export function SidePanel({
   open,
@@ -35,6 +37,7 @@ export function SidePanel({
   problemCount,
   problems,
   project,
+  search,
 }: SidePanelProps) {
   return (
     <aside
@@ -49,6 +52,11 @@ export function SidePanel({
           label="Project"
           selected={tab === "project"}
           onClick={() => onTabChange("project")}
+        />
+        <PanelTab
+          label="Search"
+          selected={tab === "search"}
+          onClick={() => onTabChange("search")}
         />
         <PanelTab
           label="Problems"
@@ -73,6 +81,14 @@ export function SidePanel({
         }
       >
         {project}
+      </div>
+      <div
+        className={
+          "min-h-0 flex-1 flex-col overflow-y-auto " +
+          (tab === "search" ? "flex" : "hidden")
+        }
+      >
+        {search}
       </div>
 
       {/* Mirrors the transport's handle, on the edge that faces the editor. */}
