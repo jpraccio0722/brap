@@ -12,6 +12,9 @@ import {
   type ProjectTree,
 } from "./projectTree";
 
+import ChevronRight from './assets/chevron-right.svg?react'
+import FileSVG from './assets/file.svg?react'
+
 export type { Entry } from "./projectTree";
 
 /** A `use` a move could not correct, as `move_path` reports it. */
@@ -97,24 +100,18 @@ function useTree(): Tree {
 
 function Chevron({ open }: { open: boolean }) {
   return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="currentColor"
+    <ChevronRight
       className={
         "h-3 w-3 shrink-0 text-neutral-500 transition-transform " +
         (open ? "rotate-90" : "")
       }
-    >
-      <path d="M9 6l6 6-6 6z" />
-    </svg>
+    />
   );
 }
 
 function FileIcon() {
   return (
-    <svg viewBox="0 0 24 24" fill="currentColor" className="h-3.5 w-3.5 shrink-0 text-neutral-600">
-      <path d="M6 2h7l5 5v15H6V2zm7 1.5V8h4.5L13 3.5z" />
-    </svg>
+    <FileSVG className="h-4 w-4 shrink-0 text-neutral-600 fill-neutral-600"/>
   );
 }
 
