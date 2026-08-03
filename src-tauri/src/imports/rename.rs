@@ -12,8 +12,10 @@
 //! the body they cover.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use crate::parser::parser::{Arg, Expr, Ident, ScreeItem, Statement};
+use crate::samples::LOAD;
 
 /// What the names written in one file mean everywhere else.
 pub struct Scope<'a> {
@@ -26,6 +28,10 @@ pub struct Scope<'a> {
     /// Names bound by the code being walked, innermost last. These shadow
     /// everything above: a parameter is not an import.
     locals: Vec<HashSet<String>>,
+    /// The folder this file's own `load` paths are relative to, when they have
+    /// to be rewritten to survive the move into the program. See
+    /// [`Scope::relocating_samples`].
+    samples_dir: Option<&'a Path>,
 }
 
 impl<'a> Scope<'a> {
@@ -33,7 +39,24 @@ impl<'a> Scope<'a> {
         names: &'a HashMap<String, String>,
         modules: &'a HashMap<String, String>,
     ) -> Scope<'a> {
-        Scope { names, modules, locals: Vec::new() }
+        Scope { names, modules, locals: Vec::new(), samples_dir: None }
+    }
+
+    /// Also rewrite every relative `load` path to `dir`, which is the folder
+    /// the file being walked sits in.
+    ///
+    /// A module's definitions are lifted into a program that may be anywhere,
+    /// and the paths in them are read once the lifting is over — so a path left
+    /// as written would be resolved against the wrong folder, and a module that
+    /// plays a sample would only work from the folder it happened to be
+    /// imported from. Rewriting here is the one place that still knows which
+    /// file the path came out of.
+    ///
+    /// The program's own paths are left alone: nothing has moved them, and
+    /// they are what its errors quote back.
+    pub fn relocating_samples(mut self, dir: &'a Path) -> Scope<'a> {
+        self.samples_dir = Some(dir);
+        self
     }
 
     fn push(&mut self, bound: impl IntoIterator<Item = String>) {
@@ -108,6 +131,24 @@ impl<'a> Scope<'a> {
         }
     }
 
+    /// Point one `load`'s path at the folder the file writing it sits in.
+    ///
+    /// The shape checked here is the shape [`crate::samples`] looks for — one
+    /// argument, a literal — because anything else is already a path it cannot
+    /// find, and rewriting it would only change which error it is.
+    fn relocate(&self, args: &mut [Arg]) {
+        let Some(dir) = self.samples_dir else { return };
+        let [arg] = args else { return };
+        let Expr::Str(written) = &mut arg.value else { return };
+        // The two answers `samples::resolve` gives without consulting a folder:
+        // an absolute path is already one, and an empty path is an error whose
+        // wording is better than anything a join would leave.
+        if written.is_empty() || Path::new(written.as_str()).is_absolute() {
+            return;
+        }
+        *written = dir.join(written.as_str()).to_string_lossy().into_owned();
+    }
+
     fn args(&mut self, args: &mut [Arg]) -> Result<(), String> {
         for arg in args {
             // Only the value. An argument's name is a parameter of the callee
@@ -122,7 +163,14 @@ impl<'a> Scope<'a> {
             Expr::Var(name) => self.ident(name),
 
             Expr::Call { func, args } => {
+                let names_a_file = func.0 == LOAD;
                 self.ident(func)?;
+                // Still `load` after resolving, so still the builtin: a file
+                // that defines a `load` of its own is not naming a path here,
+                // and its argument is nobody's business but the lowerer's.
+                if names_a_file && func.0 == LOAD {
+                    self.relocate(args);
+                }
                 self.args(args)
             }
 

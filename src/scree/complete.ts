@@ -5,6 +5,7 @@ import type {
   CompletionSource,
 } from "@codemirror/autocomplete";
 import type { EditorView } from "@codemirror/view";
+import { argumentsIn, callAt, stripComments } from "./callsite";
 import {
   buildIndex,
   isCallable,
@@ -15,6 +16,7 @@ import {
   type LanguageMetadata,
   type ValueKind,
 } from "./metadata";
+import type { Symbol as ModuleSymbol, Symbols } from "./symbols";
 
 /**
  * Identifier completion for scree: backend builtins, keywords, and whatever the
@@ -48,12 +50,38 @@ const COMMENT = /\/\/[^\n]*/g;
  *  only place their names are written down. */
 const BOOST = { pattern: 3, local: 2, builtin: 1, keyword: 0 } as const;
 
+// ---------------------------------------------------------------------------
+// Argument position.
+//
+// `play` is the one call whose slots are not interchangeable, and the rules it
+// enforces are all discoverable only by running the program: the second
+// argument must be a plain `fn` name and nothing else, and everything after it
+// must name one of that instrument's own parameters. Both are worth knowing
+// while writing rather than after playing.
+// ---------------------------------------------------------------------------
+
+/** The calls whose second argument is an instrument. `playn` puts its repeat
+ *  count *after* that, so the instrument is in the same slot for all three. */
+const PLAYS = new Set(["play", "play_once", "playn"]);
+
+/** Which argument of a `play` names the instrument. */
+const INSTRUMENT_ARG = 1;
+
+/** The two lanes that never reach the instrument, and so are writable whatever
+ *  it is. Their meanings are `pattern/patterns.rs`'s. */
+const RESERVED_LANES: { name: string; info: string }[] = [
+  { name: "legato", info: "Scales how long each note is held, against its step." },
+  { name: "pan", info: "Where the note sits between the speakers, -1 to 1." },
+];
+
 interface LocalSymbol {
   name: string;
   detail: string;
   type: "function" | "variable";
   /** A `fn`'s parameter names. Absent for anything that is not one. */
   params?: string[];
+  /** Which of those were written with a default, and so may be left out. */
+  optional?: boolean[];
   /** True for a name a `use` introduced. It may be a function or a module, and
    *  both are writable after a `.`, so the two cases are not worth splitting. */
   imported?: boolean;
@@ -67,15 +95,16 @@ function scrapeLocals(doc: string): LocalSymbol[] {
   const found = new Map<string, LocalSymbol>();
 
   for (const [, name, rawParams] of text.matchAll(FN)) {
-    const params = rawParams
-      .split(",")
-      .map((p) => p.split("=")[0].trim())
-      .filter(Boolean);
+    const written = rawParams.split(",").map((p) => p.trim()).filter(Boolean);
+    const params = written.map((p) => p.split("=")[0].trim());
     found.set(name, {
       name,
       detail: `${name}(${params.join(", ")})`,
       type: "function",
       params,
+      // Which of them a `play` must be given a lane for, and which it may
+      // leave to the default written here.
+      optional: written.map((p) => p.includes("=")),
     });
 
     // A function's own parameters are worth offering while writing its body.
@@ -371,17 +400,138 @@ function localMethodCompletion(s: LocalSymbol): Completion {
   };
 }
 
+/**
+ * Everything writable as `play`'s instrument: a `fn` with somewhere for the
+ * pattern to go.
+ *
+ * Only that. A UGen, a keyword, a drawn pattern and a plain binding are each a
+ * compile error in this slot — the lowerer wants a plain function name and
+ * refuses anything else before it evaluates a single argument — so offering
+ * them would be offering the wrong answer to a question with a short list of
+ * right ones.
+ */
+function instrumentOptions(locals: LocalSymbol[], imported: ModuleSymbol[]): Completion[] {
+  const options: Completion[] = [];
+  const taken = new Set<string>();
+
+  for (const s of locals) {
+    // The pattern fills the first parameter, so a `fn` with none cannot be
+    // played at all.
+    if (s.type !== "function" || (s.params?.length ?? 0) === 0) continue;
+    taken.add(s.name);
+    options.push({
+      label: s.name,
+      detail: s.detail,
+      type: "function",
+      boost: BOOST.local,
+    });
+  }
+
+  for (const s of imported) {
+    if (!s.callable || s.params.length === 0 || taken.has(s.name)) continue;
+    options.push({
+      label: s.name,
+      detail: `${s.name}(${s.params.join(", ")})`,
+      type: "function",
+      boost: BOOST.builtin,
+    });
+  }
+
+  return options;
+}
+
+/**
+ * The lanes an instrument will take: its own parameters after the first, and
+ * the two reserved ones that never reach it.
+ *
+ * The rules are `play.rs`'s. The pattern fills the first parameter, so naming
+ * it as a lane is refused; a lane already written cannot be written twice; and
+ * `legato`/`pan` are handled before the instrument sees them, so an instrument
+ * that declares a parameter of either name cannot be given one.
+ */
+function laneOptions(
+  instrument: string,
+  written: string[],
+  locals: Map<string, LocalSymbol>,
+  imported: Map<string, ModuleSymbol>,
+): Completion[] {
+  const local = locals.get(instrument);
+  const symbol = imported.get(instrument);
+  const params = symbol?.params ?? local?.params;
+  if (!params) return [];
+  const optional = symbol?.optional ?? local?.optional;
+
+  const already = new Set(
+    written
+      .map((arg) => arg.match(/^\s*([a-zA-Z_]\w*)\s*:/)?.[1])
+      .filter((name): name is string => name !== undefined),
+  );
+
+  const options: Completion[] = params.slice(1).flatMap((param, i) => {
+    if (already.has(param)) return [];
+    return [
+      {
+        label: param,
+        // A parameter with no default has to be filled — by a lane, since the
+        // pattern is spoken for — so it is the likelier next word.
+        detail: optional?.[i + 1] === false ? `${instrument} needs this` : "lane",
+        type: "property",
+        boost: optional?.[i + 1] === false ? BOOST.pattern : BOOST.local,
+        apply: applyLane(param),
+      },
+    ];
+  });
+
+  for (const { name, info } of RESERVED_LANES) {
+    // Reserved lanes never reach the instrument, so one that declares a
+    // parameter of the name cannot be given either.
+    if (already.has(name) || params.includes(name)) continue;
+    options.push({
+      label: name,
+      detail: "lane",
+      info,
+      type: "property",
+      boost: BOOST.builtin,
+      apply: applyLane(name),
+    });
+  }
+
+  return options;
+}
+
+/** A lane is written `name: value`, and the value is what comes next. */
+function applyLane(name: string) {
+  return (view: EditorView, _completion: Completion, from: number, to: number) => {
+    const insert = `${name}: `;
+    view.dispatch({
+      changes: { from, to, insert },
+      selection: { anchor: from + insert.length },
+    });
+  };
+}
+
 /** Exposed for tests; not part of the extension's public surface. */
-export const __test = { scrapeLocals, methodDot, kindOf, accepts };
+export const __test = {
+  scrapeLocals,
+  methodDot,
+  kindOf,
+  accepts,
+  instrumentOptions,
+  laneOptions,
+};
 
 /**
  * @param patternNames The drawn patterns' names, read at completion time
  * rather than captured. The panel changes them constantly, and rebuilding this
  * source per edit would mean reconfiguring the editor per keystroke.
+ * @param symbols What the file's `use` lines brought in, read the same way and
+ * for the same reason — it is filled by a round trip to the backend that
+ * finishes long after this source is built.
  */
 export function screeCompletions(
   meta: LanguageMetadata,
   patternNames: () => string[],
+  symbols: Symbols,
 ): CompletionSource {
   const builtins = meta.builtins.map(builtinCompletion);
   const keywords: Completion[] = meta.keywords.map((label) => ({
@@ -397,7 +547,52 @@ export function screeCompletions(
   return (context: CompletionContext): CompletionResult | null => {
     const doc = context.state.doc.toString();
     const word = context.matchBefore(/[a-zA-Z_]\w*/);
-    const dot = methodDot(doc, word?.from ?? context.pos);
+    const at = word?.from ?? context.pos;
+    const dot = methodDot(doc, at);
+    const from = word?.from ?? context.pos;
+
+    // Look for names the file's `use` lines bring in, if they have changed.
+    // Cheap on the common edit, which changes none of them.
+    symbols.refresh(doc);
+    const imported = symbols.current();
+
+    // A `play`'s slots are not interchangeable, and both of the rules about
+    // them are otherwise invisible until the program is run. Checked before
+    // anything else, including the dot: a `.` inside `play(pat, ` would be part
+    // of an instrument's name, and there is no method position here.
+    const stripped = dot === null ? stripComments(doc) : "";
+    const call = dot === null ? callAt(stripped, at) : null;
+    if (call && PLAYS.has(call.name)) {
+      const scraped = scrapeLocals(doc);
+
+      if (call.argIndex === INSTRUMENT_ARG) {
+        // A qualified name is one name, so the `::` in `kit::kick` has to be
+        // inside what is being matched — the plain word regex would restart
+        // after it and leave the label unmatchable.
+        const qualified = context.matchBefore(/[a-zA-Z_][\w:]*/);
+        return {
+          from: qualified?.from ?? context.pos,
+          options: instrumentOptions(scraped, imported),
+          validFor: /^[\w:]*$/,
+        };
+      }
+
+      if (call.argIndex > INSTRUMENT_ARG) {
+        const args = argumentsIn(stripped, call.open, at);
+        // The instrument is the argument before the lanes, and is a plain
+        // name — the lowerer accepts nothing else there.
+        const instrument = args[INSTRUMENT_ARG]?.trim() ?? "";
+        const options = laneOptions(
+          instrument,
+          args.slice(INSTRUMENT_ARG + 1),
+          new Map(scraped.map((s) => [s.name, s])),
+          new Map(imported.map((s) => [s.name, s])),
+        );
+        // An instrument this side cannot identify has no lanes to offer, and
+        // the ordinary list below is a better answer than none.
+        if (options.length > 0) return { from, options, validFor: /^\w*$/ };
+      }
+    }
 
     // A `.` is worth completing on its own: it is the one character after
     // which the set of writable names is both small and hard to remember.

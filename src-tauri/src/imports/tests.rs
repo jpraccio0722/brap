@@ -49,7 +49,18 @@ fn expand_ok(entry: &str, modules: &[(&str, &str)]) -> Vec<ScreeItem> {
 }
 
 fn try_expand(entry: &str, modules: &[(&str, &str)]) -> Result<Vec<ScreeItem>, Diagnostic> {
+    try_expand_from(entry, modules, &[])
+}
+
+/// The same, with somewhere else to look once the project has nothing: the
+/// library stores, nearest first.
+fn try_expand_from(
+    entry: &str,
+    modules: &[(&str, &str)],
+    libraries: &[&str],
+) -> Result<Vec<ScreeItem>, Diagnostic> {
     let items = parse(entry.to_string()).expect("the entry file should parse");
+    let libraries: Vec<PathBuf> = libraries.iter().map(PathBuf::from).collect();
     expand_from(
         items,
         entry,
@@ -59,11 +70,16 @@ fn try_expand(entry: &str, modules: &[(&str, &str)]) -> Result<Vec<ScreeItem>, D
         // The implicit import has its own tests below; these are about the
         // `use`s a file writes for itself.
         None,
+        &libraries,
     )
 }
 
 fn expand_err(entry: &str, modules: &[(&str, &str)]) -> Diagnostic {
-    match try_expand(entry, modules) {
+    expand_err_with(entry, modules, &[])
+}
+
+fn expand_err_with(entry: &str, modules: &[(&str, &str)], libraries: &[&str]) -> Diagnostic {
+    match try_expand_from(entry, modules, libraries) {
         Err(e) => e,
         Ok(_) => panic!("expected {entry:?} not to expand"),
     }
@@ -810,3 +826,303 @@ fn module_names_are_paths() {
     );
 }
 
+
+// ---- the paths a module writes ----
+
+/// Every file the expanded program will go looking for.
+fn sample_paths(entry: &str, modules: &[(&str, &str)]) -> Vec<String> {
+    crate::samples::paths_in(&expand_ok(entry, modules))
+}
+
+/// A module's `load` is relative to the module, not to whatever imported it.
+///
+/// The definitions move; the folder they were written in does not, and the
+/// paths are read long after the move — so a path left as written would name a
+/// file beside the *program*, which is a file nobody put there.
+#[test]
+fn a_modules_sample_path_is_relative_to_the_module() {
+    assert_eq!(
+        sample_paths(
+            "use lib::kit\nplay([50], kit::hit)\n",
+            &[(
+                "/p/lib/kit.scree",
+                "fn hit(f) = sample(load(\"samples/kick.wav\"), ramp())\n"
+            )]
+        ),
+        vec!["/p/lib/samples/kick.wav"]
+    );
+}
+
+/// The same, for a path written outside a `fn` — a module's `let`s travel too.
+#[test]
+fn a_modules_sample_path_travels_from_a_let() {
+    assert_eq!(
+        sample_paths(
+            "use lib::kit::*\nsample(buf, ramp())\n",
+            &[("/p/lib/kit.scree", "let buf = load(\"break.wav\")\n")]
+        ),
+        vec!["/p/lib/break.wav"]
+    );
+}
+
+/// An absolute path already answers the question, and `samples::resolve` takes
+/// it as written — so nothing here may join a folder onto it.
+#[test]
+fn an_absolute_sample_path_is_left_alone() {
+    assert_eq!(
+        sample_paths(
+            "use kit\nplay([50], kit::hit)\n",
+            &[(
+                "/p/kit.scree",
+                "fn hit(f) = sample(load(\"/Sounds/909/kick.wav\"), ramp())\n"
+            )]
+        ),
+        vec!["/Sounds/909/kick.wav"]
+    );
+}
+
+/// The program's own paths are not rewritten: nothing moved them, and they are
+/// the text its errors quote back.
+#[test]
+fn the_programs_own_sample_path_stays_as_written() {
+    assert_eq!(
+        sample_paths(
+            "use kit\nsample(load(\"break.wav\"), ramp())\n",
+            &[("/p/kit.scree", DRUMS)]
+        ),
+        vec!["break.wav"]
+    );
+}
+
+/// A module that defines its own `load` is not naming a file, so its argument
+/// is left exactly where the module put it.
+#[test]
+fn a_modules_own_load_is_not_a_path() {
+    let items = expand_ok(
+        "use kit::*\nsin(load(2))\n",
+        &[("/p/kit.scree", "fn load(x) = x * 220\n")],
+    );
+    assert!(defined(&items).contains(&"kit::load".to_string()));
+    assert!(sample_paths("use kit::*\nsin(load(2))\n", &[("/p/kit.scree", "fn load(x) = x * 220\n")]).is_empty());
+    assert_eq!(constant_of(&items), 440.0);
+}
+
+// ---- installed libraries ----
+
+/// The store a library is installed in, in these tests. A folder like any
+/// other — which is the whole of what an installed library is.
+const STORE: &str = "/store";
+/// The copy a project carries, which is asked before the machine's.
+const VENDORED: &str = "/p/.scree/libraries";
+
+fn expand_with(entry: &str, modules: &[(&str, &str)], libraries: &[&str]) -> Vec<ScreeItem> {
+    match try_expand_from(entry, modules, libraries) {
+        Ok(items) => items,
+        Err(e) => panic!("expected {entry:?} to expand, got: {e}"),
+    }
+}
+
+/// A `use` that names nothing in the project reaches the store, and what it
+/// finds there is a module like any other.
+#[test]
+fn a_library_is_found_when_the_project_has_no_such_file() {
+    let items = expand_with(
+        "use kit\nplay([50], kit::kick)\n",
+        &[("/store/kit.scree", DRUMS)],
+        &[STORE],
+    );
+
+    assert!(defined(&items).contains(&"kit::kick".to_string()));
+    let lowered = lower(&items).expect("should lower");
+    assert_eq!(lowered.bindings[0].instrument, "kit::kick");
+    assert!(Instruments::from_program(&items).has("kit::kick"));
+}
+
+/// A library's own `use` resolves inside the store, so a pack of several files
+/// works from wherever it was installed.
+#[test]
+fn a_library_may_import_its_own_files() {
+    assert_eq!(
+        constant_of(&expand_with(
+            "use kit::*\nsin(hz)\n",
+            &[
+                ("/store/kit.scree", "use kit::tuning::*\nlet hz = base * 2\n"),
+                ("/store/kit/tuning.scree", "let base = 110\n"),
+            ],
+            &[STORE],
+        )),
+        220.0
+    );
+}
+
+/// A file in the project wins. Installing something must never change what a
+/// project that already worked means.
+#[test]
+fn a_project_file_beats_an_installed_library() {
+    assert_eq!(
+        constant_of(&expand_with(
+            "use kit::*\nsin(hz)\n",
+            &[
+                ("/p/kit.scree", "let hz = 440\n"),
+                ("/store/kit.scree", "let hz = 110\n"),
+            ],
+            &[STORE],
+        )),
+        440.0
+    );
+}
+
+/// Even when the project's file has nothing to offer: the project answers the
+/// whole question before a store is asked, so a `use` never lands half in one
+/// place and half in another.
+#[test]
+fn a_project_file_of_that_name_answers_for_the_whole_path() {
+    let err = expand_err_with(
+        "use kit::kick\n",
+        &[
+            ("/p/kit.scree", "fn snare(f) = noise()\n"),
+            ("/store/kit/kick.scree", DRUMS),
+        ],
+        &[STORE],
+    );
+    assert!(
+        err.message.contains("no `kick`"),
+        "should have stopped at the project's kit, got {err}"
+    );
+}
+
+/// The project's own copy beats the machine's, so a project that carries a
+/// library plays the one it carries.
+#[test]
+fn a_vendored_library_beats_an_installed_one() {
+    assert_eq!(
+        constant_of(&expand_with(
+            "use kit::*\nsin(hz)\n",
+            &[
+                ("/p/.scree/libraries/kit.scree", "let hz = 330\n"),
+                ("/store/kit.scree", "let hz = 110\n"),
+            ],
+            &[VENDORED, STORE],
+        )),
+        330.0
+    );
+}
+
+/// A `use` that finds nothing says everywhere it went — which now includes the
+/// stores, so "it is not installed" is readable from the message.
+#[test]
+fn a_missing_module_names_every_folder_it_looked_in() {
+    let err = expand_err_with("use kit\n", &[], &[VENDORED, STORE]);
+    assert!(err.message.contains("/p/kit.scree"), "got {err}");
+    assert!(err.message.contains("/p/.scree/libraries/kit.scree"), "got {err}");
+    assert!(err.message.contains("/store/kit.scree"), "got {err}");
+}
+
+/// A library's samples are its own, wherever it was installed — the same rule
+/// as any other module, and the reason a pack can carry audio at all.
+#[test]
+fn a_librarys_samples_come_from_the_store() {
+    let items = expand_with(
+        "use kit\nplay([50], kit::hit)\n",
+        &[(
+            "/store/kit.scree",
+            "fn hit(f) = sample(load(\"samples/909.wav\"), ramp())\n",
+        )],
+        &[STORE],
+    );
+    assert_eq!(
+        crate::samples::paths_in(&items),
+        vec!["/store/samples/909.wav"]
+    );
+}
+
+// ---- what the editor is told a file may write ----
+
+/// `symbols`, for a file being run from `/p/song.scree`.
+///
+/// Real files rather than the map, because the command behind it takes a
+/// `Workspace` and a workspace reads a disk.
+fn symbols_of(entry: &str, files: &[(&str, &str)]) -> Vec<Symbol> {
+    let root = std::env::temp_dir().join(format!(
+        "scree-symbols-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::remove_dir_all(&root).ok();
+    for (path, body) in files {
+        let full = root.join(path);
+        std::fs::create_dir_all(full.parent().expect("has a parent")).expect("should make");
+        std::fs::write(full, body).expect("should write");
+    }
+    std::fs::create_dir_all(&root).expect("should make");
+
+    let song = root.join("song.scree");
+    let ws = Workspace::new(Some(song.display().to_string()), Some(root.display().to_string()));
+    let found = symbols(
+        parse(entry.to_string()).expect("should parse"),
+        entry,
+        &ws,
+    );
+
+    std::fs::remove_dir_all(&root).ok();
+    found
+}
+
+fn named<'a>(found: &'a [Symbol], name: &str) -> &'a Symbol {
+    found
+        .iter()
+        .find(|s| s.name == name)
+        .unwrap_or_else(|| panic!("no `{name}` in {:?}", found.iter().map(|s| &s.name).collect::<Vec<_>>()))
+}
+
+/// The case regexes cannot reach: a glob's names live in a file the editor has
+/// never read, so only expansion knows them.
+#[test]
+fn a_glob_reports_the_names_it_actually_brought() {
+    let found = symbols_of(
+        "use kit::*\n",
+        &[("kit.scree", "fn kick(f, decay = 0.25) = sin(f)\nlet root = 55\n")],
+    );
+
+    let kick = named(&found, "kick");
+    assert!(kick.callable);
+    assert_eq!(kick.params, vec!["f", "decay"]);
+    // Which of them a `play` lane may name, and which the pattern fills.
+    assert_eq!(kick.optional, vec![false, true]);
+
+    assert!(!named(&found, "root").callable);
+}
+
+/// And each of the other spellings, in the spelling the file uses — which is
+/// what completion has to insert.
+#[test]
+fn every_spelling_is_reported_as_the_file_writes_it() {
+    let module = &[("kit.scree", "fn kick(f) = sin(f)\n")];
+
+    let plain = symbols_of("use kit\n", module);
+    assert!(plain.iter().any(|s| s.name == "kit::kick"));
+    assert!(!plain.iter().any(|s| s.name == "kick"), "a module is not unpacked");
+
+    let renamed = symbols_of("use kit as k\n", module);
+    assert!(renamed.iter().any(|s| s.name == "k::kick"));
+
+    let single = symbols_of("use kit::kick as thump\n", module);
+    assert!(single.iter().any(|s| s.name == "thump"));
+}
+
+/// The file's own definitions come too: they are names it may write, and the
+/// same question is being asked about all of them.
+#[test]
+fn a_files_own_definitions_are_reported() {
+    let found = symbols_of("fn pad(n, cut = 800) = saw(n)\n", &[]);
+    let pad = named(&found, "pad");
+    assert_eq!(pad.params, vec!["n", "cut"]);
+    assert_eq!(pad.optional, vec![false, true]);
+}
+
+/// A file that does not expand has nothing to add, which is most of the time
+/// this is asked — and is not an error, because the buffer is half-typed.
+#[test]
+fn a_file_that_does_not_expand_reports_nothing() {
+    assert!(symbols_of("use nothing::at::all\n", &[]).is_empty());
+}

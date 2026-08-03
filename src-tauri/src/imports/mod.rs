@@ -75,13 +75,18 @@ pub struct Workspace {
     /// by the editor as text: it sends the rows, and `run_code` writes them.
     #[serde(skip)]
     patterns: Option<String>,
+    /// The library stores this program may reach, nearest first. Filled in by
+    /// `run_code` rather than sent: one of them is inside the app's own config
+    /// folder, which the editor has no business knowing the path of.
+    #[serde(skip)]
+    libraries: Vec<PathBuf>,
 }
 
 impl Workspace {
     /// One file, in one project. What the editor sends, and what anything else
     /// that compiles a file has to say for itself.
     pub fn new(path: Option<String>, root: Option<String>) -> Workspace {
-        Workspace { path, root, patterns: None }
+        Workspace { path, root, patterns: None, libraries: Vec::new() }
     }
 
     /// The file being run, when it is a file.
@@ -123,6 +128,13 @@ impl Workspace {
     /// cannot play in.
     pub fn set_patterns(&mut self, source: String) {
         self.patterns = Some(source);
+    }
+
+    /// The folders an installed library's modules are looked for in, after the
+    /// project has been asked and had nothing — nearest first, so a copy the
+    /// project carries beats one installed on the machine.
+    pub fn set_libraries(&mut self, stores: Vec<PathBuf>) {
+        self.libraries = stores;
     }
 }
 
@@ -179,7 +191,15 @@ pub fn expand(
         (None, None) => unreachable!("returned above when neither wants a file"),
     };
 
-    expand_from(items, code, ws, &dir, ws.path().as_deref(), implicit.as_deref())
+    expand_from(
+        items,
+        code,
+        ws,
+        &dir,
+        ws.path().as_deref(),
+        implicit.as_deref(),
+        &ws.libraries,
+    )
 }
 
 /// `expand`, against any set of files.
@@ -193,8 +213,27 @@ fn expand_from(
     dir: &Path,
     path: Option<&Path>,
     implicit: Option<&Path>,
+    libraries: &[PathBuf],
 ) -> Result<Vec<ScreeItem>, Diagnostic> {
-    let mut resolver = Resolver::new(src, dir.to_path_buf());
+    expand_scoped(items, code, src, dir, path, implicit, libraries).map(|(items, _)| items)
+}
+
+/// `expand_from`, keeping what the entry file's own scope turned out to be.
+///
+/// The program is what runs; the scope is what the *editor* wants — see
+/// [`symbols`]. Both fall out of the same pass, and doing it twice would be
+/// two answers where there must only ever be one.
+#[allow(clippy::type_complexity)]
+fn expand_scoped(
+    items: Vec<ScreeItem>,
+    code: &str,
+    src: &dyn Sources,
+    dir: &Path,
+    path: Option<&Path>,
+    implicit: Option<&Path>,
+    libraries: &[PathBuf],
+) -> Result<(Vec<ScreeItem>, Scoped), Diagnostic> {
+    let mut resolver = Resolver::new(src, dir.to_path_buf(), libraries.to_vec());
     // The file being run goes on the stack before anything it imports, so a
     // module that imports it back is a cycle rather than a second copy.
     if let Some(path) = path {
@@ -219,11 +258,131 @@ fn expand_from(
         seed.extend(module.exports.iter().map(|(k, v)| (k.clone(), v.clone())));
     }
 
-    let (items, _) = resolver.file(items, code, path, dir, None, seed, modules)?;
+    let expanded = resolver.file(items, code, path, dir, None, seed, modules)?;
+    let scope = Scoped { names: expanded.names, modules: expanded.modules };
 
     let mut program = resolver.out;
-    program.extend(items);
-    Ok(program)
+    program.extend(expanded.items);
+    Ok((program, scope))
+}
+
+/// What the entry file may write, and what each spelling means.
+struct Scoped {
+    /// Written name → the name the program files it under. Everything the file
+    /// imported unqualified, and everything it defines.
+    names: HashMap<String, String>,
+    /// Module alias → the prefix that module's definitions carry, for the
+    /// qualified spellings the file may also write.
+    modules: HashMap<String, String>,
+}
+
+/// One name the file being run may write, and what writing it would reach.
+///
+/// The editor's question rather than the compiler's. Completion has to offer
+/// the spelling *this file* uses — `kick` after `use kit::*`, `kit::kick` after
+/// `use kit`, `k::kick` after `use kit as k` — and the map between a spelling
+/// and a definition is built by expansion and nowhere else. Scraping the `use`
+/// lines with a regex answers three of those four and cannot answer the glob at
+/// all, because the names it introduces live in a file the editor has not read.
+#[derive(serde::Serialize, Debug, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Symbol {
+    /// As this file writes it.
+    pub name: String,
+    /// A `fn`'s parameters, in order. Empty for anything that is not one.
+    pub params: Vec<String>,
+    /// Which of those have a default, and so may be left out — which is also
+    /// what makes one usable as a `play` lane.
+    pub optional: Vec<bool>,
+    /// True for a `fn`: something a `play` could name as an instrument.
+    pub callable: bool,
+}
+
+/// Every name a file may write, resolved exactly as running it would resolve.
+pub fn symbols(items: Vec<ScreeItem>, code: &str, ws: &Workspace) -> Vec<Symbol> {
+    let Some(dir) = ws.dir() else { return Vec::new() };
+    let patterns = ws.patterns_path();
+    let implicit = (ws.path().as_deref() != Some(patterns.as_path())
+        && ws.read(&patterns).is_some())
+    .then_some(patterns);
+
+    let expanded = expand_scoped(
+        items,
+        code,
+        ws,
+        &dir,
+        ws.path().as_deref(),
+        implicit.as_deref(),
+        &ws.libraries,
+    );
+    // A file half-written is a file that does not expand, and that is most of
+    // the time this is asked. Nothing to offer is the right answer: the editor
+    // still has what it scraped from the buffer itself.
+    let Ok((program, scope)) = expanded else { return Vec::new() };
+
+    let mut defined: HashMap<&str, (Vec<String>, Vec<bool>, bool)> = HashMap::new();
+    for item in &program {
+        match item {
+            ScreeItem::Function { name, params, .. } => {
+                defined.insert(
+                    name.0.as_str(),
+                    (
+                        params.iter().map(|p| p.name.0.clone()).collect(),
+                        params.iter().map(|p| p.default.is_some()).collect(),
+                        true,
+                    ),
+                );
+            }
+            ScreeItem::Let { name, .. } => {
+                defined.insert(name.0.as_str(), (Vec::new(), Vec::new(), false));
+            }
+            _ => {}
+        }
+    }
+
+    // Every spelling this file may write, paired with what it reaches.
+    let mut spellings: Vec<(String, &str)> = scope
+        .names
+        .iter()
+        .map(|(written, filed)| (written.clone(), filed.as_str()))
+        .collect();
+    // The qualified ones, which are every definition of a module the file named
+    // without unpacking.
+    for (alias, prefix) in &scope.modules {
+        let head = format!("{prefix}::");
+        for filed in defined.keys() {
+            if let Some(tail) = filed.strip_prefix(&head) {
+                spellings.push((format!("{alias}::{tail}"), filed));
+            }
+        }
+    }
+
+    let mut found: Vec<Symbol> = spellings
+        .into_iter()
+        .filter_map(|(written, filed)| {
+            let (params, optional, callable) = defined.get(filed)?;
+            Some(Symbol {
+                name: written,
+                params: params.clone(),
+                optional: optional.clone(),
+                callable: *callable,
+            })
+        })
+        .collect();
+
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.dedup_by(|a, b| a.name == b.name);
+    found
+}
+
+/// One file, expanded: what it contributes, what it lends out, and what it
+/// could write while it was being read.
+struct Expanded {
+    items: Vec<ScreeItem>,
+    /// Name as this file writes it → name it is filed under here.
+    exports: HashMap<String, String>,
+    names: HashMap<String, String>,
+    modules: HashMap<String, String>,
 }
 
 /// A module that has been read: what its definitions are called now, and what
@@ -258,19 +417,23 @@ struct Resolver<'a> {
     loading: Vec<PathBuf>,
     /// Prefixes handed out, so two modules can never share one.
     prefixes: HashSet<String>,
+    /// Folders holding installed libraries, asked in order once the project
+    /// itself has no file by the name a `use` writes.
+    libraries: Vec<PathBuf>,
     /// Every module's definitions, in the order they must be defined:
     /// a module is always finished before the file that imported it.
     out: Vec<ScreeItem>,
 }
 
 impl<'a> Resolver<'a> {
-    fn new(src: &'a dyn Sources, base: PathBuf) -> Resolver<'a> {
+    fn new(src: &'a dyn Sources, base: PathBuf, libraries: Vec<PathBuf>) -> Resolver<'a> {
         Resolver {
             src,
             base,
             modules: HashMap::new(),
             loading: Vec::new(),
             prefixes: HashSet::new(),
+            libraries,
             out: Vec::new(),
         }
     }
@@ -286,7 +449,9 @@ impl<'a> Resolver<'a> {
     /// read on top of them, and its own definitions on top of those, so both
     /// beat an implicit import the way they beat any other.
     ///
-    /// Returns the file's items, renamed, and what it exports.
+    /// Returns the file's items, renamed, what it exports, and the scope it
+    /// ended up with — which is the editor's business rather than the
+    /// compiler's, and is thrown away everywhere but [`expand_scoped`].
     fn file(
         &mut self,
         items: Vec<ScreeItem>,
@@ -296,7 +461,7 @@ impl<'a> Resolver<'a> {
         prefix: Option<&str>,
         mut names: HashMap<String, String>,
         mut modules: HashMap<String, String>,
-    ) -> Result<(Vec<ScreeItem>, HashMap<String, String>), Diagnostic> {
+    ) -> Result<Expanded, Diagnostic> {
         let mut uses = Vec::new();
         let mut rest = Vec::new();
 
@@ -320,6 +485,13 @@ impl<'a> Resolver<'a> {
         names.extend(exports.iter().map(|(k, v)| (k.clone(), v.clone())));
 
         let mut scope = Scope::new(&names, &modules);
+        // A module's `load` paths move with its definitions, so they are made
+        // absolute here, while the folder they were written in is still known.
+        // The program's own stay as written; nothing has moved them, and
+        // `samples` resolves them against this same folder anyway.
+        if prefix.is_some() {
+            scope = scope.relocating_samples(dir);
+        }
         let mut renamed = Vec::with_capacity(rest.len());
         for mut item in rest {
             scope
@@ -329,7 +501,7 @@ impl<'a> Resolver<'a> {
             renamed.push(item);
         }
 
-        Ok((renamed, exports))
+        Ok(Expanded { items: renamed, exports, names, modules })
     }
 
     /// Resolve one `use`, reading the module it names if nothing has yet, and
@@ -376,45 +548,66 @@ impl<'a> Resolver<'a> {
 
     /// Which file a `use` means, and what it takes from it.
     ///
+    /// Asked of the folder the `use` was written in first, and then of each
+    /// library store in turn — each one answered in full before the next is
+    /// asked, so a file in the project always beats an installed library of the
+    /// same name. Installing something can then never change what a project
+    /// that already worked means.
+    fn locate(&self, u: &Use, dir: &Path) -> Result<(PathBuf, Take), Diagnostic> {
+        let mut looked = Vec::new();
+        for root in std::iter::once(dir).chain(self.libraries.iter().map(PathBuf::as_path)) {
+            if let Some(found) = self.locate_in(u, root, &mut looked) {
+                return Ok(found);
+            }
+        }
+        Err(no_module(u, &looked))
+    }
+
+    /// The same question, of one folder.
+    ///
     /// `use a::b::c` is the one shape that has to be looked up rather than
     /// read: `c` is a module in `a/b/` if there is such a file, and an item of
     /// `a/b.scree` otherwise. Rust resolves the same ambiguity the same way,
     /// by which one exists.
-    fn locate(&self, u: &Use, dir: &Path) -> Result<(PathBuf, Take), Diagnostic> {
-        let whole = module_file(dir, &u.path);
-
-        match &u.tree {
-            UseTree::Names(list) if self.exists(&whole) => {
-                Ok((whole, Take::Names(list.clone())))
-            }
-            UseTree::Glob if self.exists(&whole) => Ok((whole, Take::Glob)),
-            UseTree::Names(_) | UseTree::Glob => Err(no_module(u, &[whole])),
-
-            UseTree::Plain(alias) => {
-                if self.exists(&whole) {
+    ///
+    /// Every path tried goes into `looked`, which is what a failure quotes
+    /// back — so a `use` that finds nothing says where it went.
+    fn locate_in(
+        &self,
+        u: &Use,
+        root: &Path,
+        looked: &mut Vec<PathBuf>,
+    ) -> Option<(PathBuf, Take)> {
+        let whole = module_file(root, &u.path);
+        if self.exists(&whole) {
+            let take = match &u.tree {
+                UseTree::Names(list) => Take::Names(list.clone()),
+                UseTree::Glob => Take::Glob,
+                UseTree::Plain(alias) => {
                     let last = u.path.last().expect("a path has a last segment");
-                    let alias = alias.clone().unwrap_or_else(|| last.clone());
-                    return Ok((whole, Take::Module(alias.0)));
+                    Take::Module(alias.clone().unwrap_or_else(|| last.clone()).0)
                 }
-
-                // Not a file, so the last segment must be something inside the
-                // file the rest of the path names.
-                if u.path.len() >= 2 {
-                    let parent = module_file(dir, &u.path[..u.path.len() - 1]);
-                    if self.exists(&parent) {
-                        let name = u.path.last().expect("checked above").clone();
-                        let take = Take::Names(vec![UseName {
-                            name,
-                            alias: alias.clone(),
-                        }]);
-                        return Ok((parent, take));
-                    }
-                    return Err(no_module(u, &[whole, parent]));
-                }
-
-                Err(no_module(u, &[whole]))
-            }
+            };
+            return Some((whole, take));
         }
+        looked.push(whole);
+
+        // Not a file, so a plain path's last segment must be something inside
+        // the file the rest of it names.
+        let UseTree::Plain(alias) = &u.tree else { return None };
+        if u.path.len() < 2 {
+            return None;
+        }
+
+        let parent = module_file(root, &u.path[..u.path.len() - 1]);
+        if self.exists(&parent) {
+            let name = u.path.last().expect("checked above").clone();
+            let take = Take::Names(vec![UseName { name, alias: alias.clone() }]);
+            return Some((parent, take));
+        }
+        looked.push(parent);
+
+        None
     }
 
     fn exists(&self, path: &Path) -> bool {
@@ -468,7 +661,7 @@ impl<'a> Resolver<'a> {
             HashMap::new(),
         );
         self.loading.pop();
-        let (items, exports) = expanded?;
+        let Expanded { items, exports, .. } = expanded?;
 
         // After its own imports, which are already in `out`: a module is
         // defined only once everything it stands on is.
