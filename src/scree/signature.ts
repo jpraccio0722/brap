@@ -1,94 +1,16 @@
 import { StateField, type EditorState, type Extension } from "@codemirror/state";
 import { EditorView, showTooltip, type Tooltip } from "@codemirror/view";
 import { isCallable, requiredArgs, type Builtin, type BuiltinIndex } from "./metadata";
+import { callAt, lookback, stripComments } from "./callsite";
 
 /**
  * Parameter hints: while the cursor sits inside a call, show that call's
  * signature with the argument being typed picked out.
  *
  * CodeMirror ships completion and linting but no signature help, so this is a
- * small hand-rolled one. It works on raw text rather than the syntax tree
- * because a half-typed `lowpass(` has no tree node to hang off.
+ * small hand-rolled one. Finding the call the cursor is in is [callsite]'s
+ * job, since completion asks the same question.
  */
-
-interface CallSite {
-  name: string;
-  /** Zero-based index of the argument the cursor is in. */
-  argIndex: number;
-}
-
-/** Blank out `//` comments, preserving offsets so positions stay valid. */
-function stripComments(text: string): string {
-  return text.replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
-}
-
-/**
- * How far back to look for the opening parenthesis. Runs on every cursor move,
- * so it reads a window rather than the whole document; no real call site is
- * anywhere near this long.
- */
-const WINDOW = 4000;
-
-/** Text before the cursor, comment-stripped, with the cursor's offset in it.
- *  Starts at a line boundary so a truncated `//` cannot be misread. */
-function lookback(state: EditorState, pos: number): { text: string; pos: number } {
-  const from = pos > WINDOW ? state.doc.lineAt(pos - WINDOW).from : 0;
-  return { text: stripComments(state.doc.sliceString(from, pos)), pos: pos - from };
-}
-
-/**
- * Walk backwards from `pos` to the innermost unclosed `(`, counting the commas
- * that separate it from the cursor.
- *
- * Returns null when the cursor is not inside a call — including when it is
- * inside a list literal, since a `[` reached at depth zero means the nearest
- * enclosing bracket is not a call's parenthesis.
- */
-function callAt(text: string, pos: number): CallSite | null {
-  let depth = 0;
-  let commas = 0;
-
-  for (let i = pos - 1; i >= 0; i--) {
-    const c = text[i];
-
-    if (c === ")" || c === "]") {
-      depth++;
-    } else if (c === "[") {
-      // At depth zero the nearest enclosing bracket is a list literal, not a
-      // call — `[sin(1), 2]` puts the cursor in a list, not in `sin`.
-      if (depth === 0) return null;
-      depth--;
-    } else if (c === "(") {
-      if (depth > 0) {
-        depth--;
-        continue;
-      }
-
-      // Read the identifier immediately before the paren.
-      let j = i - 1;
-      while (j >= 0 && /\s/.test(text[j])) j--;
-      const end = j + 1;
-      while (j >= 0 && /[a-zA-Z0-9_]/.test(text[j])) j--;
-      const name = text.slice(j + 1, end);
-      if (!name || /^[0-9]/.test(name)) return null;
-
-      // `lhs >> f(a)` and its tighter-binding twin `lhs.f(a)` both pass lhs as
-      // f's first argument, so what the user is typing after the paren is
-      // really the second parameter.
-      let k = j;
-      while (k >= 0 && /\s/.test(text[k])) k--;
-      const piped =
-        (k >= 1 && text[k - 1] === ">" && text[k] === ">") ||
-        (text[k] === "." && text[k - 1] !== ".");
-
-      return { name, argIndex: commas + (piped ? 1 : 0) };
-    } else if (c === "," && depth === 0) {
-      commas++;
-    }
-  }
-
-  return null;
-}
 
 /** `lowpass(audio, `**`cutoff`**`, q)` as DOM, with the active param marked. */
 function render(b: Builtin, argIndex: number): HTMLElement {

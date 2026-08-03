@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { open, save } from "@tauri-apps/plugin-dialog";
+import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import CodeMirror from "@uiw/react-codemirror";
 import type { EditorView } from "@codemirror/view";
 import {
@@ -10,9 +10,11 @@ import {
   showErrorLines,
   EMPTY_METADATA,
   loadMetadata,
+  Symbols,
   type LanguageMetadata,
 } from "./scree";
 import { DocsPanel, type DocsFocus } from "./DocsPanel";
+import { LibrariesPanel } from "./LibrariesPanel";
 import { ProblemsPanel, type RunStatus } from "./ProblemsPanel";
 import { ProjectPanel } from "./ProjectPanel";
 import { isWithin } from "./projectTree";
@@ -124,6 +126,22 @@ function isCode(tab: Tab): boolean {
 }
 
 const SCREE_FILTER = [{ name: "scree", extensions: ["scree"] }];
+
+/** What a library pack is called on disk, in both dialogs that name one. */
+const PACK_EXTENSION = "screepack";
+
+/** What `install_library` answers with: what it did, or what it would be
+ *  overwriting if it went ahead. Nothing has been written when it is the
+ *  second. */
+type InstallOutcome =
+  | { kind: "installed" }
+  | { kind: "conflict"; name: string; installed: string; incoming: string };
+
+/** What the project says it is, when it is packed as a library. */
+interface LibraryManifest {
+  name: string;
+  version: string;
+}
 
 /** How wide either side panel may be dragged. The floor is what a pattern's
  *  grid and the sliders need; the ceiling keeps the editor from vanishing. */
@@ -249,6 +267,9 @@ function App() {
   // nothing watches the filesystem, so a change made outside the app has to be
   // asked for.
   const [projectVersion, setProjectVersion] = useState(0);
+  // The same, for what is installed. Bumped by the File menu's Install…, which
+  // lands outside the panel that lists them.
+  const [libraryVersion, setLibraryVersion] = useState(0);
 
   // The engine's own controls, held up here rather than in the title bar
   // because they are half of what a project remembers: opening one puts them
@@ -696,9 +717,18 @@ function App() {
     setDocsFocus((prev) => ({ name, nonce: (prev?.nonce ?? 0) + 1 }));
   }, []);
 
+  // What the active file's `use` lines bring in, which completion needs and
+  // cannot work out for itself. One for the life of the app, like the
+  // extension array it goes into: it is a cache the backend fills, and
+  // rebuilding it would throw the answer away on every render.
+  const symbols = useRef(new Symbols()).current;
+  useEffect(() => {
+    symbols.setWorkspace({ path: activeTab?.path ?? null, root: projectRoot });
+  }, [symbols, activeTab?.path, projectRoot]);
+
   const extensions = useMemo(
-    () => screeExtensions(metadata, patternNames, openDocs),
-    [metadata, patternNames, openDocs],
+    () => screeExtensions(metadata, patternNames, openDocs, symbols),
+    [metadata, patternNames, openDocs, symbols],
   );
 
   /**
@@ -902,6 +932,91 @@ function App() {
   }, [chooseProject, report]);
 
   /**
+   * Install a library pack.
+   *
+   * Installing over one that is already there asks first — the backend answers
+   * with what is installed and what is arriving rather than replacing either
+   * silently, and has written nothing by the time it does. Answering yes is the
+   * same call again, which is why the confirm sits here rather than inside it.
+   */
+  const installLibrary = useCallback(async () => {
+    try {
+      const selected = await open({
+        multiple: false,
+        filters: [{ name: "Scree library", extensions: [PACK_EXTENSION] }],
+      });
+      if (!selected || typeof selected !== "string") return; // user cancelled
+
+      let outcome = await invoke<InstallOutcome>("install_library", {
+        pack: selected,
+        replace: false,
+      });
+
+      if (outcome.kind === "conflict") {
+        const { name, installed, incoming } = outcome;
+        const ok = await confirm(
+          `${name} ${installed || "(no version)"} is already installed. ` +
+            `Replace it with ${incoming || "this copy"}?`,
+          { title: "Replace library", kind: "warning" },
+        );
+        if (!ok) return;
+        outcome = await invoke<InstallOutcome>("install_library", {
+          pack: selected,
+          replace: true,
+        });
+      }
+
+      setLibraryVersion((v) => v + 1);
+      setSideTab("libraries");
+    } catch (e) {
+      report(toDiagnostic(e, "could not install that library"), null);
+    }
+  }, [report]);
+
+  /**
+   * Pack the project up as a library somebody else can install.
+   *
+   * What is packed is named by a `scree-library.json` in the project, beside
+   * the settings file and read the same way — rather than by a dialog asking
+   * for a name every time. A library is exported more than once (that is what a
+   * version is for), and the answers to "what is it called" and "what is in it"
+   * should not have to be retyped, or be able to differ between two exports of
+   * the same folder.
+   *
+   * The file is written the first time, seeded from the project's own name, so
+   * the first export is still one click. If it names something the project does
+   * not hold, the refusal says so and the file is there to correct.
+   */
+  const exportLibrary = useCallback(async () => {
+    if (!projectRoot) {
+      report(
+        toDiagnostic(
+          "a library is packed out of a project — open one first",
+          "nothing to export",
+        ),
+        null,
+      );
+      return;
+    }
+
+    try {
+      const manifest = await invoke<LibraryManifest>("library_manifest", {
+        root: projectRoot,
+      });
+
+      const dest = await save({
+        defaultPath: `${manifest.name}-${manifest.version}.${PACK_EXTENSION}`,
+        filters: [{ name: "Scree library", extensions: [PACK_EXTENSION] }],
+      });
+      if (!dest) return; // user cancelled
+
+      await invoke("export_library", { root: projectRoot, dest });
+    } catch (e) {
+      report(toDiagnostic(e, "could not export that library"), null);
+    }
+  }, [projectRoot, report]);
+
+  /**
    * Evaluate the active tab.
    *
    * A refusal from any compiler pass arrives here as a rejection, and every
@@ -1017,8 +1132,24 @@ function App() {
   // on every keystroke, so the listeners reach them through a ref and subscribe
   // once for the life of the app: re-subscribing is asynchronous, and a menu
   // click landing mid-swap could be heard by both the old listener and the new.
-  const fileActions = useRef({ newTab, openTab, saveTab, newProject, openProject });
-  fileActions.current = { newTab, openTab, saveTab, newProject, openProject };
+  const fileActions = useRef({
+    newTab,
+    openTab,
+    saveTab,
+    newProject,
+    openProject,
+    installLibrary,
+    exportLibrary,
+  });
+  fileActions.current = {
+    newTab,
+    openTab,
+    saveTab,
+    newProject,
+    openProject,
+    installLibrary,
+    exportLibrary,
+  };
 
   useEffect(() => {
     const subscriptions = [
@@ -1027,6 +1158,8 @@ function App() {
       listen("file-save", () => void fileActions.current.saveTab()),
       listen("project-new", () => void fileActions.current.newProject()),
       listen("project-open", () => void fileActions.current.openProject()),
+      listen("library-install", () => void fileActions.current.installLibrary()),
+      listen("library-export", () => void fileActions.current.exportLibrary()),
     ];
     return () => {
       for (const sub of subscriptions) void sub.then((unlisten) => unlisten());
@@ -1266,6 +1399,22 @@ function App() {
               root={projectRoot}
               version={projectVersion}
               onOpen={(path, line, column) => void openAt(path, line, column)}
+            />
+          }
+          libraries={
+            <LibrariesPanel
+              root={projectRoot}
+              // A vendored library is a folder in the project, so anything
+              // that changes what is installed also changes the tree.
+              version={libraryVersion + projectVersion}
+              onInstall={() => void installLibrary()}
+              onChanged={() => {
+                setLibraryVersion((v) => v + 1);
+                setProjectVersion((v) => v + 1);
+              }}
+              onError={(message) =>
+                report(toDiagnostic(message, "library"), null)
+              }
             />
           }
         />

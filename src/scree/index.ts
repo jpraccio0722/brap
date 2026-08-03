@@ -1,13 +1,16 @@
 import type { Extension } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
 import { screeCompletions } from "./complete";
 import { errorMarks } from "./errors";
 import { builtinHelp } from "./help";
 import { screeLanguage } from "./language";
 import { buildIndex, type LanguageMetadata } from "./metadata";
 import { signatureHelp } from "./signature";
+import { Symbols } from "./symbols";
 
 export { EMPTY_METADATA, loadMetadata, type LanguageMetadata } from "./metadata";
 export { revealPosition, showErrorLines } from "./errors";
+export { Symbols } from "./symbols";
 
 /**
  * Every scree editor extension, built from one metadata snapshot.
@@ -24,15 +27,25 @@ export { revealPosition, showErrorLines } from "./errors";
  * this array's identity must not.
  * @param openDocs Where a ⌘-clicked builtin goes. Bound by the same rule as
  * `patternNames`: its identity has to hold across renders.
+ * @param symbols What the file's imports bring in, kept up to date by whoever
+ * owns the workspace — the same rule again, and for the same reason.
  */
 export function screeExtensions(
   meta: LanguageMetadata,
   patternNames: () => string[],
   openDocs: (name: string) => void,
+  symbols: Symbols,
 ): Extension[] {
   const index = buildIndex(meta);
   return [
-    screeLanguage(meta, index, screeCompletions(meta, patternNames)),
+    screeLanguage(meta, index, screeCompletions(meta, patternNames, symbols)),
+    // Imports are looked up as the document changes rather than when a menu
+    // opens, because the lookup is a round trip: asking at the menu would
+    // answer after it had been drawn, and the first completion after writing a
+    // `use` — the one that matters — would be the one without it.
+    EditorView.updateListener.of((update) => {
+      if (update.docChanged) symbols.refresh(update.state.doc.toString());
+    }),
     signatureHelp(index),
     builtinHelp(index, openDocs),
     // Holds nothing until a run fails; the marks arrive by transaction, which

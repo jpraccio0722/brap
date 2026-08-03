@@ -30,6 +30,7 @@ mod parser;
 mod scree_graph;
 mod lowerer;
 mod lang;
+mod library;
 mod project;
 mod samples;
 
@@ -66,6 +67,7 @@ mod samples;
 /// not compile leaves whatever is playing alone.
 #[tauri::command]
 fn run_code(
+    app: tauri::AppHandle,
     code: String,
     patterns: Option<Vec<GraphicalPattern>>,
     workspace: Workspace,
@@ -78,6 +80,9 @@ fn run_code(
         graphical::check_names(patterns)?;
         workspace.set_patterns(graphical::to_source(patterns));
     }
+    // Where a `use` looks once the project has no file by that name. Filled in
+    // here because the editor does not know where either store is.
+    workspace.set_libraries(library_stores(&app, workspace.root.as_deref()));
 
     // Imports are resolved into the program before anything else sees it, so
     // the lowerer, the realizer and the scheduler all compile one flat file.
@@ -367,6 +372,152 @@ fn save_project(root: String, project: Project) -> Result<String, Diagnostic> {
         .map(|path| path.display().to_string())
 }
 
+/// Where installed libraries are looked for, nearest first: the project's own
+/// copies, then the ones installed on this machine.
+///
+/// The order is the whole of the precedence rule, and it is written here rather
+/// than in the resolver because only this side knows where either folder is —
+/// the global one is inside the app's config directory, which the editor has no
+/// business knowing the path of.
+fn library_stores(app: &tauri::AppHandle, root: Option<&str>) -> Vec<std::path::PathBuf> {
+    let mut stores = Vec::new();
+    if let Some(root) = root {
+        stores.push(library::project_store(std::path::Path::new(root)));
+    }
+    if let Ok(dir) = app.path().app_config_dir() {
+        stores.push(library::store_in(&dir));
+    }
+    stores
+}
+
+/// The global store, made if it is not there yet.
+///
+/// Installing is the first thing that ever needs the folder to exist, so it is
+/// the first thing that makes it.
+fn global_store(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    let dir = app
+        .path()
+        .app_config_dir()
+        .map(|dir| library::store_in(&dir))
+        .map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Every library this project can reach — its own copies first, then the
+/// machine's, and never the same name twice.
+///
+/// A project copy hides a global one of the same name exactly as it does at a
+/// `use`, so the list reads as what a program in this project would actually
+/// get.
+#[tauri::command]
+fn list_libraries(
+    app: tauri::AppHandle,
+    root: Option<String>,
+) -> Result<Vec<library::Library>, String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut all = Vec::new();
+
+    if let Some(root) = &root {
+        let store = library::project_store(std::path::Path::new(root));
+        for lib in library::list(&store, library::Source::Project) {
+            seen.insert(lib.name.clone());
+            all.push(lib);
+        }
+    }
+
+    if let Ok(dir) = app.path().app_config_dir() {
+        for lib in library::list(&library::store_in(&dir), library::Source::Global) {
+            if seen.insert(lib.name.clone()) {
+                all.push(lib);
+            }
+        }
+    }
+
+    all.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(all)
+}
+
+/// Install a pack, for every project on this machine.
+///
+/// Answers rather than fails when something of that name is already installed,
+/// so the editor can say what is there and what is arriving and ask. Nothing
+/// has been written when it does.
+#[tauri::command]
+fn install_library(
+    app: tauri::AppHandle,
+    pack: String,
+    replace: bool,
+) -> Result<library::Outcome, String> {
+    let store = global_store(&app)?;
+    library::install(
+        std::path::Path::new(&pack),
+        &store,
+        library::Source::Global,
+        replace,
+    )
+}
+
+/// Uninstall a library, from whichever store it is in.
+#[tauri::command]
+fn remove_library(
+    app: tauri::AppHandle,
+    name: String,
+    source: library::Source,
+    root: Option<String>,
+) -> Result<(), String> {
+    let store = match (source, root.as_deref()) {
+        (library::Source::Project, Some(root)) => library::project_store(std::path::Path::new(root)),
+        (library::Source::Project, None) => {
+            return Err(format!("`{name}` belongs to a project, and none is open"))
+        }
+        (library::Source::Global, _) => global_store(&app)?,
+    };
+    library::remove(&name, &store)
+}
+
+/// What this project would be packed as.
+///
+/// Reads `scree-library.json`, and writes a seeded one if the project has none
+/// — so the editor can name the file it is about to save without asking, and
+/// the name lives somewhere it can be corrected.
+#[tauri::command]
+fn library_manifest(root: String) -> Result<library::Manifest, String> {
+    let root = std::path::Path::new(&root);
+    let seed = project::read(root)
+        .ok()
+        .flatten()
+        .map(|p| p.name)
+        .unwrap_or_else(|| {
+            root.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "library".to_string())
+        });
+    library::project_manifest(root, &seed)
+}
+
+/// Pack a project up as a library.
+#[tauri::command]
+fn export_library(root: String, dest: String) -> Result<String, String> {
+    let root = std::path::Path::new(&root);
+    let manifest = library_manifest(root.display().to_string())?;
+    library::export(root, &manifest, std::path::Path::new(&dest))
+        .map(|path| path.display().to_string())
+}
+
+/// Copy a library into the project, so the project carries its own.
+#[tauri::command]
+fn vendor_library(
+    app: tauri::AppHandle,
+    name: String,
+    root: String,
+) -> Result<library::Library, String> {
+    let from = global_store(&app)?;
+    let to = library::project_store(std::path::Path::new(&root));
+    library::vendor(&name, &from, &to)
+}
+
 /// One entry in a project directory, as the project panel draws it.
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -558,6 +709,35 @@ fn language_metadata() -> lang::LanguageMetadata {
     lang::metadata()
 }
 
+/// Every name the file in the editor may write, as running it would resolve
+/// them.
+///
+/// What completion cannot work out for itself. It scrapes the buffer with
+/// regexes — a half-written file has no syntax tree to walk, and a round trip
+/// per keystroke would be worse than imprecise — and that reaches everything a
+/// `use` names *except* what a glob brings in, whose names live in a file the
+/// editor has never read. An installed library is that case almost by
+/// definition: `use kit::*` is the whole reason to install one.
+///
+/// So this runs the real expander and reports the spellings it ends up with. It
+/// is asked when the file's `use` lines change rather than as it is typed, and
+/// it never fails: a file mid-edit expands to nothing, and nothing extra to
+/// offer is the right answer while it does.
+#[tauri::command]
+fn module_symbols(
+    app: tauri::AppHandle,
+    code: String,
+    workspace: Workspace,
+) -> Vec<imports::Symbol> {
+    let mut workspace = workspace;
+    workspace.set_libraries(library_stores(&app, workspace.root.as_deref()));
+
+    match parse(code.clone()) {
+        Ok(items) => imports::symbols(items, &code, &workspace),
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Menu item ids, which are also the events the frontend listens for. One
 /// constant each so the two can't drift apart.
 const MENU_NEW: &str = "file-new";
@@ -565,6 +745,8 @@ const MENU_OPEN: &str = "file-open";
 const MENU_SAVE: &str = "file-save";
 const MENU_NEW_PROJECT: &str = "project-new";
 const MENU_OPEN_PROJECT: &str = "project-open";
+const MENU_INSTALL_LIBRARY: &str = "library-install";
+const MENU_EXPORT_LIBRARY: &str = "library-export";
 
 /// The event a playback failure reaches the editor on.
 ///
@@ -576,12 +758,14 @@ const SCHEDULER_ERROR: &str = "scheduler-error";
 
 /// Every id the File menu can raise. The event handler forwards these and
 /// ignores anything else, so the platform's own items keep working.
-const FILE_ITEMS: [&str; 5] = [
+const FILE_ITEMS: [&str; 7] = [
     MENU_NEW,
     MENU_OPEN,
     MENU_SAVE,
     MENU_NEW_PROJECT,
     MENU_OPEN_PROJECT,
+    MENU_INSTALL_LIBRARY,
+    MENU_EXPORT_LIBRARY,
 ];
 
 /// The platform's default menu with New, Open and Save added to the top of
@@ -601,17 +785,26 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         MenuItem::with_id(app, MENU_NEW_PROJECT, "New Project…", true, None::<&str>)?;
     let open_project_item =
         MenuItem::with_id(app, MENU_OPEN_PROJECT, "Open Project…", true, None::<&str>)?;
+    // Libraries are a rarer act still: installed once and then forgotten about,
+    // which is the point of them.
+    let install_library_item =
+        MenuItem::with_id(app, MENU_INSTALL_LIBRARY, "Install Library…", true, None::<&str>)?;
+    let export_library_item =
+        MenuItem::with_id(app, MENU_EXPORT_LIBRARY, "Export as Library…", true, None::<&str>)?;
 
-    // Three groups, because there are three kinds of act here: making or
-    // fetching a file, choosing which folder the project panel shows, and
-    // saving. The trailing rule keeps all of it off whatever the platform put
-    // in File.
-    let items: [&dyn IsMenuItem<tauri::Wry>; 8] = [
+    // Four groups, because there are four kinds of act here: making or fetching
+    // a file, choosing which folder the project panel shows, moving a library
+    // in or out, and saving. The trailing rule keeps all of it off whatever the
+    // platform put in File.
+    let items: [&dyn IsMenuItem<tauri::Wry>; 11] = [
         &new_item,
         &open_item,
         &PredefinedMenuItem::separator(app)?,
         &new_project_item,
         &open_project_item,
+        &PredefinedMenuItem::separator(app)?,
+        &install_library_item,
+        &export_library_item,
         &PredefinedMenuItem::separator(app)?,
         &save_item,
         &PredefinedMenuItem::separator(app)?,
@@ -783,6 +976,13 @@ pub fn run() {
             files::move_path,
             files::delete_path,
             files::search::search_project,
+            list_libraries,
+            install_library,
+            remove_library,
+            vendor_library,
+            library_manifest,
+            export_library,
+            module_symbols,
             language_metadata
         ])
         .setup(|app| {

@@ -41,6 +41,11 @@ Opening a folder that has no such file changes nothing: the transport stays
 where you left it, and the file appears the first time you move something (or
 straight away, for `New Project…`).
 
+Two more files may turn up beside it, and both are covered under
+[Libraries](#libraries): a `scree-library.json` if you have ever exported the
+project as one, and a hidden `.scree/libraries/` if you have vendored a library
+into it.
+
 
 ## The project panel
 
@@ -65,6 +70,13 @@ back out rather than the delete taking it with it.
 project. Results are grouped by file and each one is a link — click it and the
 file opens with the cursor on that line. `Aa` matches case and `ab` matches
 whole words.
+
+**Libraries** is the third, and lists what is installed on this machine or
+carried by this project. See [Libraries](#libraries).
+
+Hidden files are left out of all three — the tree, the search and the walk
+behind them skip anything starting with a `.`, so a project's `.git` and the
+`.scree/` a vendored library lives in stay out of the way.
 
 
 ## Imports
@@ -109,6 +121,65 @@ play([\, `, \, `], kit::kick)
 ```
 
 
+## Libraries
+
+A library is a folder of modules somebody else wrote. Install one and every
+project on the machine can `use` it — the spelling does not change, because an
+installed library is a folder a `use` resolves in like any other:
+
+```rust
+use kit               // kit::kick, kit::hat
+use kit::drums::*     // however you would write it for a file in the project
+```
+
+**File ▸ Install Library…** takes a `.screepack` — a zip with a name on it —
+and the **Libraries** tab in the left panel lists what is installed. Each row
+can be revealed on disk, removed, or **vendored**: copied into the project, so
+the project stops depending on what happens to be installed here. Hand that
+folder to somebody, or check it into a repository, and it still plays.
+
+A `use` is answered by the first of these that has the file, and the project is
+always asked in full before either store:
+
+| | |
+|---|---|
+| beside the file | as it always was |
+| `.scree/libraries/` | the copies this project carries |
+| the machine's store | everything installed |
+
+So a `kit.scree` in the project wins over a `kit` that is installed, and
+installing something can never change what a project that already worked means.
+The Libraries tab says so on any row a project file is hiding.
+
+### Making one
+
+**File ▸ Export as Library…** packs the project up. What is packed is named by a
+`scree-library.json` beside the settings file, written for you on the first
+export and yours to edit after:
+
+```json
+{
+  "name": "kit",
+  "version": "1.2.0",
+  "author": "Somebody",
+  "description": "Nine drums and the samples for them."
+}
+```
+
+**A library owns one name, and packs exactly what is under it** — `kit.scree`
+and `kit/`, with whatever samples are in there. That one rule is what makes
+installing safe: two libraries can never write the same file, so there is never
+a question of which one won, and no version resolution behind it to get wrong.
+Installing over a library already there says what is installed and what is
+arriving, and replaces it only if you say so.
+
+Exporting refuses anything that would not survive the trip to another machine —
+an absolute `load` path, a path that reaches out of the library, a `use` at the
+top of it that names something the library does not carry. All three work
+perfectly on the machine they were written on, which is why they are worth
+catching there.
+
+
 ## Drawn patterns
 
 The right-hand panel draws patterns on a grid: click a cell to walk it through
@@ -144,6 +215,10 @@ wav, mp3, flac, ogg:
 ```rust
 let amen = load("breaks/amen.wav")
 ```
+
+That holds inside an imported module too: a path written in `kit/drums.scree`
+is relative to `kit/`, wherever the file that imported it lives. It is what lets
+a library carry its own samples.
 
 A buffer is not audio. Nothing comes out of it until `sample` reads it **at a
 position**, where 0 is the start of the buffer and 1 is the end:

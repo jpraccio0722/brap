@@ -35,4 +35,5 @@ tauri-plugin-dialog = "2.7.2"
 rand = "0.10"
 rand_distr = "0.6"
 trash = "5.2.6"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 

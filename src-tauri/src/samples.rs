@@ -159,7 +159,10 @@ impl Cache {
 /// not lowered until the scheduler builds a voice from it — by which time the
 /// file has to be in memory already. Duplicates come through; the caller drops
 /// them.
-fn paths_in(items: &[ScreeItem]) -> Vec<String> {
+///
+/// Visible to the import tests, which have the same question in the other
+/// direction: what an expanded program will go looking for.
+pub(crate) fn paths_in(items: &[ScreeItem]) -> Vec<String> {
     let mut found = Vec::new();
     for item in items {
         match item {

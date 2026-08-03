@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { PanelTab, PanelTabs } from "./PanelTabs";
 
 /** Which of the panel's views is on top. */
-export type SideTab = "problems" | "project" | "search";
+export type SideTab = "problems" | "project" | "search" | "libraries";
 
 interface SidePanelProps {
   open: boolean;
@@ -17,6 +17,7 @@ interface SidePanelProps {
   problems: ReactNode;
   project: ReactNode;
   search: ReactNode;
+  libraries: ReactNode;
 }
 
 /**
@@ -38,6 +39,7 @@ export function SidePanel({
   problems,
   project,
   search,
+  libraries,
 }: SidePanelProps) {
   return (
     <aside
@@ -57,6 +59,11 @@ export function SidePanel({
           label="Search"
           selected={tab === "search"}
           onClick={() => onTabChange("search")}
+        />
+        <PanelTab
+          label="Libraries"
+          selected={tab === "libraries"}
+          onClick={() => onTabChange("libraries")}
         />
         <PanelTab
           label="Problems"
@@ -89,6 +96,14 @@ export function SidePanel({
         }
       >
         {search}
+      </div>
+      <div
+        className={
+          "min-h-0 flex-1 flex-col overflow-y-auto " +
+          (tab === "libraries" ? "flex" : "hidden")
+        }
+      >
+        {libraries}
       </div>
 
       {/* Mirrors the transport's handle, on the edge that faces the editor. */}
