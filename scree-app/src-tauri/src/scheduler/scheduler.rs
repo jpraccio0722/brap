@@ -600,6 +600,56 @@ mod pass_tests {
         assert!(peak(0.35, 0.5) < 0.02, "and be finished by 0.35 s, got {}", peak(0.35, 0.5));
     }
 
+    /// The same fault a third way, and the one that showed it was not really
+    /// about envelopes: an instrument whose echoes come back after its envelope
+    /// has finished was cut off at the envelope, so only the first repeat or
+    /// two were ever heard. The voice now lasts the whole chain — the release
+    /// rings out and the delay hands that back later still.
+    #[test]
+    fn an_echo_that_arrives_after_the_envelope_is_still_heard() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        // A 0.1 s blip echoed at 0.4 and 0.8 s, on a note of 0.5 s with a
+        // 0.1 s release — the second echo lands well past both.
+        let src = "fn ping(n) = { \
+                     let dry = sin(n) * env(0.001, 0.05, 0.2, 0.1, dur)\n\
+                     dry + delay(dry, 0.4) * 0.7 + delay(dry, 0.8) * 0.5 \
+                   }\n\
+                   play([220, `], ping)\n";
+        let ast = parse(src.to_string()).unwrap();
+        let lowered = lower(&ast).expect("lower failed");
+        let state = SchedulerState::new();
+        *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *state.patterns.lock().unwrap() =
+            Patterns { bindings: lowered.bindings, ..Default::default() };
+
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+        let mut live = Vec::new();
+        schedule_pass(&mut seq, &clock, &state, None, &mut live);
+
+        assert_eq!(live.len(), 1, "one note should have been pushed");
+        assert!(
+            (live[0].end_secs - 1.4).abs() < 1e-6,
+            "0.5 s note, 0.1 s release, 0.8 s echo, got {}",
+            live[0].end_secs,
+        );
+
+        let s: Vec<f32> = (0..(44100.0 * 1.5) as usize).map(|_| seq.get_stereo().0).collect();
+        let peak = |from: f64, to: f64| {
+            s[(from * 44100.0) as usize..(to * 44100.0) as usize]
+                .iter()
+                .fold(0.0f32, |m, v| m.max(v.abs()))
+        };
+
+        assert!(peak(0.0, 0.1) > 0.3, "the dry blip, got {}", peak(0.0, 0.1));
+        assert!(peak(0.4, 0.5) > 0.2, "the first echo, got {}", peak(0.4, 0.5));
+        assert!(peak(0.8, 0.9) > 0.1, "the second echo, past the release and the note's own \
+                                       step, got {}", peak(0.8, 0.9));
+    }
+
     /// The tail is added to the note the pattern gave, so `legato` shortens
     /// what is held and the release still gets its own time afterwards.
     #[test]

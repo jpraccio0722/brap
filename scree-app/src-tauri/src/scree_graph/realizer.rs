@@ -35,6 +35,27 @@ const ENV_RELEASE_INPUT: usize = 3;
 const PERC_ATTACK_INPUT: usize = 0;
 const PERC_RELEASE_INPUT: usize = 1;
 
+/// The input indices the time-displacing nodes take their times from. A tap's
+/// delay is a signal rather than a constant, so it declares bounds as well.
+const DELAY_TIME_INPUT: usize = 1;
+const TAP_DELAY_INPUT: usize = 1;
+const TAP_MIN_INPUT: usize = 2;
+const TAP_MAX_INPUT: usize = 3;
+const REVERB_TIME_INPUT: usize = 2;
+const REVERB3_TIME_INPUT: usize = 1;
+
+/// The longest a voice may be held open past its note, however long its own
+/// chain says it needs.
+///
+/// A tail is not free: every voice still ringing is a whole realized graph the
+/// sequencer keeps rendering, so a tail of `t` seconds against a pattern of `n`
+/// notes a second costs `t * n` live networks at once. Musical delays and
+/// reverbs are seconds; `reverb(x, 10, 120, 0.5)` is a typo, and honouring it
+/// would pin hundreds of voices open and miss the real-time deadline — which
+/// costs the whole performance, not just the note that asked. Ten seconds
+/// covers every tail anyone means and bounds what a slipped digit can do.
+const MAX_TAIL_SECS: f64 = 10.0;
+
 /// A construction-time constant that is a usable length in seconds.
 ///
 /// `None` for anything else, which is a graph the realizer is about to refuse
@@ -47,43 +68,101 @@ fn const_secs(n: &UGenNode, idx: usize) -> Option<f64> {
     }
 }
 
-/// How long one envelope goes on past the end of its note, or `None` for a
-/// node that is not one.
+/// How far a tap can still be reaching back when its input goes quiet.
 ///
-/// The two shapes are anchored differently, which is the whole of why this is
-/// not simply "the release time": `env` hangs its release off the end of the
-/// note, so that release is the tail whatever the note was, while `perc`
-/// measures its own shape from the onset and does not know the note exists —
-/// it asks for room only when it does not fit. Must be kept in step with
-/// `NodeKind::Env` and `NodeKind::Perc` below.
-fn envelope_tail(n: &UGenNode, dur_secs: f64) -> Option<f64> {
+/// The delay is a signal, so where it actually sits is not knowable here — but
+/// the bounds it declares are, and the realized `tap` clamps to them. A
+/// constant delay is worth reading anyway, because it is the common case and
+/// taking the declared maximum for it would hold every voice open for a reach
+/// the graph can never make: `tap(x, 0.25, 0.1, 5)` is a quarter-second echo,
+/// not a five-second one.
+///
+/// Bounds the wrong way round is a graph `tap` is about to refuse, so the
+/// clamp is written to answer rather than to panic.
+fn tap_tail(n: &UGenNode) -> f64 {
+    let min = const_secs(n, TAP_MIN_INPUT).unwrap_or(0.0);
+    let max = const_secs(n, TAP_MAX_INPUT).unwrap_or(0.0);
+    match const_secs(n, TAP_DELAY_INPUT) {
+        Some(t) => t.max(min).min(max),
+        None => max,
+    }
+}
+
+/// How long one node goes on sounding after everything feeding it has stopped.
+///
+/// This is the node's *own* contribution; what reaches it from upstream is
+/// added by `tail_secs`. Two kinds of node have one. **Envelopes** shape the
+/// note itself, and the two are anchored differently — `env` hangs its release
+/// off the end of the note, so that release is the tail whatever the note was,
+/// while `perc` measures its own shape from the onset and does not know the
+/// note exists, so it asks for room only when it does not fit. **Anything that
+/// displaces a signal in time** has one for a different reason: a delay hands
+/// its input back later, and a reverb goes on answering long after it stops
+/// being fed, so the sound arrives after the thing that made it is finished.
+///
+/// Everything else — oscillators, filters, shapers, arithmetic — answers
+/// within a sample, and passes its input's tail through untouched.
+///
+/// Must be kept in step with the corresponding arms of `realize` below, which
+/// is where these input indices are read for real.
+fn own_tail(n: &UGenNode, dur_secs: f64) -> f64 {
     match n.kind {
-        NodeKind::Env => Some(const_secs(n, ENV_RELEASE_INPUT)?),
-        NodeKind::Perc => Some(
-            (const_secs(n, PERC_ATTACK_INPUT)? + const_secs(n, PERC_RELEASE_INPUT)? - dur_secs)
-                .max(0.0),
-        ),
-        _ => None,
+        NodeKind::Env => const_secs(n, ENV_RELEASE_INPUT).unwrap_or(0.0),
+        NodeKind::Perc => match (
+            const_secs(n, PERC_ATTACK_INPUT),
+            const_secs(n, PERC_RELEASE_INPUT),
+        ) {
+            (Some(a), Some(r)) => (a + r - dur_secs).max(0.0),
+            _ => 0.0,
+        },
+        NodeKind::Delay => const_secs(n, DELAY_TIME_INPUT).unwrap_or(0.0),
+        NodeKind::Tap => tap_tail(n),
+        // Every reverb's `time` is its decay to -60 dB, which is where it stops
+        // being worth holding a voice open for. `reverb3` has no room size, so
+        // its time sits one input earlier.
+        NodeKind::Reverb | NodeKind::Reverb2 | NodeKind::Reverb4 => {
+            const_secs(n, REVERB_TIME_INPUT).unwrap_or(0.0)
+        }
+        NodeKind::Reverb3 => const_secs(n, REVERB3_TIME_INPUT).unwrap_or(0.0),
+        _ => 0.0,
     }
 }
 
 /// How long a graph goes on sounding past the end of its note.
 ///
-/// A voice is only rendered for as long as its sequencer event lasts, so an
-/// envelope that has not finished by then is cut off mid-shape — a rest after
-/// a long `env` release, or a drum whose `perc` outlasts the step it sits on,
-/// used to be silence where the instrument should still have been ringing.
-/// This is what the scheduler adds to the note to give it room.
+/// A voice is only rendered for as long as its sequencer event lasts, so
+/// anything still sounding when it ends is cut off mid-shape — a rest after a
+/// long `env` release, a drum whose `perc` outlasts the step it sits on, an
+/// echo that has not come back yet, a reverb tail that stops dead. This is what
+/// the scheduler adds to the note to give all of it room.
 ///
-/// The longest tail wins: several envelopes in one voice all have to finish.
-/// Zero for a voice that ends with its note, which is the usual case and why
-/// most voices stop exactly on their step.
+/// **Tails accumulate along the signal path**, which is why this walks the
+/// graph rather than taking the longest node: an `env` into a `delay` rings for
+/// its release and *then* is handed back a delay later, so the voice needs the
+/// sum of the two. Parallel branches take the longest — a dry signal added to
+/// its own echoes lasts as long as the last echo, not as long as all of them.
+/// One pass in id order suffices because a node's inputs are always nodes
+/// already pushed, the same footing `realize` wires on.
+///
+/// Only what reaches the output counts, and zero is the usual answer — most
+/// voices end with their note, which is why most stop exactly on their step.
 pub fn tail_secs(graph: &ScreeGraph, dur_secs: f64) -> f64 {
-    graph
-        .nodes
-        .iter()
-        .filter_map(|n| envelope_tail(n, dur_secs))
-        .fold(0.0, f64::max)
+    let Some(out) = graph.output else { return 0.0 };
+
+    let mut tails: Vec<f64> = Vec::with_capacity(graph.nodes.len());
+    for n in &graph.nodes {
+        let upstream = n
+            .inputs
+            .iter()
+            .filter_map(|i| match i {
+                NodeInput::Node(id) => tails.get(id.0).copied(),
+                NodeInput::Const(_) => None,
+            })
+            .fold(0.0, f64::max);
+        tails.push(upstream + own_tail(n, dur_secs));
+    }
+
+    tails.get(out.0).copied().unwrap_or(0.0).min(MAX_TAIL_SECS)
 }
 
 /// Pull input `idx` as a construction-time constant. Parameters like ADSR
@@ -587,13 +666,19 @@ mod envelope_tests {
 
     /// What the scheduler asks a voice for: how much longer than the note it
     /// needs to finish what it started.
+    fn tail_of(src: &str, dur: f64) -> f64 {
+        let items = parse(src.to_string()).expect("parse failed");
+        let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
+        tail_secs(&lowered.graph, dur)
+    }
+
+    fn assert_tail(src: &str, dur: f64, want: f64) {
+        let got = tail_of(src, dur);
+        assert!((got - want).abs() < 1e-6, "{src}: wanted a tail of {want}, got {got}");
+    }
+
     #[test]
     fn the_tail_is_how_far_an_envelope_outlasts_the_note() {
-        let tail_of = |src: &str, dur: f64| {
-            let items = parse(src.to_string()).expect("parse failed");
-            let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
-            tail_secs(&lowered.graph, dur)
-        };
 
         // Nothing time-shaped: the voice ends with its note.
         assert_eq!(tail_of("sin(220)\n", 1.0), 0.0);
@@ -613,6 +698,69 @@ mod envelope_tests {
         let two = "sin(220) * perc(0.01, 0.4) + sin(330) * env(0.01, 0.1, 0.5, 0.05, dur)\n";
         assert!((tail_of(two, 0.125) - 0.285).abs() < 1e-6, "got {}", tail_of(two, 0.125));
         assert!((tail_of(two, 1.0) - 0.05).abs() < 1e-6, "got {}", tail_of(two, 1.0));
+    }
+
+    /// The reported bug: a voice whose echoes arrive after its envelope has
+    /// finished was cut off at the envelope, so the delay was inaudible from
+    /// the second repeat on. What displaces a signal in time has a tail like
+    /// what shapes it, and the two add up along the path — the envelope rings
+    /// out, and only then is that whole sound handed back a delay later.
+    #[test]
+    fn a_delay_holds_the_voice_open_until_its_echo_has_come_back() {
+        let env = "sin(220) * env(0.01, 0.1, 0.5, 0.3, dur)";
+
+        assert_tail(&format!("{env} >> delay(0.5)\n"), 1.0, 0.8);
+        assert_tail(&format!("{env} >> delay(0.5) >> delay(0.25)\n"), 1.0, 1.05,);
+
+        // A dry signal beside its own echo lasts as long as the echo — the two
+        // branches happen at once, so the longest of them is the answer and
+        // not the sum.
+        assert_tail(&format!("let a = {env}\na + (a >> delay(0.5))\n"), 1.0, 0.8);
+    }
+
+    /// A reverb goes on answering long after it stops being fed, and `time` is
+    /// its own statement of how long: the decay to -60 dB.
+    #[test]
+    fn a_reverb_holds_the_voice_open_for_its_decay() {
+        let dry = "sin(220) * perc(0.01, 0.1)";
+
+        assert_tail(&format!("{dry} + reverb({dry}, 10, 3, 0.5) * 0.2\n"), 1.0, 3.0);
+        // `reverb3` has no room size, so its time sits one input earlier —
+        // reading the wrong one here would silently give a voice no tail.
+        assert_tail(&format!("reverb3({dry}, 2.5, 0.5, 4000)\n"), 1.0, 2.5);
+    }
+
+    /// A tap's delay is a signal, so the graph cannot always say where it
+    /// sits. The declared bounds always can, and a constant delay — which is
+    /// most of them — is worth reading rather than assuming the worst.
+    #[test]
+    fn a_tap_asks_for_where_it_reaches_and_falls_back_on_its_bounds() {
+        let dry = "sin(220) * perc(0.01, 0.1)";
+
+        assert_tail(&format!("tap({dry}, 0.25, 0.1, 5)\n"), 1.0, 0.25);
+        // Below the declared minimum is where the realized tap clamps it to.
+        assert_tail(&format!("tap({dry}, 0, 0.1, 5)\n"), 1.0, 0.1);
+        // Modulated: nothing constant to read, so the bound it declared stands.
+        assert_tail(&format!("tap({dry}, sin(0.5) * 0.5 + 1, 0.1, 3)\n"), 1.0, 3.0);
+    }
+
+    /// A tail costs live voices, so a number nobody meant must not be able to
+    /// pin the sequencer open. The cap is a ceiling, not a rounding — anything
+    /// musical passes through it untouched.
+    #[test]
+    fn an_implausible_tail_is_capped() {
+        let dry = "sin(220) * perc(0.01, 0.1)";
+
+        assert_tail(&format!("reverb({dry}, 10, 120, 0.5)\n"), 1.0, MAX_TAIL_SECS);
+        assert_tail(&format!("{dry} >> delay(4)\n"), 1.0, 4.0);
+    }
+
+    /// Only what reaches the output is still to be heard, so a binding the
+    /// program never used cannot hold a voice open.
+    #[test]
+    fn a_tail_on_a_signal_nothing_listens_to_does_not_count() {
+        let src = "let unused = sin(220) >> delay(2)\nsin(330) * perc(0.01, 0.1)\n";
+        assert_tail(src, 1.0, 0.0);
     }
 
     /// Degenerate shapes must not panic, go negative, or exceed 1.
