@@ -1,7 +1,7 @@
 use std::fmt::format;
 use std::rc::Rc;
 
-use crate::scree_graph::environment::{Env, Item, Value};
+use crate::scree_graph::environment::{Env, Item, Length, Value};
 use crate::scree_graph::ugen_nodes::{NodeInput, NodeKind};
 use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{CmpOp, Expr, Statement};
@@ -170,24 +170,32 @@ impl Lowerer {
                 result
             }
 
-            // A `;` length is folded to a number here, alongside the element it
-            // belongs to, and checked for being one at all. What it goes on to
-            // *mean* is not this layer's business: a pattern reads it as time,
-            // a lane as a count of notes, and `len` not at all.
+            // A `;` length is folded here, alongside the element it belongs to,
+            // and checked for being something a length may be at all. Which of
+            // the two kinds it turned out to be is carried rather than resolved:
+            // what a length goes on to *mean* is not this layer's business — a
+            // pattern reads a share as time and a written value as beats, a lane
+            // reads either as a count of notes, and `len` reads neither.
             Expr::List(items) => {
                 let mut vals = Vec::with_capacity(items.len());
                 for item in items.iter() {
                     let value = self.expr(&item.value)?;
                     let length = match &item.length {
                         None => None,
-                        Some(e) => {
-                            let n = self.number(e, "a `;` length")?;
-                            if !n.is_finite() || n <= 0.0 {
-                                return Err(format!(
-                                    "a `;` length must be a positive number, got {n}"));
+                        Some(e) => Some(match self.expr(e)? {
+                            Value::Number(n) => {
+                                if !n.is_finite() || n <= 0.0 {
+                                    return Err(format!(
+                                        "a `;` length must be a positive number, got {n}"));
+                                }
+                                Length::Ratio(n)
                             }
-                            Some(n)
-                        }
+                            Value::Duration(b) => Length::Beats(b),
+                            Value::Tuplet => Length::Tuplet,
+                            _ => return Err(
+                                "a `;` length needs a compile-time number or a written \
+                                 note value, got a signal".to_string()),
+                        }),
                     };
                     vals.push(Item { value, length });
                 }
@@ -247,8 +255,17 @@ impl Lowerer {
             // A name the environment does not know may still be a note: `c4`,
             // `as3`, `af1`. Bindings win, so a user `let` or parameter shadows
             // a note name rather than colliding with it.
+            //
+            // Written values and the tuplet marker resolve the same way and for
+            // the same reason. They cannot collide with note names — those
+            // require an octave digit — so the order between them is free, and
+            // a parameter named `e` still shadows the eighth as it always did.
             Expr::Var(id) => match self.env.lookup(&id.0) {
                 Some(v) => Ok(v),
+                None if id.0 == crate::lang::TUPLET => Ok(Value::Tuplet),
+                None if crate::lang::duration(&id.0).is_some() => Ok(Value::Duration(
+                    crate::lang::duration(&id.0).expect("just matched"),
+                )),
                 None => match crate::lang::note(&id.0) {
                     crate::lang::NoteName::Note(n) => Ok(Value::Number(n)),
                     crate::lang::NoteName::OctaveOutOfRange(octave) => Err(format!(
@@ -279,6 +296,16 @@ impl Lowerer {
 
         match (l, r) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(fold(a, b))),
+            // A tie: `h + e` is a half held into an eighth. Only addition — the
+            // rest of the arithmetic has no reading on a written value, and
+            // subtracting one from another is not something notation can draw.
+            (Value::Duration(a), Value::Duration(b)) if kind == NodeKind::Add => {
+                Ok(Value::Duration(a.add(b)))
+            }
+            (Value::Duration(a), Value::Duration(b)) => Err(format!(
+                "written note values can only be added, which ties them — `{a} + {b}` \
+                 is one held into the other. There is no other arithmetic notation \
+                 can draw on them")),
             (l, r) => {
                 let inputs = vec![self.as_input(l)?, self.as_input(r)?];
                 Ok(Value::Signal(self.push_node(kind, inputs)))
@@ -309,6 +336,12 @@ impl Lowerer {
                  `sample(buffer, position)`".into()),
             Value::Rest => Err("cannot use a rest as a signal (rests belong in patterns)".into()),
             Value::Trigger => Err("cannot use a trigger as a signal (triggers belong in patterns)".into()),
+            Value::Duration(b) => Err(format!(
+                "cannot use `{b}` as a signal — a written note value says how long a \
+                 step lasts, and only means anything inside a pattern")),
+            Value::Tuplet => Err(
+                "cannot use `t` as a signal — it marks a group inside a pattern as a \
+                 tuplet".into()),
             Value::Play { .. } => Err(
                 "cannot use a play as a signal (it schedules notes, it is not audio)".into()),
         }

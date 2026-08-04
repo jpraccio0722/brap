@@ -287,6 +287,11 @@ fn parse_step(item: &ListItem) -> Option<GraphicalStep> {
     // number is. `[c4;beats]` is a length the grid cannot show a cell for,
     // since it does not know what `beats` is; the row is passed over rather
     // than guessed at.
+    //
+    // Written note values fall out here too, and must. The grid is cells, which
+    // are shares of a row — a `;q` is a length of time and has no cell count to
+    // be. Reading one as the number 1 would silently restripe the rhythm and
+    // then write the flattened version back over what was there.
     let length = match item.length.as_deref() {
         None => 1.0,
         Some(Expr::Num(n)) if *n > 0.0 && n.is_finite() => *n,
@@ -637,6 +642,23 @@ mod composer_format_tests {
     fn resolution_is_the_sum_of_the_cells() {
         let row = pat("riff", Mode::Roll, vec![pitch(60.0, 4.0), pitch(64.0, 12.0)]);
         assert_eq!(row.resolution(), 16.0);
+    }
+
+    /// A row written in note values is not a grid row — cells are shares, and a
+    /// `;q` is a length of time with no cell count to be. It is passed over
+    /// rather than flattened, so the panel never rewrites it as the wrong
+    /// rhythm. The same holds for a bare `q`, which is a value in the step
+    /// position rather than a note.
+    ///
+    /// The cost is that the panel does not *show* such a row, and writing from
+    /// the panel drops it — so metrical patterns belong in a file of their own
+    /// until the grid learns to draw them.
+    #[test]
+    fn a_row_written_in_note_values_is_not_a_grid_row() {
+        for src in ["let riff = [c4;q, e4, g4]\n", "let hits = [q, q, q]\n"] {
+            let rows = from_source(src).expect("the file still parses");
+            assert!(rows.is_empty(), "{src} should not have been read as a grid: {rows:?}");
+        }
     }
 
     /// JSON from a panel that predates lengths still reads: an absent length is

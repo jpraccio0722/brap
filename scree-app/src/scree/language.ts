@@ -36,6 +36,10 @@ export const builtinTag = Tag.define();
 /** A note name: letter, optional `s`/`f`, octave. Tagged apart from ordinary
  *  variables because pitch is the thing you scan a pattern for. */
 export const noteTag = Tag.define();
+/** A written note value — `q`, `e`, `h` — and the tuplet marker `t`. Tagged
+ *  apart from both notes and variables: rhythm is the other thing you scan a
+ *  pattern for, and it is read in a different place from pitch. */
+export const durationTag = Tag.define();
 
 /** Matches `lex.rs`'s number regex, anchored for `StringStream.match`. */
 const NUMBER = /^(\d+(\.\d+)?|\.\d+)([eE][+-]?\d+)?/;
@@ -53,6 +57,13 @@ const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*/;
  * than a resolution.
  */
 const NOTE = /^[a-g][sf]?[0-9]$/;
+/**
+ * Mirrors `lang::DURATIONS` and `lang::TUPLET`. Whole-string and single-letter,
+ * which is why these cannot collide with note names — those require an octave
+ * digit. A binding shadows one exactly as it shadows a note, which the
+ * highlighter cannot know, so this is a spelling test rather than a resolution.
+ */
+const DURATION = /^[whqest]$/;
 /**
  * Used until the backend's keyword list arrives, so a file is highlighted
  * correctly on the very first frame rather than rendering every keyword as a
@@ -141,6 +152,7 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
           return "keyword";
         }
         if (NOTE.test(name)) return "screeNote";
+        if (DURATION.test(name)) return "screeDuration";
         if (index.has(name)) return "screeBuiltin";
         // A name in call position is a user function; anything else is a value.
         return stream.match(/^\s*\(/, false) ? "fnName" : "variable";
@@ -181,6 +193,7 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
     tokenTable: {
       screeBuiltin: builtinTag,
       screeNote: noteTag,
+      screeDuration: durationTag,
       screeRest: restTag,
       screeTrigger: triggerTag,
       fnName: t.function(t.variableName),
@@ -205,6 +218,9 @@ export const screeHighlightStyle = HighlightStyle.define([
   // Rose: warm like a pitch, and clear of the fuchsia numbers, the amber
   // `def`, and the orange rest it will sit beside inside a pattern.
   { tag: noteTag, color: "#fda4af" },
+  // Amber, and deliberately not the rose pitches take: a bar is read for its
+  // rhythm or for its notes, rarely both at once, so the two want separating.
+  { tag: durationTag, color: "#fbbf24" },
   { tag: t.function(t.variableName), color: "#93c5fd" },
   { tag: t.definition(t.variableName), color: "#fcd34d" },
   { tag: t.variableName, color: "#e5e7eb" },

@@ -2713,3 +2713,424 @@ fn outro() = play_once([c2], inst)
             .unwrap_or_else(|e| panic!("{example}\n  failed to lower: {e}"));
     }
 }
+
+/// Written note values end to end: what someone types, as the rhythm it turns
+/// into.
+///
+/// Two things are being pinned. One is the arithmetic — that a bar is as long
+/// as its values add up to, and that a tuplet is played in the span its
+/// contents imply. The other is the boundary: written values and shares are
+/// alternative readings of the same brackets, and every way of writing both at
+/// once has to be refused rather than resolved in one of their favours.
+#[cfg(test)]
+mod metrical_tests {
+    use super::*;
+    use crate::pattern::pattern::{Slot, Span, UNIT};
+
+    const TONE: &str = "fn tone(n, cut = 800) = saw(n)\n";
+
+    fn pattern_of(src: &str) -> Pattern {
+        bindings_of(src).into_iter().next().expect("a binding").pattern
+    }
+
+    /// Onsets and durations in cycles, which is the only thing about a pattern
+    /// that a written value is claiming to control.
+    fn timing(p: &Pattern, cycles: f64) -> (Vec<f64>, Vec<f64>) {
+        let evs = p.query(Span::new(0.0, cycles));
+        (evs.iter().map(|e| e.begin).collect(), evs.iter().map(|e| e.duration()).collect())
+    }
+
+    fn binding_cycles(src: &str) -> Option<f64> {
+        bindings_of(src).into_iter().next().expect("a binding").cycles
+    }
+
+    // ---- compatibility ----
+
+    /// The promise the whole design rests on. Four quarters are four beats are
+    /// one cycle, so the sequence is already the length a bare sequence is and
+    /// nothing is wrapped around it — the pattern is the same value a list of
+    /// four plain steps has always lowered to.
+    #[test]
+    fn a_full_bar_of_quarter_notes_is_the_plain_even_division() {
+        let written = pattern_of(&format!("{TONE}play([220;q, 330, 440, 550], tone)\n"));
+        let plain = pattern_of(&format!("{TONE}play([220, 330, 440, 550], tone)\n"));
+        assert_eq!(written, plain);
+    }
+
+    /// A list with no written value in it takes the other reading entirely,
+    /// groups included — this is every pattern that exists today and everything
+    /// the drawn-pattern panel writes.
+    #[test]
+    fn a_group_still_takes_a_share_in_a_sequence_of_shares() {
+        let p = pattern_of(&format!("{TONE}play([220;3, [330, 440]], tone)\n"));
+        let slots = match &p {
+            Pattern::Steps(s) => s.clone(),
+            other => panic!("expected a bare sequence, got {other:?}"),
+        };
+        assert_eq!(slots[0].length, 3.0);
+        assert_eq!(slots[1].length, UNIT);
+        assert!(matches!(slots[1].step, Step::Group(_)));
+    }
+
+    // ---- division ----
+
+    /// Additive meter, and the reason a bare metrical list needs no marker: a
+    /// bar of three quarters is three beats, which is three quarters of a cycle.
+    #[test]
+    fn a_three_beat_bar_takes_three_quarters_of_a_cycle() {
+        let p = pattern_of(&format!("{TONE}play([220;q, 330, 440], tone)\n"));
+        let (onsets, durations) = timing(&p, 0.75);
+        assert_eq!(onsets, vec![0.0, 0.25, 0.5]);
+        assert_eq!(durations, vec![0.25, 0.25, 0.25], "each is a quarter of a cycle");
+        // The bar comes round at 0.75 rather than at 1, so two of them are one
+        // and a half cycles — which is the whole of what additive meter means.
+        assert_eq!(p.query(Span::new(0.0, 1.5)).len(), 6);
+    }
+
+    /// A value carries to the steps after it, so a bar states what it is once.
+    #[test]
+    fn a_duration_carries_to_the_notes_after_it() {
+        let p = pattern_of(&format!("{TONE}play([220;e, 330, 440;q, 550], tone)\n"));
+        let (onsets, durations) = timing(&p, 0.75);
+        // An eighth, an eighth, a quarter, a quarter: three beats in all.
+        assert_eq!(durations, vec![0.125, 0.125, 0.25, 0.25]);
+        assert_eq!(onsets, vec![0.0, 0.125, 0.25, 0.5]);
+    }
+
+    /// A bare `q` is a hit of that length — a written value carries no pitch,
+    /// which is what a trigger already means.
+    #[test]
+    fn a_bare_written_value_is_a_hit_of_that_length() {
+        let p = pattern_of("fn hit() = sin(50)\nplay([q, q, q], hit)\n");
+        let (onsets, durations) = timing(&p, 0.75);
+        assert_eq!(onsets, vec![0.0, 0.25, 0.5]);
+        assert_eq!(durations, vec![0.25, 0.25, 0.25]);
+    }
+
+    /// Rests take the value in force, which is how a bar ends in silence.
+    #[test]
+    fn a_rest_takes_the_value_in_force() {
+        let p = pattern_of(&format!("{TONE}play([220;h, `], tone)\n"));
+        let (onsets, durations) = timing(&p, 1.0);
+        assert_eq!(onsets, vec![0.0], "the rest sounds nothing");
+        assert_eq!(durations, vec![0.5], "but it still takes its half of the bar");
+    }
+
+    // ---- tuplets ----
+
+    /// The case that started this: three quarters played in the time of two.
+    #[test]
+    fn a_quarter_triplet_fills_a_half_note() {
+        let p = pattern_of(&format!("{TONE}play([[220;q, 330, 440];t, 550;q], tone)\n"));
+        let (onsets, durations) = timing(&p, 1.0);
+        // Three beats in the bar: the triplet owns two of them, the quarter one.
+        assert_eq!(durations[3], 0.25, "the quarter after it is untouched");
+        assert!((durations[0] - 1.0 / 6.0).abs() < 1e-9, "got {}", durations[0]);
+        assert!((onsets[3] - 0.5).abs() < 1e-9, "the triplet ends on the third beat");
+    }
+
+    /// The same span reached by a different count, which is what makes the
+    /// notation's silence about "3" or "5" honest.
+    #[test]
+    fn an_eighth_quintuplet_also_fills_a_half_note() {
+        let src = format!("{TONE}play([[220;e, 330, 440, 550, 660];t, 220;q, 330], tone)\n");
+        let p = pattern_of(&src);
+        let (onsets, _) = timing(&p, 1.0);
+        assert_eq!(onsets.len(), 7);
+        // Five eighths in the time of four: a half note, then two quarters.
+        assert!((onsets[5] - 0.5).abs() < 1e-9, "got {}", onsets[5]);
+    }
+
+    /// The unit follows the contents, so the same bracket at another scale
+    /// gives the tuplet at that scale.
+    #[test]
+    fn an_eighth_triplet_fills_a_quarter() {
+        let p = pattern_of(&format!("{TONE}play([[220;e, 330, 440];t, 550;q], tone)\n"));
+        let (onsets, durations) = timing(&p, 1.0);
+        assert!((durations[0] - 1.0 / 12.0).abs() < 1e-9, "got {}", durations[0]);
+        assert!((onsets[3] - 0.25).abs() < 1e-9, "the triplet took one beat");
+    }
+
+    /// Uneven contents are legal when they fill the division: a half and a
+    /// quarter are an ordinary quarter triplet with its first two tied. Reading
+    /// the unit off the first value would make the count 3/2 and refuse this.
+    #[test]
+    fn a_half_and_a_quarter_are_a_legal_triplet() {
+        // The triplet is the whole bar, so the bar is the half note it is
+        // played in — half a cycle.
+        let p = pattern_of(&format!("{TONE}play([[220;h, 330;q];t], tone)\n"));
+        let (onsets, durations) = timing(&p, 0.5);
+        assert_eq!(onsets.len(), 2);
+        // The whole bar is the triplet's span — a half note.
+        assert!((durations[0] - 1.0 / 3.0).abs() < 1e-9, "got {}", durations[0]);
+        assert!((durations[1] - 1.0 / 6.0).abs() < 1e-9, "got {}", durations[1]);
+    }
+
+    /// The other shape of the same rule: an opening note worth three of the
+    /// six slots it is counted in.
+    #[test]
+    fn a_tuplet_may_open_with_a_note_that_fills_several_of_its_slots() {
+        let src = format!("{TONE}play([[220;q, 330;e, 440, 550, 660];t], tone)\n");
+        let p = pattern_of(&src);
+        let (_, durations) = timing(&p, 0.5);
+        // Six eighths played in four: the bar is a half note, and the opening
+        // quarter fills two of the six slots — a third of the group.
+        assert_eq!(durations.len(), 5);
+        // A third of a half note: two of the six slots, in a group half a cycle long.
+        assert!((durations[0] - 1.0 / 6.0).abs() < 1e-9, "got {}", durations[0]);
+    }
+
+    /// The property that makes the missing number on `;t` sound: the two ways
+    /// of reading a group agree about how long it is.
+    #[test]
+    fn a_sextuplet_and_a_triplet_reading_agree() {
+        // Six eighths, and the three quarters they tie into.
+        let six = pattern_of(&format!(
+            "{TONE}play([[220;e, 220, 220, 220, 220, 220];t], tone)\n"));
+        let three = pattern_of(&format!("{TONE}play([[220;q, 220, 220];t], tone)\n"));
+        let end = |p: &Pattern| {
+            let evs = p.query(Span::new(0.0, 4.0));
+            let last = evs.last().expect("events");
+            last.end
+        };
+        assert!((end(&six) - end(&three)).abs() < 1e-9,
+                "both are played in a half note: {} vs {}", end(&six), end(&three));
+    }
+
+    /// A value written inside a tuplet describes that tuplet and stops there,
+    /// so a line's meaning does not turn on a bracket several tokens back.
+    #[test]
+    fn a_duration_change_inside_a_group_does_not_leak_out() {
+        let leaky = pattern_of(&format!("{TONE}play([220;q, [330;e, 440, 550];t, 660], tone)\n"));
+        let spelt = pattern_of(&format!("{TONE}play([220;q, [330;e, 440, 550];t, 660;q], tone)\n"));
+        assert_eq!(leaky, spelt, "the step after the group is still a quarter");
+    }
+
+    // ---- refusals ----
+
+    /// The case the whole tuplet rule exists for. Four eighths are a half note
+    /// however they are bracketed, so there is no compression to mark.
+    #[test]
+    fn a_quarter_and_two_eighths_are_not_a_tuplet() {
+        let err = play_err(&format!("{TONE}play([[220;q, 330;e, 440];t], tone)\n"));
+        assert!(err.contains("nothing to compress"), "got: {err}");
+        assert!(err.contains("h"), "the message should name what it came to: {err}");
+    }
+
+    /// Same check, reached the obvious way.
+    #[test]
+    fn a_tuplet_whose_count_is_a_power_of_two_is_refused() {
+        for group in ["[220;q, 330]", "[220;q, 330, 440, 550]"] {
+            let err = play_err(&format!("{TONE}play([{group};t], tone)\n"));
+            assert!(err.contains("nothing to compress"), "{group} gave: {err}");
+        }
+    }
+
+    /// A group in a metrical sequence is a tuplet or it is a mistake — three
+    /// quarters inside a bar could be a bar of their own or a triplet, and
+    /// nothing about the brackets says which.
+    #[test]
+    fn a_group_in_a_metrical_sequence_must_be_a_tuplet() {
+        let err = play_err(&format!("{TONE}play([220;q, [330, 440]], tone)\n"));
+        assert!(err.contains(";t"), "got: {err}");
+    }
+
+    /// The span comes from the contents, so there is no length to give — and
+    /// giving one is how `;e` on three quarters would get written.
+    #[test]
+    fn a_group_in_a_metrical_sequence_cannot_be_given_a_length() {
+        let err = play_err(&format!("{TONE}play([220;q, [330;q, 440, 550];e], tone)\n"));
+        assert!(err.contains(";t") || err.contains("share"), "got: {err}");
+    }
+
+    /// The two readings of a `;` cannot share a sequence.
+    #[test]
+    fn a_duration_and_a_share_cannot_share_a_sequence() {
+        let err = play_err(&format!("{TONE}play([220;q, 330;2], tone)\n"));
+        assert!(err.contains("both"), "got: {err}");
+    }
+
+    /// Inheriting backwards from a later note is not something anyone should
+    /// have to reason about, so the first step has to say what it is.
+    #[test]
+    fn a_metrical_sequence_must_state_its_first_length() {
+        let err = play_err(&format!("{TONE}play([220, 330;q], tone)\n"));
+        assert!(err.contains("first step"), "got: {err}");
+    }
+
+    /// A lane is indexed by which note is asking, so a length of *time* is not
+    /// a thing it can hold. Caught before the fractional check, which `q` would
+    /// otherwise pass by reading as the number 1.
+    #[test]
+    fn a_note_value_in_a_lane_is_refused() {
+        let err = play_err(&format!("{TONE}play([220, 330], tone, cut: [400;q, 2000])\n"));
+        assert!(err.contains("read by note"), "got: {err}");
+        assert!(err.contains("cut"), "the message should name the lane: {err}");
+    }
+
+    /// `;t` is a mark on a group, not a length in its own right.
+    #[test]
+    fn a_tuplet_marker_needs_a_group() {
+        let err = play_err(&format!("{TONE}play([220;t, 330], tone)\n"));
+        assert!(err.contains("group"), "got: {err}");
+    }
+
+    /// A written value shadows like a note name does, so a program that used
+    /// `e` as a name before any of this existed still means what it meant.
+    #[test]
+    fn a_binding_shadows_a_written_value() {
+        let p = pattern_of(&format!("{TONE}let e = 330\nplay([220, e], tone)\n"));
+        let (onsets, _) = timing(&p, 1.0);
+        assert_eq!(onsets, vec![0.0, 0.5], "two plain steps, evenly divided");
+    }
+
+    // ---- what a pass is worth ----
+
+    /// `playn` counts passes and binds in cycles, and a metrical pass is not a
+    /// cycle. Four passes of a three-beat bar are three cycles.
+    #[test]
+    fn playn_counts_passes_not_cycles_on_a_metrical_pattern() {
+        let cycles = binding_cycles(&format!("{TONE}playn([220;q, 330, 440], tone, 4)\n"));
+        assert_eq!(cycles, Some(3.0));
+    }
+
+    /// And the conversion composes with `rate`, which is the other thing
+    /// standing between a pass and a cycle.
+    #[test]
+    fn rate_still_compounds_with_a_metrical_sequence() {
+        let cycles = binding_cycles(&format!("{TONE}playn([220;q, 330, 440], tone, 4, 2)\n"));
+        assert_eq!(cycles, Some(1.5), "same four passes, twice as fast");
+    }
+
+    /// A pattern written in shares is untouched by any of it.
+    #[test]
+    fn playn_on_a_sequence_of_shares_is_unchanged() {
+        let cycles = binding_cycles(&format!("{TONE}playn([220, 330, 440], tone, 4)\n"));
+        assert_eq!(cycles, Some(4.0));
+    }
+
+    // ---- dots and ties ----
+
+    /// A dotted quarter is a quarter and an eighth, which is what makes
+    /// `[c4;q.dot, e4;e]` a two-beat bar rather than a two-and-a-half one.
+    #[test]
+    fn a_dotted_quarter_is_a_quarter_and_an_eighth() {
+        let dotted = pattern_of(&format!("{TONE}play([220;q.dot, 330;e], tone)\n"));
+        let spelt = pattern_of(&format!("{TONE}play([220;e, 220, 220, 330], tone)\n"));
+        // Three eighths against one: the same division, reached two ways — the
+        // dotted one holding its three as a single note.
+        let (onsets, durations) = timing(&dotted, 0.5);
+        assert_eq!(onsets, vec![0.0, 0.375]);
+        assert_eq!(durations, vec![0.375, 0.125]);
+        assert_eq!(timing(&spelt, 0.5).0.len(), 4, "the undotted spelling strikes four");
+    }
+
+    /// Each dot adds half of the note, not half of what the last one left — so
+    /// the count is a parameter and `q.dot(2)` is 7/4 rather than 9/4.
+    #[test]
+    fn a_double_dot_adds_half_and_then_a_quarter() {
+        let double = pattern_of(&format!("{TONE}play([220;q.dot(2), 330;s], tone)\n"));
+        // 7/4 + 1/4 beats is two beats, which is half a cycle.
+        let (_, durations) = timing(&double, 0.5);
+        assert!((durations[0] - 0.4375).abs() < 1e-9, "got {}", durations[0]);
+        assert!((durations[1] - 0.0625).abs() < 1e-9, "got {}", durations[1]);
+    }
+
+    /// A tie is addition, and reads as one held note rather than two struck.
+    #[test]
+    fn adding_two_values_ties_them() {
+        let tied = pattern_of(&format!("{TONE}play([220;h + e, 330;e], tone)\n"));
+        let (onsets, durations) = timing(&tied, 0.75);
+        assert_eq!(onsets.len(), 2, "a tie is one note, not two");
+        assert!((durations[0] - 0.625).abs() < 1e-9, "got {}", durations[0]);
+    }
+
+    /// And `q + e` is the dotted quarter, so the two spellings agree.
+    #[test]
+    fn a_tie_and_a_dot_can_reach_the_same_value() {
+        let tied = pattern_of(&format!("{TONE}play([220;q + e, 330;e], tone)\n"));
+        let dotted = pattern_of(&format!("{TONE}play([220;q.dot, 330;e], tone)\n"));
+        assert_eq!(tied, dotted);
+    }
+
+    /// Only addition. Notation has no way to draw a written value divided by
+    /// another, so the rest of the arithmetic is refused rather than folded.
+    #[test]
+    fn written_values_cannot_be_multiplied() {
+        let err = play_err(&format!("{TONE}play([220;q * e, 330;e], tone)\n"));
+        assert!(err.contains("added"), "got: {err}");
+    }
+
+    /// `dot` says what it wants, on the call that has the mistake in it.
+    #[test]
+    fn dotting_something_that_is_not_a_value_is_refused() {
+        let err = play_err(&format!("{TONE}play([220;4.dot, 330], tone)\n"));
+        assert!(err.contains("written note value"), "got: {err}");
+    }
+
+    /// A dotted value still counts into a tuplet exactly — the reason the type
+    /// is a rational rather than an `f64`.
+    #[test]
+    fn a_dotted_value_counts_into_a_tuplet() {
+        // A dotted quarter and three eighths is six eighths, played in four.
+        let p = pattern_of(&format!(
+            "{TONE}play([[220;q.dot, 330;e, 440, 550];t], tone)\n"));
+        let (_, durations) = timing(&p, 0.5);
+        assert_eq!(durations.len(), 4);
+        // The dotted quarter is three of the six slots, so half the group.
+        assert!((durations[0] - 0.25).abs() < 1e-9, "got {}", durations[0]);
+    }
+
+    /// The examples in the README's rhythm section, compiled. Prose that claims
+    /// a bar is legal and prose that claims one is refused are both testable,
+    /// and both go stale silently otherwise.
+    #[test]
+    fn the_readme_rhythm_examples_behave_as_written() {
+        for good in [
+            "play([c4;q, e4, g4], tone)",
+            "play([c4;q, e4, g4, c5], tone)",
+            "play([q, q, q], tone)",
+            "play([[c4;q, e4, g4];t, c5;q], tone)",
+            "play([[c4;e, d4, e4, f4, g4];t], tone)",
+            "play([[c4;h, e4;q];t], tone)",
+            "play([c4;q, [e4;e, f4, g4];t, c5], tone)",
+            "play([c4;q.dot, e4;e], tone)",
+            "play([c4;h + e, e4;e], tone)",
+        ] {
+            let src = format!("{TONE}{good}\n");
+            let items = parse(src).expect("parse failed");
+            assert!(lower_full(&items).is_ok(), "{good} should compile");
+        }
+        // Four eighths is a half note however it is bracketed.
+        let err = play_err(&format!("{TONE}play([[c4;q, e4;e, g4];t], tone)\n"));
+        assert!(err.contains("nothing to compress"), "got: {err}");
+    }
+
+    /// The paradigms cannot be mixed across a nesting either. A group is given
+    /// exactly one cycle of slot-local time, so a bar half a cycle long would
+    /// sound its contents twice inside its own slot — a stutter, not a rhythm.
+    #[test]
+    fn a_metrical_group_cannot_sit_in_a_sequence_of_shares() {
+        let err = play_err(&format!("{TONE}play([220;2, [330;q, 440]], tone)\n"));
+        assert!(err.contains("note values"), "got: {err}");
+    }
+
+    /// But a group that does come to a cycle is no different from the same
+    /// steps written as shares, so there is nothing to refuse.
+    #[test]
+    fn a_group_of_exactly_one_cycle_still_nests_in_shares() {
+        let written = pattern_of(&format!(
+            "{TONE}play([220;2, [330;q, 440, 550, 660]], tone)\n"));
+        let plain = pattern_of(&format!("{TONE}play([220;2, [330, 440, 550, 660]], tone)\n"));
+        assert_eq!(written, plain);
+    }
+
+    /// A lane advances by note whatever the bar is, so an odd bar walks it
+    /// rather than locking it — the 3-against-4 the lane design is for.
+    #[test]
+    fn a_lane_drifts_against_an_odd_bar() {
+        let bs = bindings_of(&format!(
+            "{TONE}play([220;q, 330, 440], tone, cut: [400, 2000])\n"));
+        assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(400.0), Some(2000.0)]);
+    }
+}

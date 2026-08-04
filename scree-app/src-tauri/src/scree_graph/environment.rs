@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use fundsp::wave::Wave;
 
+use crate::lang::Beats;
 use crate::scree_graph::ugen_nodes::NodeId;
 use crate::parser::parser::{Expr, Param};
 
@@ -28,6 +29,17 @@ pub enum Value {
     Rest,
     /// A sounding step carrying no value. Only meaningful inside a pattern.
     Trigger,
+    /// A written note value — `q`, `e`, `h`. Only meaningful inside a pattern,
+    /// where it says how long a step is rather than what sounds.
+    ///
+    /// In the value position it is a [`Trigger`](Value::Trigger) of that
+    /// length, so `[q, q, q]` is three quarter-note hits: a duration alone
+    /// carries no pitch, which is exactly what a trigger already means.
+    Duration(Beats),
+    /// `t`, marking a group as a tuplet. A marker rather than a number for the
+    /// same reason `Rest` is a variant rather than a value: it means one thing
+    /// in one position and is an error everywhere else.
+    Tuplet,
     /// What a `play` call evaluates to: a handle onto the bindings it made.
     ///
     /// `ends_at` is the cycle, counted from the pattern origin, at which the
@@ -61,6 +73,26 @@ pub enum Value {
     },
 }
 
+/// What a `;` said, which is one of two different things.
+///
+/// A bare number is a *share*: the sequence still fills exactly one cycle and
+/// the numbers divide it between them, so only their ratio matters. A written
+/// note value is a *duration*: the sequence is as long as its values add up to,
+/// and a cycle has nothing to do with it. The two cannot be reconciled — one
+/// says "twice as long as its neighbour", the other "one beat, whatever the
+/// neighbours are" — so the distinction is kept in the type and a sequence
+/// holding both is refused rather than having one of them silently win.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Length {
+    /// `;2` — a share of the sequence, relative to its siblings.
+    Ratio(f64),
+    /// `;q` — a written value, in beats.
+    Beats(Beats),
+    /// `;t` — this group is a tuplet. Carries no number: the span it is played
+    /// in follows from what the group holds.
+    Tuplet,
+}
+
 /// One element of a list, and the length `;` gave it.
 ///
 /// The length rides along on the element instead of being desugared into
@@ -72,7 +104,7 @@ pub enum Value {
 #[derive(Clone)]
 pub struct Item {
     pub value: Value,
-    pub length: Option<f64>,
+    pub length: Option<Length>,
 }
 
 impl Item {

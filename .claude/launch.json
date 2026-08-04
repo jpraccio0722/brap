@@ -3,8 +3,8 @@
   "configurations": [
     {
       "name": "scree-vite",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "dev"],
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "cd scree-app && npm run dev"],
       "port": 1420
     }
   ]

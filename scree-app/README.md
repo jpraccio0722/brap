@@ -291,6 +291,85 @@ let pos = ramp(1 / stereo.secs)
 ```
 
 
+## Rhythm in note values
+
+A list divides its cycle by *ratio*: `[220;2, 330, 440]` is a half and two
+quarters, and `[220;8, 330;4, 440;4]` is the same rhythm, because only the
+proportions matter. That is how every pattern here works, and it stays that way.
+
+Written note values are the other way of saying it. `w` is a whole note, `h` a
+half, `q` a quarter, `e` an eighth and `s` a sixteenth, and a sequence written in
+them is as long as they add up to rather than always one cycle:
+
+```rust
+play([c4;q, e4, g4], lead)      // a 3/4 bar — three beats, so 3/4 of a cycle
+play([c4;q, e4, g4, c5], lead)  // four quarters, which is exactly one cycle
+```
+
+A value carries to the steps after it, so a bar says what it is once. A bare `q`
+is a hit of that length — a written value carries no pitch, which is what `\`
+already means — so `[q, q, q]` is three quarter-note hits.
+
+**Dots and ties.** `q.dot` is a dotted quarter, and `dot` takes a count for the
+rest: `q.dot(2)` is the doubly-dotted quarter, a quarter and an eighth and a
+sixteenth. It is a count rather than a repeated `.dot` because each dot adds half
+of *the note*, not half of what the last one left. Adding two values ties them —
+`h + e` is a half held into an eighth, as one note rather than two — and nothing
+else is arithmetic notation can draw on them, so nothing else is allowed:
+
+```rust
+play([c4;q.dot, e4;e], lead)     // a dotted quarter and an eighth: two beats
+play([c4;h + e, e4;e], lead)     // the same length, spelled as a tie
+```
+
+One cycle is four beats, the same four `bpm` counts. A bar that does not come to
+four therefore runs against the cycle rather than with it, which is exactly what
+makes `[c4;q, e4, g4]` polymeter against a four-square drum part.
+
+### Tuplets
+
+A group inside such a sequence is a tuplet, and says so with `;t`:
+
+```rust
+play([[c4;q, e4, g4];t, c5;q], lead)     // a quarter triplet, then a quarter
+play([[c4;e, d4, e4, f4, g4];t], lead)   // an eighth quintuplet
+```
+
+`;t` carries no number because there is none left to carry. The count is what the
+group holds, the unit is the shortest value in it, and the span it is played in
+is the next lower power of two — three quarters in the time of two, five eighths
+in the time of four. Both of those come to a half note, which is why a quarter
+triplet and an eighth quintuplet fill the same space.
+
+The contents have to *fill* the division — every slot accounted for, by a note, a
+rest, or a longer note covering several:
+
+```rust
+play([[c4;h, e4;q];t], lead)             // fine: three quarters, the first two tied
+play([[c4;q, e4;e, g4];t], lead)         // refused: four eighths is a half note,
+                                         // so there is nothing to compress
+```
+
+That last rule is the whole of "which tuplets are acceptable". A group whose
+contents come to a plain duration would be played in exactly the time it is
+written, so `;t` would be claiming a compression that is not there.
+
+A value set inside a group stops there: `[c4;q, [e4;e, f4, g4];t, c5]` leaves
+`c5` a quarter.
+
+### The two cannot be mixed
+
+A ratio and a written value mean different things by the same `;` — one is a
+share of whatever else is in the brackets, the other a length regardless of them
+— so a sequence holding both is refused rather than resolved in one of their
+favours. The same goes for a lane: a lane is read by note, so a `;` there is how
+many notes the value covers, and a length of *time* is not a position.
+
+Drawn patterns are ratios, since the grid is cells. A row written in note values
+is passed over by the panel rather than redrawn as the wrong rhythm — keep those
+in a file of your own.
+
+
 ## Function Reference
 
 - [Patterns and Playback](#patterns-and-playback)
@@ -347,7 +426,7 @@ it.
 
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
+| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — see [Rhythm in note values](#rhythm-in-note-values). Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
 | `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
 | `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
@@ -521,6 +600,7 @@ Lists are immutable. List functions generate a new list and leave the existing l
 | `split` | `split(list, size) -> list` | Chunks of `size` (not split-at-index). A short final chunk is kept. `size` must be a whole number ≥ 1. |
 | `map` | `map(list, transform) -> list` | The function applied to every element. It is an ordinary user `fn` of one argument and may answer with anything, so `map` is also the only way to build a **list of signals** — a `for` over audio sums instead of collecting. |
 | `filter` | `filter(list, predicate) -> list` | Keeps elements the predicate answers non-zero for. The predicate is an ordinary user `fn`; it must return a compile-time number. |
+| `dot` | `dot(value, dots?) -> duration` | Dot a written note value: `q.dot` is a dotted quarter, a quarter and an eighth. `dots` defaults to 1; `q.dot(2)` is the doubly-dotted quarter. A count rather than a repeated `.dot`, because each dot adds half of the note itself rather than half of what the last one left. See [Rhythm in note values](#rhythm-in-note-values). |
 | `choice` | `choice(list) -> value` | One random element. Errors on an empty list. |
 | `wchoice` | `wchoice(values, weights) -> value` | Weighted random pick. Parallel lists of equal length, like `zip`. Weights must be finite and ≥ 0, and not all zero. |
 | `scramble` | `scramble(list) -> list` | Shuffled. |

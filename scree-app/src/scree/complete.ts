@@ -13,6 +13,7 @@ import {
   signature,
   type Builtin,
   type BuiltinIndex,
+  type Duration,
   type LanguageMetadata,
   type ValueKind,
 } from "./metadata";
@@ -241,6 +242,9 @@ function accepts(receives: ValueKind, receiver: ValueKind): boolean {
       return receiver === "section";
     case "buffer":
       return receiver === "buffer";
+    case "duration":
+      // Only `dot`, and only a written note value can be dotted.
+      return receiver === "duration";
     default:
       // "nothing" takes no argument at all; "any" is only ever a result; and
       // "text" is written out at the call, never produced, so nothing can
@@ -254,6 +258,8 @@ interface Scope {
   index: BuiltinIndex;
   locals: Map<string, LocalSymbol>;
   patterns: Set<string>;
+  /** The written note values, so `q.` can offer `dot`. */
+  durations: Set<string>;
 }
 
 /** The index of the bracket matching the one `text` ends with, or null. */
@@ -334,6 +340,9 @@ function kindOf(expr: string, scope: Scope, depth = 4): ValueKind {
   if (local !== undefined) return "any";
 
   if (NOTE.test(word)) return "number";
+  // A written note value, resolved last for the same reason a note name is:
+  // anything bound wins, exactly as the lowerer resolves it.
+  if (scope.durations.has(word)) return "duration";
   return "any";
 }
 
@@ -349,6 +358,69 @@ function methodDot(doc: string, from: number): number | null {
   const dot = from - 1;
   if (doc[dot] !== "." || doc[dot - 1] === ".") return null;
   return dot;
+}
+
+// ---------------------------------------------------------------------------
+// Length position.
+//
+// A `;` is the one character in the grammar with nothing else it could be —
+// the parser uses it for a step's length and for nothing at all besides — so
+// what may follow it is a short, closed list. It is also the least memorable
+// thing in the language: five single letters whose spelling carries none of
+// their meaning. Both of those argue for offering it the moment the `;` lands.
+// ---------------------------------------------------------------------------
+
+/**
+ * The offset of the `;` a length is being written after, or null when the
+ * cursor is somewhere else.
+ *
+ * `from` is the start of the word being completed, so the walk back only has
+ * to clear whitespace — `[c4; q]` is written by people and lexes fine.
+ */
+function lengthSemi(doc: string, from: number): number | null {
+  let i = from - 1;
+  while (i >= 0 && /[ \t]/.test(doc[i])) i--;
+  return i >= 0 && doc[i] === ";" ? i : null;
+}
+
+/**
+ * Whether the step this `;` belongs to is a bracketed group.
+ *
+ * It decides the whole menu: a group takes `;t` and nothing else, and every
+ * other step takes a written value and never `t`. Offering both everywhere
+ * would put the one refused answer next to the four working ones.
+ */
+function marksGroup(doc: string, semi: number): boolean {
+  let i = semi - 1;
+  while (i >= 0 && /\s/.test(doc[i])) i--;
+  return i >= 0 && doc[i] === "]";
+}
+
+/** Compact enough to read down a menu; the doc says the rest. */
+function beatsDetail(beats: number): string {
+  if (beats === 0.5) return "½ beat";
+  if (beats === 0.25) return "¼ beat";
+  if (beats === 1) return "1 beat";
+  return `${beats} beats`;
+}
+
+/**
+ * What may follow a `;`.
+ *
+ * Ordered as the table is — longest value first — rather than alphabetically
+ * or by likelihood, because a scale from a whole note down is the order a
+ * musician already holds these in. `boost` descends to hold it against
+ * CodeMirror's own ranking.
+ */
+function lengthOptions(durations: Duration[], group: boolean): Completion[] {
+  const offered = durations.filter((d) => d.marksGroup === group);
+  return offered.map((d, i) => ({
+    label: d.name,
+    detail: d.beats === null ? "tuplet" : beatsDetail(d.beats),
+    info: d.doc,
+    type: d.marksGroup ? "keyword" : "constant",
+    boost: offered.length - i,
+  }));
 }
 
 /**
@@ -514,6 +586,9 @@ function applyLane(name: string) {
 export const __test = {
   scrapeLocals,
   methodDot,
+  lengthSemi,
+  marksGroup,
+  lengthOptions,
   kindOf,
   accepts,
   instrumentOptions,
@@ -543,6 +618,11 @@ export function screeCompletions(
   /** Callable at all, and with a first parameter for a receiver to fill. */
   const methods = meta.builtins.filter((b) => isCallable(b) && b.params.length > 0);
   const index = buildIndex(meta);
+  // The written values, minus the tuplet marker: `t` is not a value and there
+  // is nothing to write after it.
+  const durationNames = new Set(
+    meta.durations.filter((d) => !d.marksGroup).map((d) => d.name),
+  );
 
   return (context: CompletionContext): CompletionResult | null => {
     const doc = context.state.doc.toString();
@@ -550,6 +630,19 @@ export function screeCompletions(
     const at = word?.from ?? context.pos;
     const dot = methodDot(doc, at);
     const from = word?.from ?? context.pos;
+
+    // A length is offered before anything else, and before the no-word guard
+    // below: `;` is not a word character, so the moment it is typed there is
+    // nothing matched behind the cursor and the general path would decline.
+    // Nothing else can follow a `;`, so there is nothing to weigh it against.
+    const semi = dot === null ? lengthSemi(doc, at) : null;
+    if (semi !== null) {
+      return {
+        from,
+        options: lengthOptions(meta.durations, marksGroup(doc, semi)),
+        validFor: /^\w*$/,
+      };
+    }
 
     // Look for names the file's `use` lines bring in, if they have changed.
     // Cheap on the common edit, which changes none of them.
@@ -664,6 +757,7 @@ export function screeCompletions(
         index,
         locals: new Map(scraped.map((s) => [s.name, s])),
         patterns: new Set(patternNames()),
+        durations: durationNames,
       };
       const receiver = kindOf(doc.slice(0, dot), scope);
 
