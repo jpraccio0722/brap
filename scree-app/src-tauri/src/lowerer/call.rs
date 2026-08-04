@@ -18,6 +18,17 @@ impl Lowerer {
             return self.load(args, piped);
         }
 
+        // And the arrangement combinators, for a reason of the same shape: a
+        // section has to be lowered where it is *placed*, with `play_start`
+        // already moved there. Evaluating `.then(playn(...))` on the way in
+        // would write those notes at the origin, leaving `.then` a fixup to
+        // perform instead of a section to place — and leaving the meaning of a
+        // play dependent on whether something later reached in and moved it.
+        // `section_builtin` settles the arguments that can be settled.
+        if Lowerer::is_section(&func.0) {
+            return self.section_builtin(&func.0, args, piped);
+        }
+
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);
         let mut named: Vec<(String, Value)> = Vec::new();
 
@@ -45,17 +56,8 @@ impl Lowerer {
                 "{}: named arguments only work on a user `fn`", func.0));
         }
 
-        // The arrangement combinators need their arguments evaluated — unlike
-        // `play`, which needs its instrument syntactically — so they are
-        // dispatched here rather than above. A `fn` passed as a section is
-        // just a `Value::Function` by the time it arrives, which is all any of
-        // them wants.
-        if Lowerer::is_section(&func.0) {
-            return self.section_builtin(&func.0, &arg_vals);
-        }
-
-        // Likewise `play_all`, which only gathers handles its arguments have
-        // already produced by being evaluated above.
+        // `play_all` only gathers handles its arguments have already produced
+        // by being evaluated above.
         if Lowerer::is_play_all(&func.0) {
             return self.play_all(&arg_vals);
         }

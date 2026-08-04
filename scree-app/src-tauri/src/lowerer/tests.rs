@@ -1637,17 +1637,166 @@ fn then_refuses_a_non_play_receiver() {
     assert!(e.contains("left side must be a play"), "got: {e}");
 }
 
-#[test]
-fn then_refuses_a_non_function() {
-    let e = play_err(&format!("{SECTIONS}play_once([c3], bass).then(4)\n"));
-    assert!(e.contains("expects a function"), "got: {e}");
-}
 
 #[test]
 fn then_refuses_a_function_taking_parameters() {
     let e = play_err(&format!(
         "{SECTIONS}fn takes(x) = play([x], lead)\nplay_once([c3], bass).then(takes)\n"));
     assert!(e.contains("no parameters"), "got: {e}");
+}
+
+// ---- sections written out rather than named ----
+
+/// Instrument, start and length of every binding: enough to pin an arrangement
+/// exactly, and the form in which two spellings can be compared.
+fn shape(src: &str) -> Vec<(String, f64, Option<f64>)> {
+    bindings_of(src)
+        .into_iter()
+        .map(|b| (b.instrument, b.start, b.cycles))
+        .collect()
+}
+
+/// The whole of the feature: a play written out inside `.then` opens where the
+/// chain has reached, not at the origin where a bare `play` would land.
+#[test]
+fn a_play_written_out_is_placed_rather_than_left_at_the_origin() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}playn([c3], bass, 4).then(play([c4, e4], lead))\n"));
+    assert_eq!(bs.len(), 2, "the section is placed once, not written twice");
+    assert_eq!(bs[0].start, 0.0);
+    assert_eq!(bs[1].instrument, "lead");
+    assert_eq!(bs[1].start, 4.0);
+}
+
+/// Naming a section and writing it out are one mechanism, so they have to
+/// agree binding for binding across every combinator that places one.
+#[test]
+fn a_section_written_out_matches_the_same_section_named() {
+    let base = "playn([c3], bass, 2)";
+    let cases = [
+        (format!("{base}.then(chorus)"),
+         format!("{base}.then(play([c4, e4], lead))")),
+        (format!("{base}.then_after(2, tail)"),
+         format!("{base}.then_after(2, play_once([c2], bass))")),
+        (format!("{base}.overlap(1, tail)"),
+         format!("{base}.overlap(1, play_once([c2], bass))")),
+        (format!("{base}.with(tail)"),
+         format!("{base}.with(play_once([c2], bass))")),
+        (format!("{base}.then_n(tail, 3)"),
+         format!("{base}.then_n(play_once([c2], bass), 3)")),
+        ("at(8, chorus)".to_string(),
+         "at(8, play([c4, e4], lead))".to_string()),
+        ("seq(tail, tail)".to_string(),
+         "seq(play_once([c2], bass), play_once([c2], bass))".to_string()),
+    ];
+    for (named, written) in cases {
+        assert_eq!(
+            shape(&format!("{SECTIONS}{named}\n")),
+            shape(&format!("{SECTIONS}{written}\n")),
+            "`{named}` and `{written}` should be the same music");
+    }
+}
+
+/// Both spellings in one chain, which is the shape that sends people looking
+/// for this: two variations of a phrase, back to back, neither worth a name.
+#[test]
+fn written_out_sections_chain_with_named_ones() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}playn([c3], bass, 2)\n  \
+           .then(playn([c4], lead, 2))\n  \
+           .then(tail)\n  \
+           .then(playn([e4], lead, 3))\n"));
+    assert_eq!(bs.len(), 4);
+    assert_eq!(bs[0].start, 0.0);
+    assert_eq!(bs[1].start, 2.0);
+    assert_eq!(bs[2].start, 4.0);   // tail: play_once, one cycle
+    assert_eq!(bs[3].start, 5.0);
+}
+
+/// A chain inside a written-out section is relative to where that section was
+/// placed, exactly as it is inside a `fn` — the offsets compose either way.
+#[test]
+fn a_chain_inside_a_written_out_section_composes() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}playn([c3], bass, 2).then(play_once([c2], bass).then(tail))\n"));
+    assert_eq!(bs.len(), 3);
+    assert_eq!(bs[1].start, 2.0);   // the inner section's own start
+    assert_eq!(bs[2].start, 3.0);   // one cycle further, not back at cycle 1
+}
+
+/// `then_n` re-lowers its section once per pass, so a `rand` inside it is
+/// drawn afresh — and a play written out is re-lowered just as a `fn` is. Were
+/// it copied instead, the three passes would be one draw repeated and the two
+/// spellings would part company.
+#[test]
+fn then_n_redraws_a_written_out_section_each_pass() {
+    let drawn = "playn([c4], lead, 1, rand(1, 5))";
+    let named = format!(
+        "{SECTIONS}fn drawn() = {drawn}\nseed(7)\nplayn([c3], bass, 2).then_n(drawn, 3)\n");
+    let written = format!(
+        "{SECTIONS}seed(7)\nplayn([c3], bass, 2).then_n({drawn}, 3)\n");
+    assert_eq!(shape(&named), shape(&written));
+
+    let passes: Vec<_> = bindings_of(&written)[1..].iter().map(|b| b.cycles).collect();
+    assert_eq!(passes.len(), 3);
+    assert!(passes[0] != passes[1] || passes[1] != passes[2],
+            "the passes were drawn once and copied: {passes:?}");
+}
+
+/// A combinator *inside* the section — one that reasons about where the chain
+/// has reached, rather than only about notes — still means the same in both
+/// spellings. It has to: the section is lowered at its offset either way, so
+/// there is only one thing for `quantize` to round.
+#[test]
+fn a_combinator_inside_a_written_out_section_matches_the_named_form() {
+    let inner = "playn([c4], lead, 3, 2).quantize()";
+    let named = format!(
+        "{SECTIONS}fn rounded() = {inner}\n\
+         playn([c3], bass, 2).then(rounded).then(tail)\n");
+    let written = format!(
+        "{SECTIONS}playn([c3], bass, 2).then({inner}).then(tail)\n");
+    assert_eq!(shape(&named), shape(&written));
+}
+
+/// A written-out section carries everything a `play` call carries — its rate
+/// and its named lanes included. Those are the parts that have to survive the
+/// call being an argument rather than a statement.
+#[test]
+fn a_written_out_section_keeps_its_rate_and_lanes() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}fn wide(n, cut = 400) = lowpass(saw(n), cut, 1)\n\
+         playn([c3], bass, 2).then(playn([c4, `, e4, `], wide, 4, 0.5, cut: 800))\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[1].instrument, "wide");
+    assert_eq!(bs[1].start, 2.0);
+    assert_eq!(bs[1].lanes.len(), 1);
+    assert_eq!(bs[1].lanes[0].name, "cut");
+}
+
+/// The combinators that must be able to run a section again say so, rather
+/// than repeating `then`'s more permissive rule.
+#[test]
+fn the_combinators_that_rerun_a_section_still_want_a_fn() {
+    for src in [
+        "playn([c3], bass, 2).then_each([1, 2], playn([c4], lead, 1))",
+        "playn([c3], bass, 2).rthen([play_once([c2], bass)])",
+        "playn([c3], bass, 2).wthen([play_once([c2], bass)], [1])",
+        "playn([c3], bass, 2).shuffle_then([play_once([c2], bass)])",
+        "playn([c3], bass, 2).maybe(0.5, play_once([c2], bass))",
+    ] {
+        let e = play_err(&format!(
+            "{SECTIONS}fn faster(x) = playn([c4], lead, x)\n{src}\n"));
+        assert!(e.contains("expects a `fn`"), "`{src}` got: {e}");
+        assert!(e.contains("runs its section afresh"), "`{src}` got: {e}");
+    }
+}
+
+/// A section is still only a `fn` or a play, and the refusal names both.
+#[test]
+fn then_refuses_what_is_neither_a_function_nor_a_play() {
+    let e = play_err(&format!("{SECTIONS}play_once([c3], bass).then(4)\n"));
+    assert!(e.contains("`fn` written by name"), "got: {e}");
+    assert!(e.contains("play written out"), "got: {e}");
 }
 
 /// A section that never stops cannot be followed by anything.
