@@ -430,13 +430,13 @@ it.
 | `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
 | `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
-| `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called from the audio thread. |
+| `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` named here or a play written out, and either way its own `play` calls start where this one stops; it is lowered at eval time, not called from the audio thread. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
 
 ### Arrangement
 
 `then` is the root of a family. All of them chain from a play, and most work the
-same way underneath: the section is inlined *now*, while the program is being
+same way underneath: the section is lowered *now*, while the program is being
 lowered, with its start moved to wherever it belongs. There is no runtime
 interpreter and no callback — the scheduler only ever sees bindings that happen
 to open later.
@@ -447,10 +447,33 @@ in the language that edits a binding after it was written. `wthen` is the one
 that genuinely needs the scheduler's help; see [Choice](#choice-and-why-it-is-not-choice)
 below.
 
-A *section* is a no-parameter `fn`. It captures nothing, because closures do not
-exist here; whatever `play` calls it contains are written relative to where the
-section was placed, so nesting composes and the offsets add up as the code
-reads.
+A *section* is either a no-parameter `fn` named where the section goes, or a
+play written out there:
+
+```rust
+playn(riff, lead, 4).then(chorus)                  // named
+playn(riff, lead, 4).then(playn(riff2, lead, 4))   // written out
+```
+
+These are the same thing, not two mechanisms. A section argument is the one
+place in the language whose expression is *not* evaluated on the way into the
+call: it is lowered where the section is placed, with the start already moved
+there. So a play written out never sounds at the origin and then gets dragged
+forward — it is written where it belongs in the first place, exactly as the
+body of a named `fn` is. Write it out when a two-bar variation is not worth a
+name; name it when the name says something, or when the same section is used
+twice.
+
+A section captures nothing, because closures do not exist here; whatever `play`
+calls it contains are written relative to where the section was placed, so
+nesting composes and the offsets add up as the code reads.
+
+Five of them take only a named `fn`: `then_each`, `wthen`, `rthen`,
+`shuffle_then` and `maybe`. Each of those has to *run* its section rather than
+place it once — per element, per arm, or once more each time round — and a play
+written out has already happened by the time it is an argument. `then_n` is not
+among them: it re-lowers its section per pass, so both spellings work and a
+`rand` inside is drawn afresh either way.
 
 Most of these need the section on their left to **finish**. A plain `play` never
 does, which is what `play_once`, `playn`, `take` and `stop` are for.
@@ -475,8 +498,8 @@ playn(riff, lead, 3)
 It repeats *the whole chain to its left*, which is the point — a fill is only
 worth writing because the groove returns after it, and there is nowhere else to
 say "these two together" without naming the pair as a `fn` first. `then_n` is
-the other half of the pair: it names a section and runs it after this one, and
-because it inlines afresh each pass a `rand` inside it lands differently every
+the other half of the pair: it takes a section and runs it after this one, and
+because it lowers it afresh each pass a `rand` inside it lands differently every
 time. `loop` copies bindings that already exist, so every pass is the same
 music.
 
@@ -496,15 +519,15 @@ play itself.
 | `overlap` | `overlap(play, cycles, section)` | `then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join. Never earlier than the receiver's own start. The chain carries on from whichever ends later. |
 | `with` | `with(play, section)` | Run a section alongside this one, from where it **began**. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. |
 | `at` | `at(cycle, section)` | Place a section at an absolute cycle from the origin. The escape hatch from chaining, for an arrangement whose shape you already know. |
-| `seq` | `seq(section, ...)` | Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. |
-| `then_n` | `then_n(play, section, times)` | A section `times` times, back to back. Inlined afresh each pass, so a `rand` inside it is a different number every time round — the same rule a voice follows. |
+| `seq` | `seq(section, ...)` | Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. A section piped in from the left — `intro.seq(verse)` — must be a named `fn`, since it settled before `seq` could place it. |
+| `then_n` | `then_n(play, section, times)` | A section `times` times, back to back. Lowered afresh each pass — whether the section is named or written out — so a `rand` inside it is a different number every time round, the same rule a voice follows. |
 | `loop` | `loop(play, times)` | Everything chained so far, `times` times through. The counterpart to `then_n`: that one names a `fn` and runs it *after* this section, this one takes no section at all, because the section it repeats is the chain it is written on. The whole chain must finish. The passes are copies, so a `rand` in the chain was already spent and every pass is the same music — `then_n` is the one that draws afresh. |
-| `then_each` | `then_each(play, list, body)` | One pass per element, with the element passed in: `.then_each([1, 2, 4], faster)` calls `faster(1)`, `faster(2)`, `faster(4)`. `body` takes exactly one parameter. Arrangement by list — every list function already builds the shape of a piece, and this is what spends one. |
+| `then_each` | `then_each(play, list, body)` | One pass per element, with the element passed in: `.then_each([1, 2, 4], faster)` calls `faster(1)`, `faster(2)`, `faster(4)`. `body` takes exactly one parameter, so it is always a named `fn`. Arrangement by list — every list function already builds the shape of a piece, and this is what spends one. |
 | `then_fill` | `then_fill(play, pattern, rate?)` | One pass of a pattern on this section's **own** instrument. No `fn` and no second `play`: a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. Needs a single `play` on the left — a group has no one instrument to fill for. |
 | `quantize` | `quantize(play, grid?)` | Round where the chain has reached up to a multiple of `grid` cycles (default 1), without shortening what is already playing. |
 | `take` | `take(play, cycles)` | This section, cut to `cycles`. What gives a plain `play` an end. A part that already stops sooner is left alone — a cut is a ceiling, not a length. |
 | `stop` | `stop(play)` | Cut everything still open in this section at the moment its last **counted** part finishes. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at. |
-| `wthen` | `wthen(play, sections, weights)` | Choose between sections, afresh each time round. Weights are relative and need not sum to 1. |
+| `wthen` | `wthen(play, sections, weights)` | Choose between sections, afresh each time round. Weights are relative and need not sum to 1. The arms are named `fn`s, not plays written out: an arm has to still be runnable when the choice is made. The same holds for `rthen`, `maybe` and `shuffle_then`. |
 | `rthen` | `rthen(play, sections)` | `wthen` with every section equally likely. |
 | `maybe` | `maybe(play, chance, section)` | A section with probability `chance` (0 to 1), decided afresh each time round. A `wthen` whose other arm is silence. |
 | `shuffle_then` | `shuffle_then(play, sections)` | Every section once each, in an order drawn now. The counterpart to `rthen` rather than a variant: a weighted choice may pass a section over for a long time, and this cannot. |

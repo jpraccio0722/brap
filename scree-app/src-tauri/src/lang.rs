@@ -1142,7 +1142,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is a no-parameter `fn` whose own `play` calls start where this one stops; it is inlined at eval time, not called by the audio thread.",
+        doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is either a no-parameter `fn` named here or a play written out — `.then(playn(riff, lead, 2))` needs no name — and either way its own `play` calls start where this one stops. Lowered at eval time, not called by the audio thread.",
     },
     ListBuiltin {
         name: "then_after",
@@ -1187,7 +1187,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: true,
         receives: ValueKind::Section,
         returns: ValueKind::Play,
-        doc: "Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. Each is a no-parameter `fn`, and each must finish for the next to follow.",
+        doc: "Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. Each is a no-parameter `fn` or a play written out, and each must finish for the next to follow.",
     },
     ListBuiltin {
         name: "then_n",
@@ -1196,7 +1196,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Run a section `times` times, back to back: `play_once(intro, lead).then_n(verse, 4)`. Inlined afresh each pass rather than written once and repeated, so a `rand` inside the section is a different number every time round — the same rule a voice already follows.",
+        doc: "Run a section `times` times, back to back: `play_once(intro, lead).then_n(verse, 4)`. Lowered afresh each pass rather than written once and repeated, so a `rand` inside the section is a different number every time round — the same rule a voice already follows, and it holds whether the section is a `fn` named here or a play written out.",
     },
     ListBuiltin {
         name: "loop",
@@ -1214,7 +1214,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "One pass of the section per element of the list, in sequence, with the element passed in: `play_once(intro, lead).then_each([1, 2, 4], faster)` calls `faster(1)`, then `faster(2)`, then `faster(4)`. `body` takes exactly one parameter — the element. Arrangement by list — every list function in the language already builds the shape of a piece, and this is what spends one.",
+        doc: "One pass of the section per element of the list, in sequence, with the element passed in: `play_once(intro, lead).then_each([1, 2, 4], faster)` calls `faster(1)`, then `faster(2)`, then `faster(4)`. `body` takes exactly one parameter — the element. Arrangement by list — every list function in the language already builds the shape of a piece, and this is what spends one. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once.",
     },
     ListBuiltin {
         name: "then_fill",
@@ -1259,7 +1259,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Choose between sections, afresh each time round: `playn(intro, lead, 2).wthen([verse, chorus], [0.7, 0.3])`. Weights are relative and need not sum to 1. Unlike `choice`, which draws once while the program is lowered, this is decided by the scheduler as the music reaches it — so the block repeats forever and deals a new hand every time. Every arm must finish, and they all come back to the same place; the block itself never finishes, so bound it with `.take(n)` if something should follow.",
+        doc: "Choose between sections, afresh each time round: `playn(intro, lead, 2).wthen([verse, chorus], [0.7, 0.3])`. Weights are relative and need not sum to 1. Unlike `choice`, which draws once while the program is lowered, this is decided by the scheduler as the music reaches it — so the block repeats forever and deals a new hand every time. Every arm must finish, and they all come back to the same place; the block itself never finishes, so bound it with `.take(n)` if something should follow. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once.",
     },
     ListBuiltin {
         name: "rthen",
@@ -1268,7 +1268,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "`wthen` with every section equally likely: `playn(intro, lead, 2).rthen([verse, chorus, bridge])`. Rerolls each time round and never finishes, exactly as `wthen` does.",
+        doc: "`wthen` with every section equally likely: `playn(intro, lead, 2).rthen([verse, chorus, bridge])`. Rerolls each time round and never finishes, exactly as `wthen` does. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once.",
     },
     ListBuiltin {
         name: "maybe",
@@ -1277,7 +1277,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Play a section with probability `chance` (0 to 1), decided afresh each time round: `playn(groove, drums, 4).maybe(0.25, fill)`. A `wthen` whose other arm is silence — it repeats and rerolls for the same reason, since a coin flipped once is just an `if`.",
+        doc: "Play a section with probability `chance` (0 to 1), decided afresh each time round: `playn(groove, drums, 4).maybe(0.25, fill)`. A `wthen` whose other arm is silence — it repeats and rerolls for the same reason, since a coin flipped once is just an `if`. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once.",
     },
     ListBuiltin {
         name: "shuffle_then",
@@ -1286,7 +1286,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Every section once each, in an order drawn now: `play_once(intro, lead).shuffle_then([verse, chorus, bridge])`. The counterpart to `rthen` rather than a variant of it — a weighted choice may pass a section over for a long time, and this cannot. It settles at eval time like `scramble`, so it has a length and a `.then` may follow it.",
+        doc: "Every section once each, in an order drawn now: `play_once(intro, lead).shuffle_then([verse, chorus, bridge])`. The counterpart to `rthen` rather than a variant of it — a weighted choice may pass a section over for a long time, and this cannot. It settles at eval time like `scramble`, so it has a length and a `.then` may follow it. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once.",
     },
     ListBuiltin {
         name: "play",

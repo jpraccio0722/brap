@@ -1,11 +1,28 @@
 //! Arrangement: the family of combinators that chain from a `play`.
 //!
 //! `.then` is the root of it, and the rest are variations on the one move it
-//! makes — inline a section now, at eval time, with `play_start` moved to
+//! makes — lower a section now, at eval time, with `play_start` moved to
 //! wherever it should begin. Nothing here is a callback, and the audio thread
 //! learns nothing new: it still sees bindings that happen to open later.
 //!
-//! Three of them break that rule, and it is worth knowing which.
+//! **A section is an argument that is not evaluated on the way in.** That is
+//! the whole reason `call` hands this module raw `Arg`s the way it hands `play`
+//! its instrument: a `play` writes its notes at whatever `play_start` says when
+//! it runs, so evaluating `.then(playn(...))` before `.then` has moved
+//! `play_start` would put those notes at the origin and leave nothing to place.
+//! Lowering the argument inside `at_offset` instead is what makes
+//! `.then(chorus)` and `.then(playn(...))` the same thing by the same
+//! mechanism, rather than two spellings with two implementations. See `place`.
+//!
+//! Not every combinator can take a section written out, and the line is drawn
+//! by whether it needs to run the section *again*. `then_n` re-lowers its
+//! argument once per pass, so it can. `then_each`, `wthen`, `rthen`,
+//! `shuffle_then` and `maybe` cannot: their sections arrive inside a list, or
+//! are chosen between after the fact, and either way the arm has to be
+//! something still runnable when the choice is made. Those keep taking a `fn`,
+//! and `function` says so when handed anything else.
+//!
+//! Three of them break the placing rule, and it is worth knowing which.
 //!
 //! `.take` and `.stop` reach *backwards*, shortening bindings that are already
 //! on the timeline. They are the only things in the language that edit a
@@ -23,6 +40,7 @@ use std::rc::Rc;
 
 use crate::lowerer::lower::Lowerer;
 use crate::lowerer::play::{later_end, to_pattern_timed};
+use crate::parser::parser::Arg;
 use crate::pattern::patterns::{Binding, ChoiceGroup, ChoiceRef};
 use crate::scree_graph::environment::{FunctionDef, Value};
 
@@ -92,24 +110,88 @@ impl Section {
     }
 }
 
+/// A call's parameters, whether the first one arrived by pipe or was written.
+///
+/// `playn(...).then(x)` and `then(playn(...), x)` are one call spelled two
+/// ways, and `lang`'s table describes both with a single parameter list that
+/// counts the receiver as parameter 0. Everything here indexes the same way,
+/// so a combinator's `place` and `constant` calls can be read straight off its
+/// table entry.
+struct Params<'a> {
+    piped: Option<Value>,
+    args: &'a [Arg],
+}
+
+impl<'a> Params<'a> {
+    /// How many parameters were supplied, counting a piped receiver.
+    fn count(&self) -> usize {
+        self.args.len() + usize::from(self.piped.is_some())
+    }
+
+    /// How many parameters the pipe accounts for: one, or none.
+    fn shift(&self) -> usize {
+        usize::from(self.piped.is_some())
+    }
+
+    /// The expression written for parameter `i`, if it was written at all.
+    fn written(&self, i: usize) -> Option<&'a Arg> {
+        self.args.get(i.checked_sub(self.shift())?)
+    }
+}
+
 impl Lowerer {
     pub fn is_section(name: &str) -> bool {
         SECTION_BUILTINS.contains(&name)
     }
 
-    /// Dispatch, once `call` has evaluated the arguments.
-    pub fn section_builtin(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+    /// Dispatch, with the arguments still unevaluated.
+    ///
+    /// The combinators that place a section exactly once take the `Arg`s and
+    /// lower each part where it belongs — see `place`. Everything else is
+    /// handed the values it would have received before, because its arguments
+    /// are counts, patterns and lists that mean the same whenever they settle.
+    pub fn section_builtin(&mut self, name: &str, args: &[Arg], piped: Option<Value>)
+        -> Result<Value, String>
+    {
+        // Sections take no named arguments, and saying so here keeps the answer
+        // the same as when `call` checked it for the whole family at once.
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(format!("{name}: named arguments only work on a user `fn`"));
+        }
+        let p = Params { piped, args };
         match name {
-            THEN => self.then(args),
-            THEN_AFTER => self.then_after(args),
-            THEN_N => self.then_n(args),
+            THEN => self.then(&p),
+            THEN_AFTER => self.then_after(&p),
+            THEN_N => self.then_n(&p),
+            OVERLAP => self.overlap(&p),
+            WITH => self.with(&p),
+            AT => self.at(&p),
+            SEQ => self.seq(&p),
+            _ => {
+                let mut vals = Vec::with_capacity(p.count());
+                if let Some(v) = p.piped.clone() {
+                    vals.push(v);
+                }
+                for arg in args {
+                    let v = self.expr(&arg.value)?;
+                    vals.push(v);
+                }
+                self.settled_section(name, &vals)
+            }
+        }
+    }
+
+    /// The combinators whose arguments may be settled on the way in.
+    ///
+    /// `loop`, `quantize`, `take` and `stop` take no section at all. The rest
+    /// take one they must be able to run again — per element, per arm, or per
+    /// time round — which is exactly what a `play` written out can no longer
+    /// be, so they go on wanting a `fn`.
+    fn settled_section(&mut self, name: &str, args: &[Value]) -> Result<Value, String> {
+        match name {
             LOOP => self.loop_(args),
             THEN_EACH => self.then_each(args),
             THEN_FILL => self.then_fill(args),
-            OVERLAP => self.overlap(args),
-            WITH => self.with(args),
-            AT => self.at(args),
-            SEQ => self.seq(args),
             QUANTIZE => self.quantize(args),
             TAKE => self.take(args),
             STOP => self.stop(args),
@@ -123,20 +205,24 @@ impl Lowerer {
 
     // ---- the shared moves ----
 
-    /// Inline `def` with `play_start` set to `offset`, and report what it wrote.
+    /// Run `body` with `play_start` set to `offset`, and report what it wrote.
     ///
     /// This is `.then`'s whole mechanism, factored out: every combinator here
     /// that runs a section is this call with a different `offset`, and the
     /// differences between them are arithmetic on that one number.
     ///
-    /// Nested combinators inside `def` are relative to *its* start, so offsets
+    /// Nested combinators inside `body` are relative to *its* start, so offsets
     /// add up exactly as the nesting reads.
-    fn inline(
+    ///
+    /// What the section *is* — a `fn` being inlined or an expression being
+    /// lowered — is `body`'s business and makes no difference here, which is
+    /// the point: both spellings get their length measured off the bindings
+    /// they actually wrote, so neither can drift from the other.
+    fn at_offset(
         &mut self,
         who: &str,
-        def: Rc<FunctionDef>,
-        args: Vec<Value>,
         offset: f64,
+        body: impl FnOnce(&mut Self) -> Result<(), String>,
     ) -> Result<Section, String> {
         if !offset.is_finite() {
             return Err(format!("{who}: cannot start a section at cycle {offset}"));
@@ -144,7 +230,7 @@ impl Lowerer {
         let outer = self.play_start;
         let first = self.bindings.len();
         self.play_start = offset;
-        let result = self.inline_body(who, def, args);
+        let result = body(self);
         self.play_start = outer;
         result?;
 
@@ -157,6 +243,67 @@ impl Lowerer {
             ends_at = later_end(ends_at, binding.cycles.map(|c| binding.start + c));
         }
         Ok(Section::rooted(offset, ends_at, first, self.bindings.len()))
+    }
+
+    /// Inline `def` at `offset`.
+    fn inline(
+        &mut self,
+        who: &str,
+        def: Rc<FunctionDef>,
+        args: Vec<Value>,
+        offset: f64,
+    ) -> Result<Section, String> {
+        self.at_offset(who, offset, |me| me.inline_body(who, def, args))
+    }
+
+    /// Place the section written as argument `i`, at `offset`.
+    ///
+    /// The argument arrives unevaluated, so lowering it *here* — inside the
+    /// `play_start` swap — is what puts its notes where the section belongs.
+    /// Both spellings then fall out of one match rather than needing separate
+    /// machinery:
+    ///
+    /// - a bare `fn` name evaluates to a function and writes nothing, so it is
+    ///   inlined, exactly as it always was;
+    /// - anything else has already written its notes at `offset` by the time it
+    ///   answers, because that is what `play_start` means, so there is nothing
+    ///   left to do.
+    ///
+    /// The second case is why `.then(playn(...))` is not a fixup of notes
+    /// placed at the origin: they are never placed at the origin.
+    fn place(&mut self, who: &str, what: &str, p: &Params, i: usize, offset: f64)
+        -> Result<Section, String>
+    {
+        // A piped section — `intro.seq(verse)` — was settled before this call
+        // could move `play_start`, so it is still only ever a `fn`. Nothing is
+        // lost: the written form is the one that wanted placing.
+        if i < p.shift() {
+            let def = self.function(who, what, p.piped.as_ref())?;
+            return self.inline(who, def, Vec::new(), offset);
+        }
+        let Some(arg) = p.written(i) else {
+            return Err(format!("{who}: {what} is missing"));
+        };
+        let expr = &arg.value;
+        self.at_offset(who, offset, |me| match me.expr(expr)? {
+            Value::Function(def) => me.inline_body(who, def, Vec::new()),
+            Value::Play { .. } => Ok(()),
+            _ => Err(format!(
+                "{who}: {what} must be either a `fn` written by name, such as `chorus`, \
+                 or a play written out, such as `playn(pat, inst, 4)`")),
+        })
+    }
+
+    /// Parameter `i`, evaluated — for the parts of a combinator that are not
+    /// sections and so mean the same whenever they settle.
+    fn param(&mut self, p: &Params, i: usize) -> Result<Option<Value>, String> {
+        if i < p.shift() {
+            return Ok(p.piped.clone());
+        }
+        match p.written(i) {
+            Some(arg) => Ok(Some(self.expr(&arg.value)?)),
+            None => Ok(None),
+        }
     }
 
     fn inline_body(
@@ -179,9 +326,15 @@ impl Lowerer {
         self.apply(who, def, args).map(|_| ())
     }
 
-    /// The receiver of a chained combinator, unpacked.
+    /// The receiver of a chained combinator, when its arguments were settled on
+    /// the way in and it therefore arrived at the front of them.
     fn receiver(&self, who: &str, args: &[Value]) -> Result<Section, String> {
-        let Some(Value::Play { starts_at, ends_at, first, last, chain_first, .. }) = args.first()
+        self.receiver_of(who, args.first())
+    }
+
+    /// The receiver of a chained combinator, unpacked.
+    fn receiver_of(&self, who: &str, v: Option<&Value>) -> Result<Section, String> {
+        let Some(Value::Play { starts_at, ends_at, first, last, chain_first, .. }) = v
         else {
             return Err(format!(
                 "{who}: the left side must be a play — `playn(...).{who}(...)`"));
@@ -202,14 +355,22 @@ impl Lowerer {
              with `play_once`, `playn`, `.take(n)` or `.stop()` first."))
     }
 
+    /// A section that must stay runnable, so only a `fn` will do.
+    ///
+    /// The refusal is worth spelling out, because `.then` accepts a play
+    /// written out and these do not. What separates them is that a play has
+    /// already happened by the time it is a value, and every caller of this
+    /// needs a section it can still run — once per element, once per arm, or
+    /// once more each time round.
     fn function<'a>(&self, who: &str, what: &str, v: Option<&'a Value>)
         -> Result<Rc<FunctionDef>, String>
     {
         match v {
             Some(Value::Function(def)) => Ok(def.clone()),
             _ => Err(format!(
-                "{who} expects a function: {what} must be a `fn` written by name, \
-                 not a call of one")),
+                "{who} expects a `fn`: {what} must be a section written by name. Unlike \
+                 `{THEN}`, `{who}` runs its section afresh rather than placing it once, so \
+                 a play written out is not enough — wrap it in a `fn`.")),
         }
     }
 
@@ -218,6 +379,22 @@ impl Lowerer {
             Some(Value::Number(n)) if n.is_finite() => Ok(*n),
             _ => Err(format!("{who}: {what} must be a compile-time number")),
         }
+    }
+
+    /// Parameter `i` as a compile-time number: the counts and gaps.
+    fn constant_param(&mut self, who: &str, what: &str, p: &Params, i: usize)
+        -> Result<f64, String>
+    {
+        let v = self.param(p, i)?;
+        self.constant(who, what, v.as_ref())
+    }
+
+    /// Parameter `i` as the play a combinator chains from.
+    fn receiver_param(&mut self, who: &str, p: &Params, i: usize)
+        -> Result<Section, String>
+    {
+        let v = self.param(p, i)?;
+        self.receiver_of(who, v.as_ref())
     }
 
     /// Shorten every binding of a section so none of it sounds past `cut`.
@@ -237,34 +414,35 @@ impl Lowerer {
     // ---- placing a section in time ----
 
     /// `.then(f)` — run `f`'s bindings once this section has finished.
-    pub fn then(&mut self, args: &[Value]) -> Result<Value, String> {
-        let s = self.receiver(THEN, args)?;
-        if args.len() != 2 {
+    ///
+    /// The section may be a `fn` named here or a play written out; `place`
+    /// lowers either one at the cursor, so the two spell the same music.
+    fn then(&mut self, p: &Params) -> Result<Value, String> {
+        let s = self.receiver_param(THEN, p, 0)?;
+        if p.count() != 2 {
             return Err(format!(
                 "{THEN} expects a section to run afterwards: \
                  playn(pat, inst, 4).{THEN}(next)"));
         }
-        let def = self.function(THEN, "the section", args.get(1))?;
         let at = self.cursor(THEN, &s)?;
-        Ok(self.inline(THEN, def, Vec::new(), at)?.after(&s).value())
+        Ok(self.place(THEN, "the section", p, 1, at)?.after(&s).value())
     }
 
     /// `.then_after(n, f)` — `n` cycles of silence, then `f`.
-    pub fn then_after(&mut self, args: &[Value]) -> Result<Value, String> {
-        let s = self.receiver(THEN_AFTER, args)?;
-        if args.len() != 3 {
+    fn then_after(&mut self, p: &Params) -> Result<Value, String> {
+        let s = self.receiver_param(THEN_AFTER, p, 0)?;
+        if p.count() != 3 {
             return Err(format!(
                 "{THEN_AFTER} expects a gap and a section: \
                  playn(pat, inst, 4).{THEN_AFTER}(2, next)"));
         }
-        let gap = self.constant(THEN_AFTER, "the gap", args.get(1))?;
+        let gap = self.constant_param(THEN_AFTER, "the gap", p, 1)?;
         if gap < 0.0 {
             return Err(format!(
                 "{THEN_AFTER}: a gap cannot be negative — use `.{OVERLAP}` to start early"));
         }
-        let def = self.function(THEN_AFTER, "the section", args.get(2))?;
         let at = self.cursor(THEN_AFTER, &s)? + gap;
-        Ok(self.inline(THEN_AFTER, def, Vec::new(), at)?.after(&s).value())
+        Ok(self.place(THEN_AFTER, "the section", p, 2, at)?.after(&s).value())
     }
 
     /// `.overlap(n, f)` — start `f` `n` cycles *before* this section ends.
@@ -272,24 +450,23 @@ impl Lowerer {
     /// The whole of a crossfade, and the reason it is a combinator rather than
     /// a negative gap: the two sections really do sound together for `n`
     /// cycles, and the chain carries on from whichever of them ends later.
-    pub fn overlap(&mut self, args: &[Value]) -> Result<Value, String> {
-        let s = self.receiver(OVERLAP, args)?;
-        if args.len() != 3 {
+    fn overlap(&mut self, p: &Params) -> Result<Value, String> {
+        let s = self.receiver_param(OVERLAP, p, 0)?;
+        if p.count() != 3 {
             return Err(format!(
                 "{OVERLAP} expects an overlap and a section: \
                  playn(pat, inst, 4).{OVERLAP}(1, next)"));
         }
-        let by = self.constant(OVERLAP, "the overlap", args.get(1))?;
+        let by = self.constant_param(OVERLAP, "the overlap", p, 1)?;
         if by < 0.0 {
             return Err(format!(
                 "{OVERLAP}: an overlap cannot be negative — use `.{THEN_AFTER}` for a gap"));
         }
-        let def = self.function(OVERLAP, "the section", args.get(2))?;
         let end = self.cursor(OVERLAP, &s)?;
         // Never before the section began: overlapping by more than its whole
         // length would put the newcomer in front of it.
         let at = (end - by).max(s.starts_at);
-        let next = self.inline(OVERLAP, def, Vec::new(), at)?;
+        let next = self.place(OVERLAP, "the section", p, 2, at)?;
         Ok(Section {
             starts_at: s.starts_at,
             ends_at: later_end(Some(end), next.ends_at),
@@ -305,15 +482,14 @@ impl Lowerer {
     /// `play_all` gathers plays that are already concurrent; this *makes* one
     /// concurrent with a section that has already been placed, which is what
     /// lets `A.with(drums).then(B)` read in the order it happens.
-    pub fn with(&mut self, args: &[Value]) -> Result<Value, String> {
-        let s = self.receiver(WITH, args)?;
-        if args.len() != 2 {
+    fn with(&mut self, p: &Params) -> Result<Value, String> {
+        let s = self.receiver_param(WITH, p, 0)?;
+        if p.count() != 2 {
             return Err(format!(
                 "{WITH} expects a section to run alongside: \
                  playn(pat, inst, 4).{WITH}(drums)"));
         }
-        let def = self.function(WITH, "the section", args.get(1))?;
-        let alongside = self.inline(WITH, def, Vec::new(), s.starts_at)?;
+        let alongside = self.place(WITH, "the section", p, 1, s.starts_at)?;
         Ok(Section {
             starts_at: s.starts_at,
             ends_at: later_end(s.ends_at, alongside.ends_at),
@@ -329,29 +505,27 @@ impl Lowerer {
     /// The escape hatch from chaining: an arrangement you already know the
     /// shape of is often clearer written down than derived one `.then` at a
     /// time.
-    pub fn at(&mut self, args: &[Value]) -> Result<Value, String> {
-        if args.len() != 2 {
+    fn at(&mut self, p: &Params) -> Result<Value, String> {
+        if p.count() != 2 {
             return Err(format!("{AT} expects a cycle and a section: {AT}(8, chorus)"));
         }
-        let when = self.constant(AT, "the cycle", args.first())?;
+        let when = self.constant_param(AT, "the cycle", p, 0)?;
         if when < 0.0 {
             return Err(format!("{AT}: a cycle cannot be negative, got {when}"));
         }
-        let def = self.function(AT, "the section", args.get(1))?;
-        Ok(self.inline(AT, def, Vec::new(), when)?.value())
+        Ok(self.place(AT, "the section", p, 1, when)?.value())
     }
 
     /// `seq(a, b, c)` — sections one after another, without the nesting.
-    pub fn seq(&mut self, args: &[Value]) -> Result<Value, String> {
-        if args.is_empty() {
+    fn seq(&mut self, p: &Params) -> Result<Value, String> {
+        if p.count() == 0 {
             return Err(format!("{SEQ} expects at least one section: {SEQ}(intro, verse)"));
         }
         let start = self.play_start;
         let first = self.bindings.len();
         let mut at = start;
-        for (i, arg) in args.iter().enumerate() {
-            let def = self.function(SEQ, &format!("section {}", i + 1), Some(arg))?;
-            let s = self.inline(SEQ, def, Vec::new(), at)?;
+        for i in 0..p.count() {
+            let s = self.place(SEQ, &format!("section {}", i + 1), p, i, at)?;
             at = s.ends_at.ok_or_else(|| format!(
                 "{SEQ}: section {} never finishes, so nothing could follow it", i + 1))?;
         }
@@ -362,18 +536,21 @@ impl Lowerer {
 
     /// `.then_n(f, n)` — run `f` `n` times, back to back.
     ///
-    /// Inlined afresh each time round rather than written once and repeated,
+    /// Lowered afresh each time round rather than written once and repeated,
     /// which is what makes a `rand` inside `f` a different number on each pass
     /// — the same rule a voice already follows.
-    pub fn then_n(&mut self, args: &[Value]) -> Result<Value, String> {
-        let s = self.receiver(THEN_N, args)?;
-        if args.len() != 3 {
+    ///
+    /// That holds however the section is spelled: the argument is unevaluated
+    /// until `place` reaches it, so `.then_n(playn([c4, rand(1, 5)], lead, 1), 3)`
+    /// draws three times, exactly as naming the same play in a `fn` would.
+    fn then_n(&mut self, p: &Params) -> Result<Value, String> {
+        let s = self.receiver_param(THEN_N, p, 0)?;
+        if p.count() != 3 {
             return Err(format!(
                 "{THEN_N} expects a section and a count: \
                  playn(pat, inst, 4).{THEN_N}(verse, 3)"));
         }
-        let def = self.function(THEN_N, "the section", args.get(1))?;
-        let times = self.constant(THEN_N, "the count", args.get(2))?;
+        let times = self.constant_param(THEN_N, "the count", p, 2)?;
         if times.fract() != 0.0 || times < 1.0 {
             return Err(format!(
                 "{THEN_N}: the count must be a whole number of at least 1, got {times}"));
@@ -388,7 +565,7 @@ impl Lowerer {
         let first = self.bindings.len();
         let mut at = start;
         for i in 0..times as usize {
-            let s = self.inline(THEN_N, def.clone(), Vec::new(), at)?;
+            let s = self.place(THEN_N, "the section", p, 1, at)?;
             at = s.ends_at.ok_or_else(|| format!(
                 "{THEN_N}: pass {} never finishes, so the next could not follow it", i + 1))?;
         }
