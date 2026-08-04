@@ -720,7 +720,7 @@ fn snare(n) = noise() * perc(0.001, 0.1) * rand(0.7, 1)   // a new draw per note
 | Name | Arguments | Notes |
 | --- | --- | --- |
 | `perc` | `(→ attack, release)` | Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph — and in a voice the shape is measured from the onset and always finishes, so a drum longer than the step it sits on rings on into the next rather than being cut off. Both times are constants. |
-| `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice lasts `duration + release`. Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants. |
+| `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice goes on at least `duration + release` (see [How long a voice lasts](#how-long-a-voice-lasts)). Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants. |
 | `adsr` | `(gate → attack, decay, sustain, release)` | Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1. |
 | `follow` | `(signal → response_time)` | Parameter follower. Smooths the signal with the given halfway response time, in seconds. |
 | `afollow` | `(signal → attack, release)` | Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds). |
@@ -749,3 +749,39 @@ The reverbs and delays are wet only:
 fn pad(n) = saw(n.m2h) * env(0.3, 0.2, 0.7, 0.4, dur)
 fn wet(x) = x + reverb(x, 10, 3, 0.5) * 0.3
 ```
+
+### How long a voice lasts
+
+A note played from a pattern is one voice, and it is rendered for as long as it
+has something left to say — never only for the step it sits on. An instrument
+is read for how far past its note the sound can still arrive, and the note gets
+that much more room:
+
+- `env` adds its release, which hangs off the end of the note.
+- `perc` adds whatever of its shape does not fit inside the note, and nothing
+  when it does fit.
+- `delay` and `tap` add how far they reach back. A `tap` whose delay is a
+  signal has no one answer, so its declared `max_delay` stands for it — worth
+  keeping honest, since a bound far wider than the modulation holds the voice
+  open for a reach it never makes.
+- The reverbs add their `time`, the decay to -60 dB.
+
+**These accumulate along the signal path**, which is the point: an `env` into a
+`delay` rings out for its release and *then* comes back a delay later, so the
+voice needs both. Branches that happen at once count once — a dry signal added
+to its own echoes lasts as long as the last echo, not the sum of them.
+
+```
+// a 0.5 s note holds this voice open for 0.5 + 0.4 + 0.8 = 1.7 s
+fn ping(n) = {
+  let dry = sin(n.m2h) * env(0.001, 0.05, 0.2, 0.4, dur)
+  dry + delay(dry, 0.8) * 0.5
+}
+```
+
+Two things are outside this. A voice still ringing is a whole graph still being
+rendered, so a long tail against a fast pattern is many voices at once — **the
+tail is capped at 10 seconds**, which is well past anything musical and stops a
+slipped digit in a `reverb` time from taking the performance down with it. And
+feedback built by hand out of `tick` cannot be measured at all, so it holds a
+voice open for nothing; give it an envelope that says when it is over.
