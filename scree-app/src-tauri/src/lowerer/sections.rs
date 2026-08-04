@@ -22,7 +22,7 @@
 use std::rc::Rc;
 
 use crate::lowerer::lower::Lowerer;
-use crate::lowerer::play::{later_end, to_pattern};
+use crate::lowerer::play::{later_end, to_pattern_timed};
 use crate::pattern::patterns::{Binding, ChoiceGroup, ChoiceRef};
 use crate::scree_graph::environment::{FunctionDef, Value};
 
@@ -570,10 +570,13 @@ impl Lowerer {
             }
         };
 
-        let mut pattern = to_pattern(args.get(1).expect("checked above"))?;
+        // A fill is one pass, and a pass is only a cycle when the pattern is
+        // written in shares — see `to_pattern_timed`.
+        let (mut pattern, pass_cycles) = to_pattern_timed(args.get(1).expect("checked above"))?;
         if rate != 1.0 {
             pattern = crate::pattern::pattern::Pattern::Fast(rate, Box::new(pattern));
         }
+        let span = pass_cycles / rate;
 
         // Everything but the pattern is inherited: the fill is the same voice
         // and the same lanes, playing something else for one pass.
@@ -583,7 +586,7 @@ impl Lowerer {
             pattern,
             lanes: source.lanes.clone(),
             start: at,
-            cycles: Some(1.0 / rate),
+            cycles: Some(span),
             repeat: None,
             choice: None,
         };
@@ -591,7 +594,7 @@ impl Lowerer {
         self.bindings.push(fill);
         Ok(Section {
             starts_at: at,
-            ends_at: Some(at + 1.0 / rate),
+            ends_at: Some(at + span),
             first,
             last: self.bindings.len(),
             chain_first,

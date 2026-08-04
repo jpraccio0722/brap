@@ -33,6 +33,9 @@ export type ValueKind =
   | "section"
   /** A loaded audio file, from `load`. */
   | "buffer"
+  /** A written note value — `q`, `e`, `h`, or a tie or dot built from them.
+   *  Only meaningful inside a pattern, as how long a step lasts. */
+  | "duration"
   /** A double-quoted string. Only `load` takes one, and only written out, so
    *  nothing ever answers with text and nothing chains into a name wanting it. */
   | "text";
@@ -53,13 +56,30 @@ export interface Builtin {
   doc: string;
 }
 
+/** A written note value, or the tuplet marker, as offered after a `;`. Served
+ *  from `lang::DURATIONS` rather than mirrored here, so there is one table. */
+export interface Duration {
+  name: string;
+  /** Its length in beats — null for `t`, which is a mark rather than a length. */
+  beats: number | null;
+  /** True for `t`, which follows a group's `]` and nothing else. */
+  marksGroup: boolean;
+  doc: string;
+}
+
 export interface LanguageMetadata {
   builtins: Builtin[];
   keywords: string[];
+  /** What may be written after a `;`. */
+  durations: Duration[];
 }
 
 /** Used until the backend answers, so highlighting is correct from frame one. */
-export const EMPTY_METADATA: LanguageMetadata = { builtins: [], keywords: [] };
+export const EMPTY_METADATA: LanguageMetadata = {
+  builtins: [],
+  keywords: [],
+  durations: [],
+};
 
 let pending: Promise<LanguageMetadata> | null = null;
 

@@ -52,6 +52,9 @@ pub enum ValueKind {
     Section,
     /// A loaded audio file, from `load`.
     Buffer,
+    /// A written note value — `q`, `e`, `h`, or a tie or dot built from them.
+    /// Only meaningful inside a pattern, where it is how long a step lasts.
+    Duration,
     /// A double-quoted string. Only `load` takes one, and only written out —
     /// so nothing ever *answers* with text, and nothing can be chained into a
     /// name that wants it.
@@ -752,6 +755,15 @@ pub static LIST_BUILTINS: &[ListBuiltin] = &[
         doc: "Apply a function to every element: `riff.map(up)`. The transform is an ordinary user `fn` of one argument, and may answer with anything — mapping to oscillators is the only way to hold several voices apart, since a `for` over audio sums instead of collecting.",
     },
     ListBuiltin {
+        name: "dot",
+        params: &["value", "dots"],
+        arities: &[1, 2],
+        variadic: false,
+        receives: ValueKind::Duration,
+        returns: ValueKind::Duration,
+        doc: "Dot a written note value: `q.dot` is a dotted quarter, a quarter and an eighth. `dots` defaults to 1; `q.dot(2)` is the doubly-dotted quarter, which is a quarter and an eighth and a sixteenth. Written as a count rather than by repeating `.dot`, because each dot adds half of the note itself rather than half of what the last one left.",
+    },
+    ListBuiltin {
         name: "filter",
         params: &["list", "predicate"],
         arities: &[2],
@@ -1283,7 +1295,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the sequence is as long as its values add up to rather than one cycle: `[c4;q, e4, g4]` is a 3/4 bar, and a value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
     },
     ListBuiltin {
         name: "play_once",
@@ -1450,6 +1462,254 @@ pub fn note(name: &str) -> NoteName {
 }
 
 // ---------------------------------------------------------------------------
+// Written note values.
+// ---------------------------------------------------------------------------
+
+/// A written note value, in beats, held exactly.
+///
+/// A rational rather than an `f64` because a tuplet's count is decided by a
+/// gcd, and a gcd is only meaningful on exact numbers. Dotted values put a 3 in
+/// the numerator, so the moment `q.dot` exists the denominators stop being
+/// powers of two and float rounding starts choosing the wrong tuplet. The
+/// numbers involved are tiny — powers of two times factors of 3/2 — so an
+/// `i64` pair is never near overflowing.
+///
+/// Kept here beside `note` rather than in the lowerer because it is language
+/// surface: `q` is spelled and resolved exactly as `c4` is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Beats {
+    num: i64,
+    den: i64,
+}
+
+fn gcd_i64(a: i64, b: i64) -> i64 {
+    let (mut a, mut b) = (a.abs(), b.abs());
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    // Only reachable from `Beats::new(0, _)`, which nothing writes: durations
+    // are positive. One keeps the reduction a no-op rather than dividing by nil.
+    if a == 0 { 1 } else { a }
+}
+
+impl Beats {
+    /// Always reduced, with the sign in the numerator, so `PartialEq` means
+    /// equality of value and not merely of spelling — `2/4` has to equal `1/2`
+    /// or the gcd walk compares unequal things.
+    pub fn new(num: i64, den: i64) -> Beats {
+        debug_assert!(den != 0, "a duration with no denominator");
+        let sign = if den < 0 { -1 } else { 1 };
+        let (num, den) = (num * sign, den * sign);
+        let g = gcd_i64(num, den);
+        Beats { num: num / g, den: den / g }
+    }
+
+    pub fn whole(n: i64) -> Beats {
+        Beats::new(n, 1)
+    }
+
+    pub fn to_f64(self) -> f64 {
+        self.num as f64 / self.den as f64
+    }
+
+    pub fn add(self, other: Beats) -> Beats {
+        Beats::new(self.num * other.den + other.num * self.den, self.den * other.den)
+    }
+
+    /// The largest value dividing both a whole number of times — the unit a
+    /// tuplet is counted in. `gcd(a/b, c/d)` is `gcd(ad, cb) / bd`, which `new`
+    /// then reduces.
+    pub fn gcd(self, other: Beats) -> Beats {
+        Beats::new(
+            gcd_i64(self.num * other.den, other.num * self.den),
+            self.den * other.den,
+        )
+    }
+
+    /// Dotted `dots` times: `value * (2 - 2^-dots)`.
+    ///
+    /// Each dot adds half of *the note*, not half of what the previous dot left
+    /// — so a doubly-dotted quarter is a quarter and an eighth and a sixteenth,
+    /// which is 7/4 and not the 9/4 that dotting a dotted value would give.
+    /// That is why the count is a parameter rather than something reached by
+    /// writing `.dot` twice.
+    pub fn dotted(self, dots: u32) -> Beats {
+        // (2^(n+1) - 1) / 2^n, which is 3/2, 7/4, 15/8 as n climbs.
+        let scale = 1i64 << dots;
+        Beats::new(self.num * (2 * scale - 1), self.den * scale)
+    }
+
+    pub fn times(self, n: i64) -> Beats {
+        Beats::new(self.num * n, self.den)
+    }
+
+    /// How many `unit`s fit in this, when it is a whole number of them. The gcd
+    /// of a group's contents always divides their sum exactly, so the `None`
+    /// arm is unreachable from the tuplet path — it exists so the arithmetic
+    /// cannot silently truncate if some later caller asks a different question.
+    pub fn divide_by(self, unit: Beats) -> Option<i64> {
+        let num = self.num * unit.den;
+        let den = self.den * unit.num;
+        if den == 0 || num % den != 0 {
+            return None;
+        }
+        Some(num / den)
+    }
+}
+
+impl std::fmt::Display for Beats {
+    /// Named where there is a name for it, since that is what the writer typed;
+    /// a bare count of beats otherwise, which is what a tie or a tuplet's
+    /// leftovers come to.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(d) = DURATIONS.iter().find(|d| d.beats() == *self) {
+            return write!(f, "{}", d.name);
+        }
+        if self.den == 1 {
+            write!(f, "{} beats", self.num)
+        } else {
+            write!(f, "{}/{} beats", self.num, self.den)
+        }
+    }
+}
+
+/// One written value: how it is spelled, how long it is, and what to say about
+/// it. The doc travels with the entry so the editor's `;` menu is generated
+/// from this table rather than from a copy of it — the same rule the callable
+/// names follow.
+pub struct WrittenValue {
+    pub name: &'static str,
+    num: i64,
+    den: i64,
+    pub doc: &'static str,
+}
+
+/// The written values, in beats, taking a quarter as the beat — which is what
+/// `BEATS_PER_CYCLE` already assumes in reading `bpm`.
+///
+/// Deliberately **not** seeded into the environment, for the same reason note
+/// names are not: resolution happens only when a variable lookup misses, so a
+/// user `let e = 3` or a parameter named `e` shadows the eighth for free.
+///
+/// Thirty-seconds have no spelling here. `t` is spent on the tuplet marker, and
+/// inventing a second letter for a value this rare is worse than writing the
+/// tuplet that reaches it.
+pub static DURATIONS: &[WrittenValue] = &[
+    WrittenValue { name: "w", num: 4, den: 1, doc: "Whole note — four beats, which is one cycle." },
+    WrittenValue { name: "h", num: 2, den: 1, doc: "Half note — two beats." },
+    WrittenValue { name: "q", num: 1, den: 1, doc: "Quarter note — one beat." },
+    WrittenValue { name: "e", num: 1, den: 2, doc: "Eighth note — half a beat." },
+    WrittenValue { name: "s", num: 1, den: 4, doc: "Sixteenth note — a quarter of a beat." },
+];
+
+impl WrittenValue {
+    pub fn beats(&self) -> Beats {
+        Beats::new(self.num, self.den)
+    }
+}
+
+/// Marks a group as a tuplet: `[[c4;q, d4, e4];t, f4]`. It carries no number
+/// because there is none to carry — the count, the unit and the resulting span
+/// all follow from what the group holds.
+pub const TUPLET: &str = "t";
+
+/// What `t` means, kept beside the values so the editor can offer it in the
+/// same menu.
+pub const TUPLET_DOC: &str =
+    "Tuplet — play this group in the next lower power of two. Three quarters in \
+     the time of two, five eighths in the time of four. Its contents have to fill \
+     the division, and cannot already come to a plain duration.";
+
+/// Read a bare identifier as a written note value.
+pub fn duration(name: &str) -> Option<Beats> {
+    DURATIONS.iter().find(|d| d.name == name).map(|d| d.beats())
+}
+
+/// How many units a tuplet of `n` is played in the time of: the next lower
+/// power of two, which is what "three in the time of two" and "five in the time
+/// of four" are both instances of.
+///
+/// Answers `n` itself when `n` is already a power of two — and that equality is
+/// the test for a group that is not a tuplet at all, since it would be played
+/// in exactly the time it is written.
+pub fn tuplet_span(n: i64) -> i64 {
+    debug_assert!(n > 0, "a tuplet of {n}");
+    1i64 << (63 - n.leading_zeros() as i64)
+}
+
+/// The arithmetic tuplets are decided by. Exactness is the whole point of the
+/// type, so these are about it holding under the operations `tuplet` performs.
+#[cfg(test)]
+mod beats_tests {
+    use super::*;
+
+    fn q() -> Beats { duration("q").expect("q") }
+    fn e() -> Beats { duration("e").expect("e") }
+    fn h() -> Beats { duration("h").expect("h") }
+    /// A dotted quarter — the value that makes a float gcd start drifting.
+    fn dotted_q() -> Beats { Beats::new(3, 2) }
+
+    #[test]
+    fn equal_values_written_differently_compare_equal() {
+        assert_eq!(Beats::new(2, 4), e());
+        assert_eq!(Beats::new(4, 2), h());
+    }
+
+    #[test]
+    fn the_gcd_is_the_unit_a_group_is_counted_in() {
+        assert_eq!(q().gcd(e()), e());
+        assert_eq!(h().gcd(q()), q());
+        // The case the rational exists for: a dotted quarter against eighths.
+        assert_eq!(dotted_q().gcd(e()), e());
+    }
+
+    /// `[q, q, q]` is three quarters; `[h, q]` is the same three, tied.
+    #[test]
+    fn a_count_is_the_sum_over_the_unit() {
+        let three_q = q().add(q()).add(q());
+        assert_eq!(three_q.divide_by(q()), Some(3));
+        let tied = h().add(q());
+        assert_eq!(tied.divide_by(h().gcd(q())), Some(3));
+    }
+
+    /// The rule the tuplet refusal is: a count that is already a power of two
+    /// would be played in exactly the time it is written.
+    #[test]
+    fn a_tuplet_span_is_the_next_lower_power_of_two() {
+        assert_eq!(tuplet_span(3), 2);
+        assert_eq!(tuplet_span(5), 4);
+        assert_eq!(tuplet_span(6), 4);
+        assert_eq!(tuplet_span(7), 4);
+        assert_eq!(tuplet_span(9), 8);
+        for n in [1, 2, 4, 8, 16] {
+            assert_eq!(tuplet_span(n), n, "{n} compresses nothing");
+        }
+    }
+
+    /// Why no reading of a group has to be chosen between: halving the unit and
+    /// doubling the count leaves the span it is played in alone. This is what
+    /// lets `;t` carry no number.
+    #[test]
+    fn halving_the_unit_and_doubling_the_count_holds_the_span() {
+        for n in 1..=32i64 {
+            assert_eq!(tuplet_span(2 * n), 2 * tuplet_span(n), "at {n}");
+        }
+        // The instance of it that matters: six eighths and three quarters.
+        assert_eq!(e().times(tuplet_span(6)), q().times(tuplet_span(3)));
+    }
+
+    /// Named where there is a name, since that is what was typed.
+    #[test]
+    fn a_value_prints_as_what_it_was_written_as() {
+        assert_eq!(q().to_string(), "q");
+        assert_eq!(h().to_string(), "h");
+        assert_eq!(dotted_q().to_string(), "3/2 beats");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The editor-facing view.
 // ---------------------------------------------------------------------------
 
@@ -1474,11 +1734,30 @@ pub struct BuiltinInfo {
     pub doc: &'static str,
 }
 
+/// A written note value, or the tuplet marker, as the editor offers it after a
+/// `;`. Served rather than mirrored: these are language surface like any other
+/// name, and a second copy in TypeScript would be a second thing to forget.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurationInfo {
+    /// How it is written after the `;`.
+    pub name: &'static str,
+    /// Its length in beats — `None` for `t`, which is a mark rather than a
+    /// length and takes its span from what the group holds.
+    pub beats: Option<f64>,
+    /// True for `t`, which follows a group's `]` and nothing else. The editor
+    /// uses this to offer it in the one position where it means something.
+    pub marks_group: bool,
+    pub doc: &'static str,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LanguageMetadata {
     pub builtins: Vec<BuiltinInfo>,
     pub keywords: &'static [&'static str],
+    /// What may be written after a `;`.
+    pub durations: Vec<DurationInfo>,
 }
 
 /// Everything the editor needs to highlight, complete and describe scree.
@@ -1538,9 +1817,29 @@ pub fn metadata() -> LanguageMetadata {
         doc: b.doc,
     });
 
+    let durations = DURATIONS
+        .iter()
+        .map(|d| DurationInfo {
+            name: d.name,
+            beats: Some(d.beats().to_f64()),
+            marks_group: false,
+            doc: d.doc,
+        })
+        // Longest first above, and the marker last: the menu reads as a scale
+        // from a whole note down, with the one thing that is not a length after
+        // it rather than sorted into the middle of them.
+        .chain(std::iter::once(DurationInfo {
+            name: TUPLET,
+            beats: None,
+            marks_group: true,
+            doc: TUPLET_DOC,
+        }))
+        .collect();
+
     LanguageMetadata {
         builtins: ugens.chain(lists).chain(maths).chain(randoms).chain(specials).collect(),
         keywords: KEYWORDS,
+        durations,
     }
 }
 
@@ -1667,6 +1966,26 @@ mod tests {
         let keywords = json["keywords"].as_array().unwrap();
         assert!(keywords.iter().any(|k| k == "fn"));
 
+        // What the editor offers after a `;`. Served rather than mirrored, so
+        // this is the contract `Duration` in `metadata.ts` is written against —
+        // `marksGroup` in particular, which is what splits the one menu from
+        // the other.
+        let durations = json["durations"].as_array().unwrap();
+        assert_eq!(durations.len(), DURATIONS.len() + 1, "the values, and `t`");
+        let names: Vec<&str> =
+            durations.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["w", "h", "q", "e", "s", "t"],
+                   "longest first, with the marker last — the menu's order");
+
+        let quarter = durations.iter().find(|d| d["name"] == "q").expect("q");
+        assert_eq!(quarter["beats"], 1.0);
+        assert_eq!(quarter["marksGroup"], false);
+        assert!(quarter["doc"].as_str().unwrap().contains("Quarter"));
+
+        let tuplet = durations.iter().find(|d| d["name"] == "t").expect("t");
+        assert!(tuplet["beats"].is_null(), "a mark has no length of its own");
+        assert_eq!(tuplet["marksGroup"], true);
+
         let builtins = json["builtins"].as_array().unwrap();
         assert_eq!(
             builtins.len(),
@@ -1781,6 +2100,7 @@ mod receives_tests {
             ValueKind::Play => receiver == ValueKind::Play,
             ValueKind::Section => receiver == ValueKind::Section,
             ValueKind::Buffer => receiver == ValueKind::Buffer,
+            ValueKind::Duration => receiver == ValueKind::Duration,
             // Written out at the call, never produced — so nothing stands to
             // the left of a name that wants one.
             ValueKind::Text => false,
@@ -1810,6 +2130,9 @@ mod receives_tests {
             "buffer" => "load(\"test.wav\")",
             "path" => "\"test.wav\"",
             "channel" => "0",
+            // `dot` is the only name taking a written note value, so this
+            // filler had no reason to exist until it did.
+            "value" => "q",
             // A probability has to stay inside 0..=1, and 1 is in range.
             _ => "1",
         }
@@ -1933,6 +2256,8 @@ mod receives_tests {
                 "section" => "section",
                 "buffer" => "load(\"test.wav\")",
                 "path" => "\"test.wav\"",
+                // The only name receiving a written note value is `dot`.
+                "value" => "q",
                 _ => "1",
             };
             a
@@ -1942,7 +2267,7 @@ mod receives_tests {
 
     /// One name per kind that accepts that kind and no other, so which of them
     /// compiles identifies what the receiver was.
-    const PROBES: [(ValueKind, &str); 6] = [
+    const PROBES: [(ValueKind, &str); 7] = [
         (ValueKind::List, "len"),
         (ValueKind::Play, "play_all"),
         // Nothing but a buffer has a length in seconds.
@@ -1952,6 +2277,10 @@ mod receives_tests {
         // signal. Order matters: the narrower probe is asked first.
         (ValueKind::Number, "m2h"),
         (ValueKind::Signal, "clip"),
+        // Before the pattern probe, and it has to be: a written note value is
+        // a one-step pattern, so `play_once` would take it too. Nothing but a
+        // written value can be dotted.
+        (ValueKind::Duration, "dot"),
         // Last, and it has to be: a list and a number are both usable as
         // patterns, so this probe accepts everything the three above do. Asked
         // here, it identifies only what nothing else would take — a layered

@@ -151,6 +151,30 @@ impl Lowerer {
                 Ok(Some(Value::Stack(Rc::new(args.to_vec()))))
             }
 
+            // A dot lengthens a written value by half. It lives here rather
+            // than with the arithmetic because that dispatches on `f64`, and a
+            // written value is a rational held exactly — the whole reason a
+            // doubly-dotted note still lands on the right tuplet count.
+            "dot" => {
+                arity(func, args)?;
+                let Value::Duration(b) = &args[0] else {
+                    return Err(format!(
+                        "{func} lengthens a written note value by half, and there is \
+                         no such thing to lengthen here — write `q.dot` or `h.dot`"));
+                };
+                let dots = match args.get(1) {
+                    None => 1,
+                    Some(Value::Number(n)) if *n >= 1.0 && *n <= 8.0 && n.fract() == 0.0 => {
+                        *n as u32
+                    }
+                    Some(_) => {
+                        return Err(format!(
+                            "{func}: the number of dots must be a whole number from 1 to 8"));
+                    }
+                };
+                Ok(Some(Value::Duration(b.dotted(dots))))
+            }
+
             "rev" => {
                 arity(func, args)?;
                 let items = as_list(func, &args[0])?;
