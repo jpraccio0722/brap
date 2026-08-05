@@ -588,6 +588,7 @@ fn pattern_shaped_list_binding() {
 
 use crate::lowerer::lower::lower as lower_full;
 use crate::pattern::pattern::{Pattern, Step};
+use crate::pattern::rate::Rate;
 
 fn bindings_of(src: &str) -> Vec<crate::pattern::patterns::Binding> {
     let items = parse(src.to_string()).expect("parse failed");
@@ -616,7 +617,7 @@ fn play_binds_a_pattern_to_an_instrument() {
 #[test]
 fn play_rate_wraps_the_pattern() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220, 330], kick, 2)\n");
-    assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
+    assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(2.0),
         Box::new(Pattern::seq(vec![Step::Value(220.0), Step::Value(330.0)]))));
 }
 
@@ -624,7 +625,7 @@ fn play_rate_wraps_the_pattern() {
 #[test]
 fn play_rate_below_one_slows_down() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, 0.5)\n");
-    assert_eq!(bs[0].pattern, Pattern::Fast(0.5,
+    assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(0.5),
         Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 }
 
@@ -680,7 +681,7 @@ fn play_accepts_a_piped_pattern() {
 #[test]
 fn play_pipes_with_a_rate() {
     let bs = bindings_of("fn kick(f) = sin(f)\n[220] >> play(kick, 4)\n");
-    assert_eq!(bs[0].pattern, Pattern::Fast(4.0,
+    assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(4.0),
         Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 }
 
@@ -690,7 +691,7 @@ fn play_inside_a_for_makes_several_bindings() {
     let bs = bindings_of(
         "fn kick(f) = sin(f)\nfor i in 1..=3 { play([110 * i], kick, i) }\n");
     assert_eq!(bs.len(), 3);
-    assert_eq!(bs[2].pattern, Pattern::Fast(3.0,
+    assert_eq!(bs[2].pattern, Pattern::Fast(Rate::Fixed(3.0),
         Box::new(Pattern::seq(vec![Step::Value(330.0)]))));
 }
 
@@ -744,6 +745,118 @@ fn play_rejects_a_signal_rate() {
     assert!(err.contains("compile-time number"), "got: {err}");
 }
 
+// ---- accel ----
+
+/// A rate that moves wraps the pattern the same way a number does; the whole
+/// of the difference is in the rate it carries.
+#[test]
+fn accel_wraps_the_pattern_as_a_curve() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, accel(1, 3, 4))\n");
+    assert_eq!(
+        bs[0].pattern,
+        Pattern::Fast(
+            Rate::accel(1.0, 3.0, 4.0),
+            Box::new(Pattern::seq(vec![Step::Value(220.0)]))
+        )
+    );
+}
+
+/// The number that makes an arrangement possible: a bounded section still has
+/// a length, and it is the one the curve's own integral gives — eight passes
+/// of a one-cycle pattern accelerating 1x to 3x over four cycles take exactly
+/// those four cycles, not the eight they would at 1x.
+#[test]
+fn a_section_that_speeds_up_still_knows_how_long_it_is() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 8, accel(1, 3, 4))\n");
+    let cycles = bs[0].cycles.expect("a counted play is bounded");
+    assert!((cycles - 4.0).abs() < 1e-9, "got {cycles}");
+}
+
+/// And so `.then` can place what follows: the next section opens where the
+/// accelerating one actually stopped rather than where it would have at its
+/// starting speed.
+#[test]
+fn then_starts_where_an_accelerating_section_ends() {
+    let bs = bindings_of(
+        "fn kick(f) = sin(f)\nfn snare(f) = sin(f)\n\
+         playn([220], kick, 8, accel(1, 3, 4)).then(play_once([330], snare))\n",
+    );
+    assert_eq!(bs.len(), 2);
+    assert!((bs[1].start - 4.0).abs() < 1e-9, "got {}", bs[1].start);
+}
+
+/// A rate curve is measured in cycles of the pattern, so the two halves of the
+/// language agree: `play_once` at a curve is one pass however fast it went.
+#[test]
+fn play_once_under_a_curve_is_still_one_pass() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, accel(2, 4, 1))\n");
+    // One pass at a rate rising 2x to 4x over the first cycle. Solving the
+    // curve for where it has covered one whole pattern gives √2 - 1 cycles —
+    // sooner than the half-cycle the opening 2x alone would take, because it
+    // is already up to 2√2 by the time it gets there.
+    let cycles = bs[0].cycles.expect("play_once is bounded");
+    assert!((cycles - (2f64.sqrt() - 1.0)).abs() < 1e-9, "got {cycles}");
+}
+
+/// A curve that does not curve is the plain rate it describes, and lowers to
+/// exactly what writing that number would have.
+#[test]
+fn an_accel_between_equal_rates_is_a_plain_rate() {
+    let curved = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, accel(2, 2, 4))\n");
+    let plain = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, 2)\n");
+    assert_eq!(curved[0].pattern, plain[0].pattern);
+}
+
+/// `accel(1, 1, ...)` is rate 1, which needs no wrapper at all — the same
+/// reading `omitted_rate_is_one` pins for the number.
+#[test]
+fn an_accel_that_is_no_change_at_all_adds_no_wrapper() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick, accel(1, 1, 8))\n");
+    assert_eq!(bs[0].pattern, Pattern::seq(vec![Step::Value(220.0)]));
+}
+
+/// A pattern written in note values is already wrapped once — it is as long as
+/// its values add up to rather than a cycle — so a curve wraps it a second
+/// time. The two clocks compose: four passes of a 3/4 bar is three cycles of
+/// pattern, and the curve says how long covering that takes.
+#[test]
+fn a_curve_composes_with_a_pattern_written_in_note_values() {
+    let bs = bindings_of("fn kick(f) = sin(f)\nplayn([c4;q, e4, g4], kick, 4, accel(1, 2, 4))\n");
+    let cycles = bs[0].cycles.expect("a counted play is bounded");
+
+    // Solving `c + c²/8 = 3` — three cycles of pattern under a rate rising 1x
+    // to 2x over four cycles — against the 3 flat it would take at 1x.
+    assert!((cycles - 2.324555320336759).abs() < 1e-9, "got {cycles}");
+}
+
+/// Zero is not a slow pattern but a stopped one, and a bounded section at zero
+/// would never reach the end it has to hand on from.
+#[test]
+fn accel_rejects_a_rate_of_zero_at_either_end() {
+    for src in ["accel(0, 2, 4)", "accel(2, 0, 4)", "accel(-1, 2, 4)"] {
+        let err = play_err(&format!("fn kick(f) = sin(f)\nplay([220], kick, {src})\n"));
+        assert!(err.contains("positive rate"), "{src} got: {err}");
+    }
+}
+
+#[test]
+fn accel_rejects_a_signal_argument() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([220], kick, accel(1, sin(2), 4))\n");
+    assert!(err.contains("compile-time number"), "got: {err}");
+}
+
+/// A rate is only meaningful as a rate. Anywhere else it is a value the rest
+/// of the language has no reading for, and says so rather than being folded to
+/// a number that would mean something else.
+#[test]
+fn a_rate_is_not_a_signal_or_a_step() {
+    let err = play_err("fn kick(f) = sin(f)\nplay([accel(1, 2, 4)], kick)\n");
+    assert!(err.contains("pattern cannot contain a rate"), "got: {err}");
+
+    let err = play_err("sin(accel(1, 2, 4))\n");
+    assert!(err.contains("cannot use a rate as a signal"), "got: {err}");
+}
+
 // ---- play_once / playn ----
 
 /// `play` loops; the whole of the difference is the binding's `cycles`.
@@ -776,7 +889,7 @@ fn playn_bounds_the_binding_to_its_count() {
 fn a_rate_shortens_the_window_it_speeds_up() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4, 2)\n");
     assert_eq!(bs[0].cycles, Some(2.0));
-    assert_eq!(bs[0].pattern, Pattern::Fast(2.0,
+    assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(2.0),
         Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, 0.5)\n");
@@ -868,7 +981,7 @@ fn lanes_survive_the_pipe_form() {
 fn rate_speeds_the_pattern_and_not_the_lanes() {
     let bs = bindings_of(&format!("{BASS}play([220, 330], bass, 2, cut: [400, 2000])\n"));
 
-    assert_eq!(bs[0].pattern, Pattern::Fast(2.0, Box::new(
+    assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(2.0), Box::new(
         Pattern::seq(vec![Step::Value(220.0), Step::Value(330.0)]))));
     assert_eq!(bs[0].lanes[0].pattern,
         Pattern::seq(vec![Step::Value(400.0), Step::Value(2000.0)]));

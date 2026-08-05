@@ -13,7 +13,7 @@ pub enum NodeKind {
     Env,
     Fir3, Follow,
     Hammond, Highpass, Highpole, Highshelf, Hold, Impulse,
-    Limiter, Lorenz, Lowpass, Lowpole, Lowrez, Lowshelf,
+    Limiter, Line, Lorenz, Lowpass, Lowpole, Lowrez, Lowshelf,
     Mls, MlsBits, Moog, Morph, Mul, Neg,
     Noise, Notch,
     Organ,

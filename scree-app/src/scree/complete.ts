@@ -219,8 +219,9 @@ const NOTE = /^[a-g][sf]?\d$/;
  * declaring `receives`.
  *
  * This mirrors `accepts` in `lang.rs` exactly. That function is the one under
- * test — `every_builtin_receives_what_it_declares` compiles all 103 names
- * against every kind of receiver — so any disagreement here is this file's bug.
+ * test — `every_builtin_receives_what_it_declares` compiles every name in the
+ * tables against every kind of receiver — so any disagreement here is this
+ * file's bug.
  */
 function accepts(receives: ValueKind, receiver: ValueKind): boolean {
   // A receiver the tables cannot pin down rules nothing out.
@@ -246,9 +247,9 @@ function accepts(receives: ValueKind, receiver: ValueKind): boolean {
       // Only `dot`, and only a written note value can be dotted.
       return receiver === "duration";
     default:
-      // "nothing" takes no argument at all; "any" is only ever a result; and
-      // "text" is written out at the call, never produced, so nothing can
-      // stand to the left of a name that wants one.
+      // "nothing" takes no argument at all; "any" and "rate" are only ever
+      // results; and "text" is written out at the call, never produced, so
+      // nothing can stand to the left of a name that wants one.
       return false;
   }
 }

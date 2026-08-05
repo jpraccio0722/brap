@@ -359,7 +359,8 @@ it.
 
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — see [Rhythm in note values](#rhythm-in-note-values). Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
+| `accel` | `accel(from, to, cycles)` | A rate that moves, written where a `play` takes a number: `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four cycles and holding there. A straight line in rate, so the pattern covers the area under it — from 1x to 3x over four cycles is eight passes in those four cycles, not four. Measured from the section's own first note, and run afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero. See [Speeding up and slowing down](#speeding-up-and-slowing-down). |
+| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the cycle evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — see [Rhythm in note values](#rhythm-in-note-values). Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
 | `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
 | `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
@@ -467,7 +468,8 @@ play itself.
 
 #### Why `quantize` exists
 
-`rate` divides into the count, so a section's length need not be a whole number.
+`rate` divides into the count — or an `accel` integrates into it — so a
+section's length need not be a whole number.
 `playn(pat, inst, 3, 2)` is three passes at double speed — 1.5 cycles — and
 every `.then` after it inherits that half-cycle offset for good:
 
@@ -479,6 +481,40 @@ playn(pat, inst, 3, 2).quantize().then(chorus)   // chorus starts at 2
 Quantizing moves where the *next* section starts. It does not shorten what is
 already playing, so the three passes still run their full 1.5 cycles and the
 chorus opens over the tail of them.
+
+#### Speeding up and slowing down
+
+A rate need not be one speed. `accel(from, to, cycles)` is a straight line in
+rate, and goes wherever a rate number goes:
+
+```rust
+playn(riff, lead, 8, accel(1, 3, 4))    // eight passes, 1x rising to 3x
+play(hats, hat, accel(4, 1, 16))        // a long settle, then 1x forever
+```
+
+It is a line in *rate*, so what the pattern covers is the area under it. From 1x
+to 3x over four cycles averages 2x, which is eight passes in those four cycles —
+not four, and not six. That is also how a counted section still has a length:
+`playn(riff, lead, 8, accel(1, 3, 4))` is exactly four cycles long, and `.then`
+places what follows at cycle 4 like any other section.
+
+The curve is measured from the section's **own** first note, not from the start
+of the performance, so it means the same thing wherever the section sits — and a
+`wthen` arm accelerates again every time it is drawn. After `cycles` it holds at
+`to` rather than climbing on, which is what makes it safe on a plain `play` that
+never ends.
+
+Notes shorten as the gaps do: a note is as long as the pattern says in the
+pattern's own time, so an accelerando tightens the line rather than leaving
+notes overlapping the ones after them.
+
+Two limits are worth knowing. The rate must stay above zero at both ends — at
+zero a pattern stops rather than slows, and a counted section would never reach
+the end it hands on from. And a rate is not a signal: it cannot be an `lfo` or
+anything else from the audio graph, because the scheduler works a lookahead
+*ahead* of the audio clock and would need values the graph has not produced
+yet. `accel` is a shape the scheduler evaluates itself, which is what lets it
+place a note before the sound of it exists.
 
 #### Choice, and why it is not `choice`
 
@@ -677,6 +713,7 @@ fn snare(n) = noise() * perc(0.001, 0.1) * rand(0.7, 1)   // a new draw per note
 | --- | --- | --- |
 | `perc` | `(→ attack, release)` | Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph — and in a voice the shape is measured from the onset and always finishes, so a drum longer than the step it sits on rings on into the next rather than being cut off. Both times are constants. |
 | `env` | `(→ attack, decay, sustain, release, duration)` | Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice goes on at least `duration + release` (see [How long a voice lasts](#how-long-a-voice-lasts)). Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants. |
+| `line` | `(→ start, end, duration)` | One straight segment: `start` to `end` over `duration` seconds, held at `end` after that. Measured from the onset — the note's in a voice, the eval's in the persistent graph — so like `perc` it needs no note length and works in either: `sin(line(880, 220, 0.05))` is a kick's pitch drop. Unlike `perc` it ends at a level rather than at silence, so it holds a voice open past its note only when `end` is 0 and the shape really finishes (see [How long a voice lasts](#how-long-a-voice-lasts)). All three arguments are constants; for a sweep between signals, scale it — `start + (end - start) * line(0, 1, d)`. |
 | `adsr` | `(gate → attack, decay, sustain, release)` | Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1. |
 | `follow` | `(signal → response_time)` | Parameter follower. Smooths the signal with the given halfway response time, in seconds. |
 | `afollow` | `(signal → attack, release)` | Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds). |
@@ -716,6 +753,9 @@ that much more room:
 - `env` adds its release, which hangs off the end of the note.
 - `perc` adds whatever of its shape does not fit inside the note, and nothing
   when it does fit.
+- `line` adds the same, but only when it ends at 0 — a line that stops at a
+  level is still sounding when it gets there, so room for it would hold the
+  note on rather than let it finish.
 - `delay` and `tap` add how far they reach back. A `tap` whose delay is a
   signal has no one answer, so its declared `max_delay` stands for it — worth
   keeping honest, since a bound far wider than the modulation holds the voice

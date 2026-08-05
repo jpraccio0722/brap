@@ -153,6 +153,19 @@ pub struct Patterns {
     pub choices: Vec<ChoiceGroup>,
 }
 
+/// A stretch of time a binding may sound in, and the cycle its own clock
+/// started at.
+///
+/// The two are not the same number and cannot be recovered from each other: a
+/// window is clipped to the span being queried, so it usually begins in the
+/// middle of the thing it belongs to, while the anchor is where that thing
+/// began however long ago. Only a rate curve reads the anchor — everything
+/// else is periodic and cannot tell.
+struct Window {
+    span: Span,
+    anchor: f64,
+}
+
 /// An event with its instrument attached — what the scheduler consumes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundEvent {
@@ -183,11 +196,13 @@ impl Patterns {
                 .map(|l| (l.name.as_str(), l.pattern.values()))
                 .collect();
 
-            windows.into_iter().flat_map(|span| {
-            b.pattern.query(span).into_iter().map(|mut event| {
+            windows.into_iter().flat_map(|Window { span, anchor }| {
+            b.pattern.query_from(span, anchor).into_iter().map(|mut event| {
                 // Which note this is, counted from the origin — the lane's
-                // position, not a time to look up.
-                let nth = b.pattern.onsets_before(event.begin);
+                // position, not a time to look up. Counted against the same
+                // clock it was played on, or a rate curve would number the
+                // notes differently than it placed them.
+                let nth = b.pattern.onsets_before_from(event.begin, anchor);
                 let mut args = Vec::with_capacity(lanes.len());
                 for (name, values) in &lanes {
                     if values.is_empty() { continue }
@@ -216,20 +231,35 @@ impl Patterns {
     /// binding under a choice keeps only the repetitions its own arm was drawn
     /// for. Several, rather than one, because a lookahead window is free to
     /// straddle a repetition boundary — and at fast tempos it often does.
-    fn windows(&self, b: &Binding, span: Span) -> Vec<Span> {
+    fn windows(&self, b: &Binding, span: Span) -> Vec<Window> {
+        // Where this binding's own clock starts, which a rate curve is measured
+        // from. The same figure the window opens at — a section's first note is
+        // where it begins to accelerate — and a repeating binding takes its
+        // current repetition's, so a curve runs afresh each time around rather
+        // than sitting at its end rate forever after the first pass.
+        let opens = self.origin.ceil() + b.start;
+
+        // The one window everything that does not repeat gets: opening once,
+        // and starting its clock there.
+        let once = || {
+            self.window(b.start, b.cycles, span)
+                .map(|span| Window { span, anchor: opens })
+                .into_iter()
+                .collect()
+        };
+
         let Some(period) = b.repeat else {
             // Nothing repeats, so a choice would be drawn once and stay drawn;
             // `wthen` always sets both, and this is the path everything else
             // takes.
-            return self.window(b.start, b.cycles, span).into_iter().collect();
+            return once();
         };
         // A repetition is only meaningful against a window that closes: an
         // open-ended one already covers every later repetition of itself.
         let (Some(cycles), true) = (b.cycles, period.is_finite() && period > 0.0) else {
-            return self.window(b.start, b.cycles, span).into_iter().collect();
+            return once();
         };
 
-        let opens = self.origin.ceil() + b.start;
         // Which repetitions can overlap the span at all. The window is
         // `cycles` long, so one starting up to `cycles` before the span may
         // still reach into it.
@@ -256,10 +286,11 @@ impl Patterns {
                     .is_some_and(|c| c.arm_at(group, repetition) == arm),
             };
             if sounds {
-                let begin = span.begin.max(opens + n * period);
-                let end = span.end.min(opens + n * period + cycles);
+                let repeats_at = opens + n * period;
+                let begin = span.begin.max(repeats_at);
+                let end = span.end.min(repeats_at + cycles);
                 if end > begin {
-                    out.push(Span::new(begin, end));
+                    out.push(Window { span: Span::new(begin, end), anchor: repeats_at });
                 }
             }
             n += 1.0;
@@ -698,6 +729,97 @@ mod tests {
             .map(|e| e.event.begin)
             .collect();
         assert_eq!(onsets, vec![6.0]);
+    }
+
+    // ---- rate curves ----
+
+    /// A binding of one note per pass, accelerating from 1x to 3x over four
+    /// cycles, placed `start` cycles after an origin.
+    fn accelerating(start: f64, origin: f64, repeat: Option<f64>) -> Patterns {
+        use crate::pattern::rate::Rate;
+        Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)])),
+                lanes: Vec::new(),
+                start,
+                cycles: Some(4.0),
+                repeat,
+                choice: None,
+            }],
+            origin,
+            choices: Vec::new(),
+        }
+    }
+
+    fn onsets_of(pats: &Patterns, span: Span) -> Vec<f64> {
+        let mut out: Vec<f64> = pats.query(span).iter().map(|b| b.event.begin).collect();
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    }
+
+    /// The point of anchoring: a section placed later accelerates from *its*
+    /// first note. Anchored at the origin instead it would open at whatever
+    /// rate the curve had already reached, which for anything but the first
+    /// section in a file is its end rate.
+    #[test]
+    fn a_curve_starts_where_its_section_does() {
+        let at_origin = onsets_of(&accelerating(0.0, 0.0, None), Span::new(0.0, 8.0));
+        let later = onsets_of(&accelerating(3.0, 0.0, None), Span::new(0.0, 12.0));
+
+        assert_eq!(at_origin.len(), 8, "eight passes in four cycles: {at_origin:?}");
+        assert_eq!(later.len(), at_origin.len());
+        for (early, late) in at_origin.iter().zip(&later) {
+            assert!((early + 3.0 - late).abs() < 1e-9, "{at_origin:?} vs {later:?}");
+        }
+    }
+
+    /// The origin is rounded up to a downbeat before anything is placed, and
+    /// the curve has to start from the same figure the window opens at — a
+    /// half-cycle disagreement between the two would have the section opening
+    /// mid-accelerando.
+    #[test]
+    fn a_curve_starts_from_the_downbeat_the_window_opens_on() {
+        let ons = onsets_of(&accelerating(0.0, 4.3, None), Span::new(0.0, 20.0));
+        assert_eq!(ons.len(), 8);
+        assert_eq!(ons[0], 5.0, "the first note is on the downbeat: {ons:?}");
+        // Its gap is the widest of them, and still short of the whole cycle 1x
+        // would give: the rate is already climbing across that first note, so
+        // the opening rate is where the curve starts rather than a speed any
+        // one gap is held at.
+        let gaps: Vec<f64> = ons.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps[0] < 1.0 && gaps[0] > 0.8, "opens near 1x: {gaps:?}");
+        assert!(gaps.iter().skip(1).all(|g| *g < gaps[0]), "the first gap is the widest: {gaps:?}");
+    }
+
+    /// Each repetition of a `wthen` window runs the curve afresh. Measured from
+    /// the origin instead, every pass after the first would sit at the end rate
+    /// — the accelerando would happen once and never again.
+    #[test]
+    fn a_repeating_window_accelerates_again_each_time_around() {
+        let pats = accelerating(0.0, 0.0, Some(4.0));
+        let first = onsets_of(&pats, Span::new(0.0, 4.0));
+        let second = onsets_of(&pats, Span::new(4.0, 8.0));
+
+        assert_eq!(first.len(), 8);
+        assert_eq!(second.len(), 8);
+        for (a, b) in first.iter().zip(&second) {
+            assert!((a + 4.0 - b).abs() < 1e-9, "{first:?} vs {second:?}");
+        }
+    }
+
+    /// A lane is read by position, and the position has to be counted on the
+    /// clock the note was placed on. Counted from the origin, a section three
+    /// cycles in would start partway down its own lane.
+    #[test]
+    fn a_lane_under_a_curve_starts_at_its_first_value() {
+        let mut pats = accelerating(3.0, 0.0, None);
+        pats.bindings[0].lanes = vec![lane("cut", vec![Some(10.0), Some(20.0)])];
+
+        let cuts: Vec<f64> = pats.query(Span::new(0.0, 12.0)).iter().map(|e| e.args[0].1).collect();
+        assert_eq!(cuts.len(), 8);
+        assert_eq!(cuts[0], 10.0, "the first note takes the first value");
+        assert_eq!(&cuts[..4], &[10.0, 20.0, 10.0, 20.0]);
     }
 
     // ---- repeating windows and choice ----

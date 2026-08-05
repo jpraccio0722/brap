@@ -40,6 +40,14 @@ pub enum Value {
     /// same reason `Rest` is a variant rather than a value: it means one thing
     /// in one position and is an error everywhere else.
     Tuplet,
+    /// A speed to run a pattern at, from `accel`. Only `play`'s rate takes one.
+    ///
+    /// Not a number, because a curve is not one; and not a signal, because
+    /// nothing in the audio graph can reach the scheduler — it works a
+    /// lookahead ahead of the audio clock, so it needs the rate for a stretch
+    /// of time the graph has not rendered yet. A rate the lowerer can hand over
+    /// whole is the shape that fits between them.
+    Rate(crate::pattern::rate::Rate),
     /// What a `play` call evaluates to: a handle onto the bindings it made.
     ///
     /// `ends_at` is the cycle, counted from the pattern origin, at which the

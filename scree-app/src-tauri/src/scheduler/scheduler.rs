@@ -474,6 +474,53 @@ mod pass_tests {
         assert!((crossings as i64 - 44).abs() <= 2, "expected ~44 crossings, got {crossings}");
     }
 
+    /// The whole rate-curve path, from written source to scheduled voices: an
+    /// `accel` reaches the scheduler as something it can evaluate itself, and
+    /// the notes it pushes really do close up.
+    ///
+    /// Nothing about the scheduler changed for this. It queries a span and
+    /// pushes what comes back, which is the reason a rate had to become a shape
+    /// the pattern layer could answer with rather than anything read from the
+    /// audio graph — this thread runs a lookahead ahead of the audio clock, and
+    /// asks about time no graph has rendered yet.
+    #[test]
+    fn an_accelerating_pattern_schedules_closing_intervals() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        let src = "fn kick(f) = sin(f)\nplayn([220], kick, 8, accel(1, 3, 4))\n";
+        let ast = parse(src.to_string()).unwrap();
+        let lowered = lower(&ast).expect("lower failed");
+
+        let state = SchedulerState::new();
+        *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+        *state.patterns.lock().unwrap() =
+            Patterns { bindings: lowered.bindings, ..Default::default() };
+
+        // One pass wide enough to hold the whole section, so the onsets can be
+        // read off in one go rather than across ticks.
+        let clock = Clock::with_cps(44100.0, 1.0);
+        let patterns = state.patterns.lock().unwrap().clone();
+        let onsets: Vec<f64> = patterns
+            .query(Span::new(0.0, 8.0))
+            .iter()
+            .map(|b| b.event.begin)
+            .collect();
+
+        assert_eq!(onsets.len(), 8, "eight passes: {onsets:?}");
+        let gaps: Vec<f64> = onsets.windows(2).map(|w| w[1] - w[0]).collect();
+        for pair in gaps.windows(2) {
+            assert!(pair[1] < pair[0], "intervals should close up: {gaps:?}");
+        }
+        assert!(*onsets.last().unwrap() < 4.0, "all of it inside its own four cycles");
+
+        // And they are real voices, not merely times: the first one sounds.
+        let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+        seq.set_sample_rate(44100.0);
+        pass(&mut seq, &clock, &state, None);
+        assert!(peak_over(&mut seq, 4410) > 0.5, "the first step should sound");
+    }
+
     /// Legato shortens the event, and the scheduler derives the voice's own
     /// lifetime from that same span — so a staccato note really does stop.
     #[test]

@@ -68,6 +68,13 @@ impl Lowerer {
             return self.buffer_builtin(&func.0, &arg_vals);
         }
 
+        // `accel` is in no table for the same reason: it answers with a rate,
+        // which is neither a number the math builtins could fold nor a node the
+        // UGen table could push.
+        if Lowerer::is_rate(&func.0) {
+            return self.rate_builtin(&arg_vals);
+        }
+
         if let Some(v) = self.list_builtin(&func.0, &arg_vals)? {
             return Ok(v);
         }

@@ -34,6 +34,8 @@ fn ads_level(t: f64, attack: f64, decay: f64, sustain: f64) -> f64 {
 const ENV_RELEASE_INPUT: usize = 3;
 const PERC_ATTACK_INPUT: usize = 0;
 const PERC_RELEASE_INPUT: usize = 1;
+const LINE_END_INPUT: usize = 1;
+const LINE_DURATION_INPUT: usize = 2;
 
 /// The input indices the time-displacing nodes take their times from. A tap's
 /// delay is a signal rather than a constant, so it declares bounds as well.
@@ -113,6 +115,19 @@ fn own_tail(n: &UGenNode, dur_secs: f64) -> f64 {
             const_secs(n, PERC_RELEASE_INPUT),
         ) {
             (Some(a), Some(r)) => (a + r - dur_secs).max(0.0),
+            _ => 0.0,
+        },
+        // A line is measured from the onset like `perc`, but it ends at a level
+        // rather than at silence, and only a shape that finishes is worth
+        // holding a voice open for. A line to zero does finish, and asks for
+        // whatever of it did not fit inside the note; a line to anywhere else
+        // is still sounding when it arrives, so room for it would not be a tail
+        // but a longer note.
+        NodeKind::Line => match (
+            const_secs(n, LINE_DURATION_INPUT),
+            n.inputs.get(LINE_END_INPUT),
+        ) {
+            (Some(d), Some(NodeInput::Const(end))) if *end == 0.0 => (d - dur_secs).max(0.0),
             _ => 0.0,
         },
         NodeKind::Delay => const_secs(n, DELAY_TIME_INPUT).unwrap_or(0.0),
@@ -308,6 +323,26 @@ pub fn realize(graph: &ScreeGraph) -> Result<Net, String> {
                 )),
                 1,
             ),
+
+            // One straight segment from the onset, holding at `end` once it
+            // arrives. A zero duration is not a degenerate case to guard but
+            // the shape's own limit — the segment takes no time, so the answer
+            // is `end` from the first sample, which is what this already says.
+            NodeKind::Line => {
+                let start = const_param(n, 0, "line start")? as f64;
+                let end = const_param(n, 1, "line end")? as f64;
+                let duration = (const_param(n, 2, "line duration")? as f64).max(0.0);
+                (
+                    Box::new(An(Envelope::new(ENV_INTERVAL, move |t: f64| -> f64 {
+                        if t >= duration {
+                            end
+                        } else {
+                            start + (end - start) * (t / duration)
+                        }
+                    }))),
+                    0,
+                )
+            }
             NodeKind::Lorenz => (Box::new(lorenz()), 1),
             NodeKind::Lowpass => (Box::new(lowpass()), 3),
             NodeKind::Lowpole => (Box::new(lowpole()), 2),
@@ -664,6 +699,46 @@ mod envelope_tests {
         assert!(at(&s, 0.41) < 0.02, "silent a release later, got {}", at(&s, 0.41));
     }
 
+    /// A line is straight between its ends and flat after them.
+    #[test]
+    fn line_ramps_from_start_to_end_then_holds() {
+        let s = render_voice("line(0, 1, 0.2)\n", 1.0, 0.5);
+
+        assert!(at(&s, 0.0).abs() < 0.01, "starts at `start`: {}", at(&s, 0.0));
+        assert!((at(&s, 0.05) - 0.25).abs() < 0.01, "a quarter along: {}", at(&s, 0.05));
+        assert!((at(&s, 0.1) - 0.5).abs() < 0.01, "halfway along: {}", at(&s, 0.1));
+        assert!((at(&s, 0.2) - 1.0).abs() < 0.01, "at `end` on time: {}", at(&s, 0.2));
+        assert!((at(&s, 0.45) - 1.0).abs() < 0.01, "held after: {}", at(&s, 0.45));
+    }
+
+    /// Nothing about it is bound to 0..=1: it falls as readily as it rises, and
+    /// the range is whatever the two ends say. This is the pitch-drop case.
+    #[test]
+    fn line_runs_in_either_direction_over_any_range() {
+        let s = render_voice("line(880, 220, 0.05)\n", 1.0, 0.2);
+
+        assert!((at(&s, 0.0) - 880.0).abs() < 1.0, "starts high: {}", at(&s, 0.0));
+        assert!((at(&s, 0.025) - 550.0).abs() < 5.0, "halfway down: {}", at(&s, 0.025));
+        assert!((at(&s, 0.15) - 220.0).abs() < 1.0, "settled low: {}", at(&s, 0.15));
+    }
+
+    /// It is measured from the onset and needs no note length, so — like `perc`
+    /// and unlike `env` — it works in the persistent graph too.
+    #[test]
+    fn line_works_outside_a_voice() {
+        let items = parse("sin(line(220, 440, 2))\n".to_string()).unwrap();
+        let g = lower(&items).unwrap().graph;
+        assert!(realize(&g).is_ok());
+    }
+
+    /// A segment of no length is the whole shape arriving at once, not a
+    /// division by zero.
+    #[test]
+    fn a_line_of_no_duration_is_its_end_from_the_start() {
+        let s = render_voice("line(0, 0.5, 0)\n", 0.5, 0.2);
+        assert!(s.iter().all(|v| (v - 0.5).abs() < 0.001), "expected a flat 0.5");
+    }
+
     /// What the scheduler asks a voice for: how much longer than the note it
     /// needs to finish what it started.
     fn tail_of(src: &str, dur: f64) -> f64 {
@@ -698,6 +773,22 @@ mod envelope_tests {
         let two = "sin(220) * perc(0.01, 0.4) + sin(330) * env(0.01, 0.1, 0.5, 0.05, dur)\n";
         assert!((tail_of(two, 0.125) - 0.285).abs() < 1e-6, "got {}", tail_of(two, 0.125));
         assert!((tail_of(two, 1.0) - 0.05).abs() < 1e-6, "got {}", tail_of(two, 1.0));
+    }
+
+    /// A tail is room to finish, and only a line that ends at silence has
+    /// anything to finish. One that ends anywhere else is still sounding when
+    /// it gets there, so giving it room would hold the note on rather than let
+    /// it end — which is the note's business, not the shape's.
+    #[test]
+    fn a_line_asks_for_room_only_when_it_ends_in_silence() {
+        assert_tail("sin(220) * line(1, 0, 0.4)\n", 1.0, 0.0);
+        assert_tail("sin(220) * line(1, 0, 0.4)\n", 0.125, 0.275);
+
+        // Ends held at a level: nothing to wait for, however long it is. Where
+        // the line was wired makes no difference — a sweep four seconds long
+        // asks for nothing either way.
+        assert_tail("sin(220) * line(0, 1, 4)\n", 0.125, 0.0);
+        assert_tail("sin(line(880, 220, 4))\n", 0.125, 0.0);
     }
 
     /// The reported bug: a voice whose echoes arrive after its envelope has
