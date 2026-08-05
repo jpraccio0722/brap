@@ -1,6 +1,6 @@
 use crate::scree_graph::graph::ScreeGraph;
 use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
-use crate::lowerer::lower::lower;
+use crate::lowerer::lower::{lower, DEFAULT_BEAT_SECS};
 use crate::parser::parser::parse;
 use NodeInput::{Const, Node};
 
@@ -1511,6 +1511,29 @@ fn a_bare_letter_is_not_a_note() {
     assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(220.0)])]);
 }
 
+/// The beat reaches the persistent graph as an ordinary folded number, in both
+/// the units a signal asks for it in. The default tempo is 120 bpm, so the
+/// quarter is half a second long and comes round twice a second.
+#[test]
+fn the_beat_is_bound_in_the_persistent_graph() {
+    assert_eq!(num("qvs"), 0.5);
+    assert_eq!(num("qvh"), 2.0);
+    // And it is a number like any other, so it folds with the arithmetic
+    // around it rather than becoming a node: an eighth-note sweep is one
+    // oscillator at 4 Hz.
+    let g = lower_src("sin(qvh * 2)\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(4.0)])]);
+}
+
+/// The two are one number written twice, so nothing can drift between them —
+/// and a name can still shadow either, as it can shadow a note.
+#[test]
+fn the_beat_in_hertz_is_the_inverse_of_the_beat_in_seconds() {
+    assert_eq!(num("qvs * qvh"), 1.0);
+    let g = lower_src("let qvs = 3\nsin(qvs)\n").unwrap();
+    assert_eq!(g.nodes, vec![node(NodeKind::Sin, vec![Const(3.0)])]);
+}
+
 /// Bindings shadow note names rather than colliding with them.
 #[test]
 fn bindings_shadow_note_names() {
@@ -1618,7 +1641,7 @@ fn every_example_compiles_and_realizes() {
                 })
                 .collect();
             let voice = crate::scheduler::voice::build_voice(
-                &instruments, &binding.instrument, 60.0, &lanes, 0.5);
+                &instruments, &binding.instrument, 60.0, &lanes, 0.5, DEFAULT_BEAT_SECS);
             if voice.is_err() {
                 panic!("{name}: instrument `{}` failed to build", binding.instrument);
             }
@@ -2268,6 +2291,23 @@ fn the_readme_sampling_examples_compile() {
     }
 }
 
+/// The beat example from [Syncing to the beat], as the reference writes it.
+///
+/// It is an instrument, so lowering the program is not enough — the shapes
+/// written with `qvs` and `qvh` only exist once a note asks for them, and this
+/// is where an unbound name would show up.
+#[test]
+fn the_readme_beat_example_builds_a_voice() {
+    let src = "fn stab(n) = lowpass(saw(n.m2h), 400 + 3000 * sin(qvh * 2), 3) * perc(0, qvs / 2)\n\
+               play([60, 63], stab)\nplay([60, 63], stab, 2)\n";
+    let items = parse(src.to_string()).expect("README example failed to parse");
+    lower(&items).unwrap_or_else(|e| panic!("README example failed to lower: {e}"));
+
+    let ins = crate::scheduler::voice::Instruments::from_program(&items);
+    crate::scheduler::voice::build_voice(&ins, "stab", 60.0, &[], 0.5, DEFAULT_BEAT_SECS)
+        .unwrap_or_else(|e| panic!("README example failed to build a voice: {e}"));
+}
+
 /// And the chopping example really builds a voice, which is the half that
 /// lowering the program does not reach.
 #[test]
@@ -2286,7 +2326,8 @@ fn the_readme_chop_instrument_builds_a_voice() {
     let ins = crate::scheduler::voice::Instruments::from_program(&items).with_samples(samples);
 
     let lanes = vec![("at".to_string(), 0.75)];
-    assert!(crate::scheduler::voice::build_voice(&ins, "chop", 1.0, &lanes, 0.25).is_ok());
+    assert!(crate::scheduler::voice::build_voice(&ins, "chop", 1.0, &lanes, 0.25, DEFAULT_BEAT_SECS)
+        .is_ok());
 }
 
 /// `;` end to end: what someone types, as the rhythm it turns into.

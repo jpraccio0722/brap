@@ -1,4 +1,5 @@
 use crate::pattern::pattern::{Event, Pattern, Span};
+use crate::pattern::rate::Rate;
 
 /// Scales the event's length rather than reaching the instrument, so
 /// `legato: 0.2` is staccato and `1.5` overlaps the next note. Applied here,
@@ -62,6 +63,16 @@ pub struct Binding {
     /// one. The window is gated on the arm being the one drawn for that
     /// repetition, so of a choice's arms exactly one sounds each time around.
     pub choice: Option<ChoiceRef>,
+    /// The speed this was played at, kept after it has already been folded into
+    /// `pattern` as a `Fast`.
+    ///
+    /// Nothing about *timing* reads it — the pattern places its own notes, and
+    /// that is why it could be discarded before. A voice reads it: `qvs` is the
+    /// beat of the clock the note is played on, and a pattern at rate 2 has a
+    /// beat half as long as the transport's. It cannot be recovered from an
+    /// event, which knows how long it is but not what fraction of a pattern
+    /// that was.
+    pub rate: Rate,
 }
 
 /// A binding's membership of a choice: which choice, and which of its arms.
@@ -175,6 +186,11 @@ pub struct BoundEvent {
     /// A lane resting here is absent, so the parameter falls back to its own
     /// default rather than erroring.
     pub args: Vec<(String, f64)>,
+    /// How fast the binding was running when this note began — its `rate`, and
+    /// under an `accel` the speed the curve had reached by here. Sampled per
+    /// note for the same reason a lane is: the voice is built once, at the
+    /// onset, and holds whatever it was told for its whole length.
+    pub rate: f64,
 }
 
 impl Patterns {
@@ -218,7 +234,11 @@ impl Patterns {
                         args.push((name.to_string(), v));
                     }
                 }
-                BoundEvent { instrument: b.instrument.clone(), event, args }
+                // Read at the onset against the same anchor the note was
+                // placed from, so a curve tells a voice the speed it is
+                // actually being played at rather than the one it started at.
+                let rate = b.rate.at(event.begin, anchor);
+                BoundEvent { instrument: b.instrument.clone(), event, args, rate }
             }).collect::<Vec<_>>()
             }).collect::<Vec<_>>()
         }).collect()
@@ -339,13 +359,13 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0), None]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None },
+                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
                 Binding {
                     instrument: "hat".into(),
                     pattern: Pattern::steps([Some(1.0), Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None },
+                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
             ],
             ..Default::default()
         };
@@ -367,7 +387,7 @@ mod tests {
 
     fn bound(pattern: Pattern, lanes: Vec<Lane>) -> Vec<super::BoundEvent> {
         Patterns {
-            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None, repeat: None, choice: None }],
+            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         }
         .query(Span::new(0.0, 1.0))
@@ -413,7 +433,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: vec![lane("cut", (1..=6).map(|i| Some(i as f64 * 100.0)).collect())],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -440,7 +460,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -465,7 +485,7 @@ mod tests {
                 pattern: Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)])),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -559,7 +579,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles, repeat: None, choice: None }],
+                cycles, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin, choices: Vec::new() }
         .query(span)
         .iter()
@@ -634,13 +654,13 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: Some(1.0), repeat: None, choice: None },
+                    cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) },
                 Binding {
                     instrument: "loop".into(),
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None },
+                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
             ],
             origin: 0.0, choices: Vec::new() };
 
@@ -671,7 +691,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start,
-                cycles, repeat: None, choice: None }],
+                cycles, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin: 0.0, choices: Vec::new() }
         .query(span)
         .iter()
@@ -720,7 +740,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0)]),
                 lanes: Vec::new(),
                 start: 2.0,
-                cycles: Some(1.0), repeat: None, choice: None }],
+                cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin: 3.2, choices: Vec::new() };
         // Origin 3.2 rounds up to 4, plus two cycles of waiting.
         let onsets: Vec<f64> = pats
@@ -746,6 +766,10 @@ mod tests {
                 cycles: Some(4.0),
                 repeat,
                 choice: None,
+                // The same curve the pattern was folded with, which is what
+                // `play` writes: one of them places the notes and the other
+                // tells a voice how fast it is being played.
+                rate: Rate::accel(1.0, 3.0, 4.0),
             }],
             origin,
             choices: Vec::new(),
@@ -822,6 +846,50 @@ mod tests {
         assert_eq!(&cuts[..4], &[10.0, 20.0, 10.0, 20.0]);
     }
 
+    /// Every event says how fast its binding was running when it began, which
+    /// is what a voice divides the transport's beat by. A curve says something
+    /// different for every note, and it climbs the way the placement does — the
+    /// first note is near the 1x it starts from and the last near the 3x it
+    /// reaches.
+    #[test]
+    fn an_event_reports_the_rate_it_was_played_at() {
+        let pats = accelerating(0.0, 0.0, None);
+        let mut events = pats.query(Span::new(0.0, 8.0));
+        events.sort_by(|a, b| a.event.begin.partial_cmp(&b.event.begin).unwrap());
+
+        let rates: Vec<f64> = events.iter().map(|e| e.rate).collect();
+        assert_eq!(rates.len(), 8);
+        assert_eq!(rates[0], 1.0, "the first note is where the curve starts: {rates:?}");
+        for pair in rates.windows(2) {
+            assert!(pair[1] > pair[0], "the rate should climb: {rates:?}");
+        }
+        assert!(*rates.last().unwrap() < 3.0, "and never past its end: {rates:?}");
+        // The rate at a note is read off the same curve its placement was, so
+        // the gap after it is bracketed by the two ends of that gap: a pass of
+        // a one-note pattern would take 1/rate cycles at a steady speed, and
+        // the speed here is climbing the whole way across it.
+        let begins: Vec<f64> = events.iter().map(|e| e.event.begin).collect();
+        for (i, gap) in begins.windows(2).map(|w| w[1] - w[0]).enumerate() {
+            assert!(
+                gap <= 1.0 / rates[i] && gap >= 1.0 / rates[i + 1],
+                "note {i}: gap {gap} against rates {} to {}", rates[i], rates[i + 1],
+            );
+        }
+    }
+
+    /// One speed throughout is that speed at every note, wherever the binding
+    /// sits and whatever it is anchored to.
+    #[test]
+    fn a_fixed_rate_reaches_every_event_unchanged() {
+        let mut pats = accelerating(0.0, 0.0, None);
+        pats.bindings[0].pattern = Pattern::fast(2.0, Pattern::steps([Some(1.0)]));
+        pats.bindings[0].rate = Rate::Fixed(2.0);
+
+        let rates: Vec<f64> = pats.query(Span::new(0.0, 4.0)).iter().map(|e| e.rate).collect();
+        assert_eq!(rates.len(), 8, "two passes a cycle over four cycles");
+        assert!(rates.iter().all(|r| *r == 2.0), "{rates:?}");
+    }
+
     // ---- repeating windows and choice ----
 
     /// One arm of a two-armed choice, sounding once per cycle.
@@ -834,6 +902,7 @@ mod tests {
             cycles: Some(1.0),
             repeat: Some(period),
             choice: Some(ChoiceRef { group, arm: index }),
+            rate: Rate::Fixed(1.0),
         }
     }
 
@@ -961,6 +1030,7 @@ mod tests {
                 cycles: Some(1.0),
                 repeat: Some(4.0),
                 choice: None,
+                rate: Rate::Fixed(1.0),
             }],
             origin: 0.0,
             choices: Vec::new(),
@@ -985,6 +1055,7 @@ mod tests {
                 cycles: Some(1.0),
                 repeat: Some(2.0),
                 choice: None,
+                rate: Rate::Fixed(1.0),
             }],
             origin: 0.0,
             choices: Vec::new(),

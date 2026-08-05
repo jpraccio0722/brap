@@ -113,8 +113,8 @@ export function isCallable(b: Builtin): boolean {
  * The display signature: `lowpass(audio, cutoff, q)`.
  *
  * Parameters past the smallest arity are optional and marked `?`; a variadic
- * builtin gets a trailing `...`. `dur` takes no arguments at all and is
- * rendered bare, since it is a binding rather than a function.
+ * builtin gets a trailing `...`. `dur`, `qvs` and `qvh` take no arguments at
+ * all and are rendered bare, since they are bindings rather than functions.
  */
 export function signature(b: Builtin): string {
   if (!isCallable(b)) return b.name;

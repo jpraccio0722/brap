@@ -242,8 +242,17 @@ fn schedule_pass(
         let begin_secs = clock.secs_at(bound.event.begin);
         let dur_secs = clock.secs_at(bound.event.end) - begin_secs;
 
+        // The beat of the clock *this note* is played on, which is the
+        // transport's divided by the speed its binding runs at: a pattern at
+        // rate 2 fits two of its own beats into one of the transport's, and an
+        // instrument syncing to it should hear the faster one. Read per note
+        // rather than per pass, because under an `accel` it is a different
+        // number for every note.
+        let beat_secs = clock.beat_secs() / bound.rate;
+
         match build_voice(
             &instruments, &bound.instrument, bound.event.value, &bound.args, dur_secs,
+            beat_secs,
         ) {
             // An instrument that will not build is a broken program, and it
             // will not build for the next event either — the same failure once
@@ -309,6 +318,7 @@ mod tests {
     use crate::parser::parser::parse;
     use crate::pattern::pattern::Pattern;
     use crate::pattern::patterns::Binding;
+    use crate::pattern::rate::Rate;
     use fundsp::sequencer::ReplayMode;
 
     fn voice_net() -> fundsp::net::Net {
@@ -372,7 +382,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -392,6 +402,7 @@ mod pass_tests {
     use super::*;
     use crate::pattern::pattern::Pattern;
     use crate::pattern::patterns::Binding;
+    use crate::pattern::rate::Rate;
     use crate::parser::parser::parse;
     use fundsp::sequencer::ReplayMode;
 
@@ -405,7 +416,7 @@ mod pass_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
@@ -472,6 +483,44 @@ mod pass_tests {
         let s: Vec<f32> = (0..4410).map(|_| seq.get_stereo().0).collect();
         let crossings = s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count();
         assert!((crossings as i64 - 44).abs() <= 2, "expected ~44 crossings, got {crossings}");
+    }
+
+    /// The whole beat path, from written source to a rendered voice: `qvh` is
+    /// the transport's quarter divided by the speed the pattern runs at, so the
+    /// same instrument sweeps twice as fast under a `play` at rate 2.
+    ///
+    /// At cps 1 a cycle is a second and the quarter a quarter of one, which is
+    /// 4 Hz; times the 32 written here that is 128 Hz at rate 1 and 256 at
+    /// rate 2. Counted in zero crossings over a tenth of a second, the same way
+    /// the lane path is checked above.
+    #[test]
+    fn the_rate_a_pattern_runs_at_reaches_its_instrument_as_the_beat() {
+        use crate::lowerer::lower::lower;
+        use crate::pattern::patterns::Patterns;
+
+        fn crossings_at_rate(rate: &str) -> i64 {
+            let src = format!("fn tone() = sin(qvh * 32)\nplay([\\], tone, {rate})\n");
+            let ast = parse(src).unwrap();
+            let lowered = lower(&ast).expect("lower failed");
+
+            let state = SchedulerState::new();
+            *state.instruments.lock().unwrap() = Instruments::from_program(&ast);
+            *state.patterns.lock().unwrap() =
+                Patterns { bindings: lowered.bindings, ..Default::default() };
+
+            let clock = Clock::with_cps(44100.0, 1.0);
+            let mut seq = Sequencer::new(0, 2, ReplayMode::None);
+            seq.set_sample_rate(44100.0);
+            pass(&mut seq, &clock, &state, None);
+
+            let s: Vec<f32> = (0..4410).map(|_| seq.get_stereo().0).collect();
+            s.windows(2).filter(|w| w[0] <= 0.0 && w[1] > 0.0).count() as i64
+        }
+
+        let plain = crossings_at_rate("1");
+        let fast = crossings_at_rate("2");
+        assert!((plain - 13).abs() <= 2, "expected ~13 crossings at rate 1, got {plain}");
+        assert!((fast - 26).abs() <= 2, "expected ~26 crossings at rate 2, got {fast}");
     }
 
     /// The whole rate-curve path, from written source to scheduled voices: an
@@ -862,7 +911,7 @@ mod pass_tests {
                 pattern: Pattern::steps(vec![Some(50.0), Some(50.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
@@ -929,7 +978,7 @@ mod pass_tests {
                 pattern: Pattern::steps(vec![Some(1.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
@@ -1059,6 +1108,7 @@ mod start_position_tests {
     use crate::parser::parser::parse;
     use crate::pattern::pattern::Pattern;
     use crate::pattern::patterns::Binding;
+    use crate::pattern::rate::Rate;
     use fundsp::sequencer::ReplayMode;
 
     fn state_with(steps: Vec<Option<f64>>) -> SchedulerState {
@@ -1071,7 +1121,7 @@ mod start_position_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None }],
+                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
@@ -1177,7 +1227,7 @@ mod start_position_tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: Some(1.0), repeat: None, choice: None }],
+                cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin: clock.now_cycles(), choices: Vec::new() };
 
         // One cycle is two seconds at this tempo.

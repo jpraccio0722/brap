@@ -776,7 +776,9 @@ play(riff, bass, cut: rands(4, 400, 2000))
 
         let ins = crate::scheduler::voice::Instruments::from_program(&items);
         for name in ["lead", "bass", "snare"] {
-            crate::scheduler::voice::build_voice(&ins, name, 60.0, &[], 0.5)
+            crate::scheduler::voice::build_voice(
+                &ins, name, 60.0, &[], 0.5, crate::lowerer::lower::DEFAULT_BEAT_SECS,
+            )
                 .unwrap_or_else(|e| panic!("{name} should build a voice: {e}"));
         }
     }

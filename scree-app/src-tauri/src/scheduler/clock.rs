@@ -16,6 +16,16 @@ pub fn bpm_from_cps(cps: f64) -> f64 {
     cps * 60.0 * BEATS_PER_CYCLE
 }
 
+/// How long one beat lasts at a tempo — the quarter note, since that is the
+/// beat `BEATS_PER_CYCLE` counts. What the language's `qvs` is: 0.5 seconds at
+/// the 120 bpm default.
+///
+/// A free function rather than a `Clock` method because the lowerer needs it
+/// for the persistent graph, where there is a tempo but no clock in reach.
+pub fn beat_secs_from_cps(cps: f64) -> f64 {
+    1.0 / (cps * BEATS_PER_CYCLE)
+}
+
 /// How far ahead of the present `reset` places cycle 0.
 ///
 /// The scheduler works ahead of the audio clock and matches onsets half-open,
@@ -169,6 +179,11 @@ impl Clock {
 
     pub fn cps(&self) -> f64 {
         self.tempo().cps
+    }
+
+    /// The quarter note, in seconds, at the tempo running now.
+    pub fn beat_secs(&self) -> f64 {
+        beat_secs_from_cps(self.tempo().cps)
     }
 
     pub fn sample_rate(&self) -> f64 {

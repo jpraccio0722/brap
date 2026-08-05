@@ -256,6 +256,9 @@ impl Lowerer {
             // set these, and they set them on bindings this call already made.
             repeat: None,
             choice: None,
+            // Kept as well as folded in: the pattern above needs it to place
+            // its notes, and a voice needs it to know how long a beat is here.
+            rate,
         });
 
         // The handle is what `.then` chains from. It contributes nothing to the

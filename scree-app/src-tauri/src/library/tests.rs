@@ -600,7 +600,10 @@ fn a_library_can_be_packed_installed_and_played() {
     // last thing between this and a sound.
     let instruments =
         crate::scheduler::voice::Instruments::from_program(&items).with_samples(samples);
-    crate::scheduler::voice::build_voice(&instruments, "kit::hit", 50.0, &[], 0.5)
+    crate::scheduler::voice::build_voice(
+        &instruments, "kit::hit", 50.0, &[], 0.5,
+        crate::lowerer::lower::DEFAULT_BEAT_SECS,
+    )
         .unwrap_or_else(|e| panic!("should build a voice: {e}"));
 
     std::fs::remove_dir_all(&out).ok();

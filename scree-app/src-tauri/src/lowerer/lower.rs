@@ -7,6 +7,8 @@ use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::parser::parser::ScreeItem;
 use crate::pattern::patterns::{Binding, ChoiceGroup};
 use crate::samples::Samples;
+#[cfg(test)]
+use crate::scheduler::clock::{BEATS_PER_CYCLE, DEFAULT_CPS};
 
 pub struct Lowerer {
     pub env: Env,
@@ -57,16 +59,42 @@ pub fn fresh_rng() -> SmallRng {
 /// would say otherwise.
 #[cfg(test)]
 pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
-    lower_inner(items, None, Samples::default())
+    lower_inner(items, None, DEFAULT_BEAT_SECS, Samples::default())
 }
 
-/// Lower a program, with the buffers its `load` calls name already decoded.
+/// The beat every caller that has no transport to ask gets: the default
+/// tempo's, so `qvs` is bound to something musical in a test rather than left
+/// out and reported as an unbound name.
+#[cfg(test)]
+pub const DEFAULT_BEAT_SECS: f64 = 1.0 / (DEFAULT_CPS * BEATS_PER_CYCLE);
+
+/// Lower a program with buffers but no transport, at the default tempo.
 ///
-/// Separate from `lower` rather than a parameter on it because most callers —
-/// every test, and the editor's own compile-to-check-for-errors — have no
-/// filesystem behind them and nothing to pass.
+/// Only tests reach this, for the same reason they reach `lower`: what there is
+/// to test about a `load` has nothing to do with what the clock is doing. The
+/// app goes through `lower_at_tempo`.
+#[cfg(test)]
 pub fn lower_with_samples(items: &Vec<ScreeItem>, samples: Samples) -> Result<Lowered, String> {
-    lower_inner(items, None, samples)
+    lower_inner(items, None, DEFAULT_BEAT_SECS, samples)
+}
+
+/// Lower a program against the tempo the transport is running at, so `qvs` and
+/// `qvh` in the persistent graph mean the beat the patterns are on.
+///
+/// Only `run_code` calls this — it is the one caller with an engine to ask.
+/// The tests go through `lower` or `lower_with_samples` and get the default
+/// tempo, which is the honest answer when there is no transport in the picture.
+///
+/// The graph is lowered once per eval, so the tempo here is the tempo *then*:
+/// dragging the transport afterwards moves the patterns and leaves the graph
+/// where it was until the next eval. A voice has no such gap — it is lowered
+/// per note, and reads the tempo as it is at that note.
+pub fn lower_at_tempo(
+    items: &Vec<ScreeItem>,
+    samples: Samples,
+    beat_secs: f64,
+) -> Result<Lowered, String> {
+    lower_inner(items, None, beat_secs, samples)
 }
 
 /// Lower a single scheduler voice.
@@ -75,19 +103,26 @@ pub fn lower_with_samples(items: &Vec<ScreeItem>, samples: Samples) -> Result<Lo
 /// instrument can shape itself against the note it is playing — `env(a, d, s,
 /// r, dur)`. Outside a voice the name is simply unbound.
 ///
+/// `beat_secs` is the quarter note of the clock *this* note is played on — the
+/// transport's, divided by the speed its pattern runs at — and is bound here as
+/// `qvs`. Unlike `dur` it is bound everywhere, because a tempo exists whether or
+/// not a note is sounding.
+///
 /// `samples` comes from the eval that published the instruments, so an
 /// instrument that reads a buffer builds here without touching a disk.
 pub fn lower_voice(
     items: &Vec<ScreeItem>,
     dur: f64,
+    beat_secs: f64,
     samples: Samples,
 ) -> Result<Lowered, String> {
-    lower_inner(items, Some(dur), samples)
+    lower_inner(items, Some(dur), beat_secs, samples)
 }
 
 fn lower_inner(
     items: &Vec<ScreeItem>,
     dur: Option<f64>,
+    beat_secs: f64,
     samples: Samples,
 ) -> Result<Lowered, String> {
     let mut lw = Lowerer {
@@ -103,6 +138,23 @@ fn lower_inner(
 
     if let Some(dur) = dur {
         lw.env.define("dur", Value::Number(dur));
+    }
+
+    // The beat, written the two ways a signal wants it: as a length for
+    // everything that takes seconds — `env`, `perc`, `line`, the delays — and as
+    // a frequency for everything that takes hertz. `qvh` is `1 / qvs` and could
+    // be written out every time, but an oscillator synced to the beat is the
+    // whole point of having these, and `sin(qvh * 2)` says what it does where
+    // `sin(1 / (qvs / 2))` does not.
+    //
+    // A tempo of zero or worse would poison every frequency computed from here,
+    // so a beat that is not a positive, finite length leaves both names unbound
+    // — `unbound name: qvs` is a diagnostic somebody can act on, and silence
+    // full of NaNs is not. Neither the clock nor `accel` can produce one today;
+    // this is what keeps that true if either learns how.
+    if beat_secs.is_finite() && beat_secs > 0.0 {
+        lw.env.define("qvs", Value::Number(beat_secs));
+        lw.env.define("qvh", Value::Number(1.0 / beat_secs));
     }
 
     for item in items {
