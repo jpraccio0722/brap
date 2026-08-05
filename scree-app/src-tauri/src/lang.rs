@@ -59,6 +59,10 @@ pub enum ValueKind {
     /// so nothing ever *answers* with text, and nothing can be chained into a
     /// name that wants it.
     Text,
+    /// A speed to run a pattern at, from `accel`. Only `play`'s `rate` accepts
+    /// one, and it accepts a plain number there too — so this is what a name
+    /// *answers* with rather than something anything receives.
+    Rate,
 }
 
 /// A UGen builtin: a name that lowers to a graph node.
@@ -323,6 +327,14 @@ pub static UGENS: &[Ugen] = &[
         receives: ValueKind::Signal,
         returns: ValueKind::Signal,
         doc: "Look-ahead limiter holding the signal to -1..=1. Look-ahead equals the attack time. Times are constants, in seconds.",
+    },
+    Ugen {
+        name: "line",
+        kind: NodeKind::Line,
+        params: &["start", "end", "duration"],
+        receives: ValueKind::Number,
+        returns: ValueKind::Signal,
+        doc: "One straight segment: `start` to `end` over `duration` seconds, held at `end` after that. Measured from the onset — the note's in a voice, the eval's in the persistent graph — so it needs no note length and works in either: `sin(line(880, 220, 0.05))` is a kick's pitch drop. Unlike `perc` it ends at a level rather than at silence, so it holds a voice open past its note only when `end` is 0 and the shape really finishes. All three arguments are constants; for a sweep between signals, scale it — `start + (end - start) * line(0, 1, d)`.",
     },
     Ugen {
         name: "lorenz",
@@ -1132,8 +1144,10 @@ pub static RANDOM_BUILTINS: &[ListBuiltin] = &[
 ];
 
 /// Names that exist but belong to neither table: `play` is intercepted before
-/// evaluation because it needs its instrument argument syntactically, and `dur`
-/// is not a function at all — it is the note length, bound only inside a voice.
+/// evaluation because it needs its instrument argument syntactically, `dur`
+/// is not a function at all — it is the note length, bound only inside a voice
+/// — and `accel` answers with a kind of value nothing else in the language
+/// produces or takes.
 pub static SPECIALS: &[ListBuiltin] = &[
     ListBuiltin {
         name: "then",
@@ -1223,7 +1237,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "One pass of a pattern on this section's *own* instrument: `playn(groove, drums, 4).then_fill([1, 1, 1, 1])`. Unlike `then` there is no `fn` and no second `play` — a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. The left side has to be a single `play`: a group of them has no one instrument to be a fill for. `rate` defaults to 1.",
+        doc: "One pass of a pattern on this section's *own* instrument: `playn(groove, drums, 4).then_fill([1, 1, 1, 1])`. Unlike `then` there is no `fn` and no second `play` — a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. The left side has to be a single `play`: a group of them has no one instrument to be a fill for. `rate` defaults to 1, and here is a plain number — a fill is one pass, with no room to speed up over.",
     },
     ListBuiltin {
         name: "quantize",
@@ -1295,7 +1309,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the sequence is as long as its values add up to rather than one cycle: `[c4;q, e4, g4]` is a 3/4 bar, and a value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the sequence is as long as its values add up to rather than one cycle: `[c4;q, e4, g4]` is a 3/4 bar, and a value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
     },
     ListBuiltin {
         name: "play_once",
@@ -1323,6 +1337,15 @@ pub static SPECIALS: &[ListBuiltin] = &[
         receives: ValueKind::Play,
         returns: ValueKind::Play,
         doc: "Treat several plays that run at once as one section: `play_all(playn(verse, lead, 4), playn(bassline, bass, 4)).then(chorus)`. Every argument must be a `play_once`, `playn`, `play`, or another `play_all` — they all start together, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow.",
+    },
+    ListBuiltin {
+        name: "accel",
+        params: &["from", "to", "cycles"],
+        arities: &[3],
+        variadic: false,
+        receives: ValueKind::Number,
+        returns: ValueKind::Rate,
+        doc: "A rate that moves: `from` to `to` over `cycles` cycles, holding at `to` after that. Written where a `play` takes a number — `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four cycles — and it is a straight line in rate, so the pattern covers the area under it rather than the rate at either end. Measured from the section's own first note, and started afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero: at zero the pattern would stop rather than slow, and a bounded section would never finish.",
     },
     ListBuiltin {
         name: "dur",
@@ -1879,7 +1902,7 @@ mod tests {
             ("dsf_saw", 2), ("env", 5), ("dsf_square", 2), ("fir3", 2),
             ("follow", 2), ("hammond", 1), ("highpass", 3), ("highpole", 2),
             ("highshelf", 4), ("hold", 3), ("impulse", 0), ("limiter", 3),
-            ("lorenz", 1), ("lowpass", 3), ("lowpole", 2), ("lowrez", 3),
+            ("line", 3), ("lorenz", 1), ("lowpass", 3), ("lowpole", 2), ("lowrez", 3),
             ("lowshelf", 4), ("mls", 0), ("mls_bits", 1), ("moog", 3),
             ("morph", 4), ("noise", 0), ("notch", 3), ("organ", 1),
             ("peak", 3), ("perc", 2), ("pink", 0), ("pinkpass", 1),
@@ -1914,12 +1937,13 @@ mod tests {
         for b in SPECIALS {
             // `dur` is a bound value rather than a call. Everything else is
             // intercepted somewhere: the `play` family, `then`, `play_all`,
-            // `load`, and the three that begin from a buffer.
+            // `load`, `accel`, and the three that begin from a buffer.
             let intercepted = Lowerer::is_play(b.name)
                 || Lowerer::is_section(b.name)
                 || Lowerer::is_play_all(b.name)
                 || Lowerer::is_load(b.name)
-                || Lowerer::is_buffer_builtin(b.name);
+                || Lowerer::is_buffer_builtin(b.name)
+                || Lowerer::is_rate(b.name);
             assert_eq!(
                 intercepted,
                 b.name != "dur",
@@ -2104,6 +2128,10 @@ mod receives_tests {
             // Written out at the call, never produced — so nothing stands to
             // the left of a name that wants one.
             ValueKind::Text => false,
+            // Only ever a result: `accel` answers with one and `play` takes one
+            // in a position that is not the receiver, so nothing is ever
+            // *called on* a rate.
+            ValueKind::Rate => false,
             ValueKind::Nothing => false,
         }
     }
@@ -2311,6 +2339,19 @@ mod receives_tests {
                     Ok(l) => crate::scree_graph::realizer::realize(&l.graph).is_ok(),
                 }
             });
+            // A rate is where a chain stops. `play` takes one as an argument
+            // rather than as a receiver, so no probe could name it — and that
+            // is the property worth pinning: nothing at all may follow it, so
+            // the editor offering anything after the dot would be wrong.
+            if returns == ValueKind::Rate {
+                assert!(
+                    found.is_none(),
+                    "{name} answers with a rate, so nothing should chain off `{call}` — \
+                     but {:?} did",
+                    found.map(|(k, _)| *k)
+                );
+                continue;
+            }
             assert_eq!(
                 found.map(|(k, _)| *k),
                 Some(returns),

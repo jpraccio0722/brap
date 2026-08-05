@@ -38,7 +38,11 @@ export type ValueKind =
   | "duration"
   /** A double-quoted string. Only `load` takes one, and only written out, so
    *  nothing ever answers with text and nothing chains into a name wanting it. */
-  | "text";
+  | "text"
+  /** How fast a pattern runs, from `accel`. Only `play`'s rate takes one, and
+   *  it takes a plain number there too — so this is only ever a result, and a
+   *  dot after one has nothing to offer. */
+  | "rate";
 
 export interface Builtin {
   name: string;

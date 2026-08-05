@@ -21,17 +21,59 @@ use crate::lowerer::lower::Lowerer;
 use crate::parser::parser::{Arg, Expr, Ident};
 use crate::pattern::pattern::{Pattern, Slot, Step, UNIT};
 use crate::pattern::patterns::{Binding, Lane, RESERVED};
+use crate::pattern::rate::Rate;
 use crate::scheduler::clock::BEATS_PER_CYCLE;
 
 /// The one-shot: `play`, stopping after a single pass of the pattern.
 pub const PLAY_ONCE: &str = "play_once";
 /// The counted one: `playn(pattern, instrument, times, rate = 1)`.
 pub const PLAY_N: &str = "playn";
+/// A rate that moves: `accel(from, to, cycles)`.
+pub const ACCEL: &str = "accel";
 
 impl Lowerer {
     /// True when this call should be handled as a `play`.
     pub fn is_play(name: &str) -> bool {
         matches!(name, "play" | PLAY_ONCE | PLAY_N)
+    }
+
+    /// True when this call builds a rate rather than a number or a node.
+    pub fn is_rate(name: &str) -> bool {
+        name == ACCEL
+    }
+
+    /// `accel(from, to, cycles)` — the only way to write a rate that moves.
+    ///
+    /// Refused rather than folded: a rate of zero or below is not a slow
+    /// pattern but a stopped or reversed one, and a section bounded in passes
+    /// would never reach its end to hand on to whatever follows. `Rate::accel`
+    /// takes care of the shapes that are merely not curves.
+    pub fn rate_builtin(&mut self, args: &[Value]) -> Result<Value, String> {
+        let [from, to, cycles] = args else {
+            return Err(format!("{ACCEL} expects 3 arguments, got {}", args.len()));
+        };
+        let mut n = [0.0; 3];
+        for (slot, (v, what)) in n.iter_mut().zip([
+            (from, "from"),
+            (to, "to"),
+            (cycles, "cycles"),
+        ]) {
+            match v {
+                Value::Number(x) if x.is_finite() => *slot = *x,
+                _ => return Err(format!("{ACCEL}: {what} must be a compile-time number")),
+            }
+        }
+        let [from, to, cycles] = n;
+        for (r, what) in [(from, "from"), (to, "to")] {
+            if r <= 0.0 {
+                return Err(format!(
+                    "{ACCEL}: {what} must be a positive rate, got {r}"));
+            }
+        }
+        if cycles < 0.0 {
+            return Err(format!("{ACCEL}: cycles cannot be negative, got {cycles}"));
+        }
+        Ok(Value::Rate(Rate::accel(from, to, cycles)))
     }
 
     /// `play(pattern, instrument)` or `play(pattern, instrument, rate)`, plus
@@ -99,15 +141,23 @@ impl Lowerer {
             _ => (None, tail),
         };
 
+        // A number is one speed throughout; an `accel` is a speed that moves.
+        // Both settle here, at eval time — the scheduler is handed a shape it
+        // can evaluate itself, never a signal, which it could not read anyway
+        // from a lookahead ahead of the audio clock.
         let rate = match tail.first() {
-            None => 1.0,
+            None => Rate::Fixed(1.0),
             Some(e) => match self.expr(e)? {
-                Value::Number(n) => n,
-                _ => return Err(format!("{name}: rate must be a compile-time number")),
+                Value::Number(n) => Rate::Fixed(n),
+                Value::Rate(r) => r,
+                _ => return Err(format!(
+                    "{name}: rate must be a compile-time number or an `accel`")),
             },
         };
-        if !(rate > 0.0) || !rate.is_finite() {
-            return Err(format!("{name}: rate must be positive and finite, got {rate}"));
+        if let Rate::Fixed(r) = rate {
+            if !(r > 0.0) || !r.is_finite() {
+                return Err(format!("{name}: rate must be positive and finite, got {r}"));
+            }
         }
         if tail.len() > 1 {
             // The count `playn` took above is still one of the caller's
@@ -172,7 +222,7 @@ impl Lowerer {
         }
 
         let (mut pattern, pass_cycles) = to_pattern_timed(&pattern_value)?;
-        if rate != 1.0 {
+        if !rate.is_unit() {
             // Only the pattern. A lane is read by position — the nth note takes
             // the nth value — so it advances with the notes whatever speed they
             // go at, and compressing it too would be compressing it twice.
@@ -184,7 +234,13 @@ impl Lowerer {
         // `rate` passes into each cycle, and a sequence of written note values
         // was never one cycle long to begin with — `[q, q, q]` is three beats,
         // so four passes of it are three cycles rather than four.
-        let cycles = repeats.map(|n| n * pass_cycles / rate);
+        //
+        // Asking the rate rather than dividing by it is what lets a section
+        // that speeds up still have a length: `unphase` is how long it takes to
+        // cover that much pattern, which for one speed throughout is the same
+        // division as before, and for a curve is the inverse of its integral.
+        // Everything an arrangement does with a section rests on this number.
+        let cycles = repeats.map(|n| rate.unphase(n * pass_cycles, 0.0));
 
         // Anything already sequenced by a `.then` above this call has moved the
         // start; a bare `play` writes at the origin.
@@ -443,7 +499,7 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
                 if pass == 1.0 {
                     Ok((steps, 1.0))
                 } else {
-                    Ok((Pattern::Fast(1.0 / pass, Box::new(steps)), pass))
+                    Ok((Pattern::fast(1.0 / pass, steps), pass))
                 }
             }
         },
@@ -472,7 +528,7 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
             if pass == 1.0 {
                 Ok((step, 1.0))
             } else {
-                Ok((Pattern::Fast(1.0 / pass, Box::new(step)), pass))
+                Ok((Pattern::fast(1.0 / pass, step), pass))
             }
         }
         Value::Tuplet => Err(
@@ -486,6 +542,9 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
              says what)".to_string()),
         Value::Function(_) => Err("a pattern cannot contain a function".to_string()),
         Value::Play { .. } => Err("a pattern cannot contain a play".to_string()),
+        Value::Rate(_) => Err(
+            "a pattern cannot contain a rate — `accel` says how fast a pattern runs, \
+             so it belongs in `play`'s rate rather than among its steps".to_string()),
     }
 }
 
@@ -593,6 +652,9 @@ fn to_step(v: &Value) -> Result<Step, String> {
              says what)".to_string()),
         Value::Function(_) => Err("a pattern cannot contain a function".to_string()),
         Value::Play { .. } => Err("a pattern cannot contain a play".to_string()),
+        Value::Rate(_) => Err(
+            "a pattern cannot contain a rate — `accel` says how fast a pattern runs, \
+             so it belongs in `play`'s rate rather than among its steps".to_string()),
     }
 }
 

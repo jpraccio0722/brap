@@ -751,7 +751,7 @@ impl Lowerer {
         // written in shares — see `to_pattern_timed`.
         let (mut pattern, pass_cycles) = to_pattern_timed(args.get(1).expect("checked above"))?;
         if rate != 1.0 {
-            pattern = crate::pattern::pattern::Pattern::Fast(rate, Box::new(pattern));
+            pattern = crate::pattern::pattern::Pattern::fast(rate, pattern);
         }
         let span = pass_cycles / rate;
 

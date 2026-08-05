@@ -344,6 +344,9 @@ impl Lowerer {
                  tuplet".into()),
             Value::Play { .. } => Err(
                 "cannot use a play as a signal (it schedules notes, it is not audio)".into()),
+            Value::Rate(_) => Err(
+                "cannot use a rate as a signal — `accel` says how fast a pattern runs, \
+                 and is only meaningful as `play`'s rate".into()),
         }
     }
 }

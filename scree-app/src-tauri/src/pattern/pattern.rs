@@ -4,6 +4,8 @@
 //! and no state — you ask what falls inside a span and it tells you. That is
 //! what makes swapping one mid-performance trivial.
 
+use crate::pattern::rate::Rate;
+
 /// Slack for comparing an onset against a time that should equal it. Onsets are
 /// built by arithmetic on step durations, so the same instant reached two ways
 /// can differ in the last bits; anything this small is nowhere near the gap
@@ -90,8 +92,10 @@ pub enum Pattern {
     /// Slots dividing one cycle in proportion to their lengths.
     Steps(Vec<Slot>),
     Stack(Vec<Pattern>),
-    /// Compress into `1/rate` of the time, repeating to fill the cycle.
-    Fast(f64, Box<Pattern>),
+    /// Compress into `1/rate` of the time, repeating to fill the cycle. A
+    /// [`Rate`] rather than a number because the speed may itself be a shape —
+    /// see `pattern::rate`, which owns the arithmetic either way.
+    Fast(Rate, Box<Pattern>),
 }
 
 
@@ -110,17 +114,37 @@ impl Pattern {
         Pattern::Steps(steps.into_iter().map(Slot::new).collect())
     }
 
-    pub fn fast(rate: f64, p: Pattern) -> Pattern {
-        Pattern::Fast(rate, Box::new(p))
+    pub fn fast(rate: impl Into<Rate>, p: Pattern) -> Pattern {
+        Pattern::Fast(rate.into(), Box::new(p))
     }
 
     pub fn slow(rate: f64, p: Pattern) -> Pattern {
-        Pattern::Fast(1.0 / rate, Box::new(p))
+        Pattern::Fast(Rate::Fixed(1.0 / rate), Box::new(p))
     }
 
     /// Every event whose *onset* falls in `span`. Onsets match half-open, so
     /// adjacent spans never double-trigger or drop a note.
+    ///
+    /// Anchored at cycle zero — the whole grid patterns are laid on. Only a
+    /// varying rate can tell the difference; see [`query_from`](Pattern::query_from).
     pub fn query(&self, span: Span) -> Vec<Event> {
+        self.query_from(span, 0.0)
+    }
+
+    /// `query`, told where the pattern's own clock started.
+    ///
+    /// The anchor is the cycle a rate curve is measured from: the moment the
+    /// binding's window opens, which is what makes `accel(1, 2, 8)` mean eight
+    /// cycles from this section's first note rather than eight from the start
+    /// of the performance. A fixed rate ignores it, so everything written
+    /// before rate curves existed is queried exactly as it was — the reasoning
+    /// is on [`Rate`] itself.
+    ///
+    /// It descends into groups because a group is a pattern in its own
+    /// slot-local time, and an anchor is a time like any other: it maps in the
+    /// same way the span does, or a curve inside a group would be measured
+    /// against a clock it does not share.
+    pub fn query_from(&self, span: Span, anchor: f64) -> Vec<Event> {
         match self {
             Pattern::Silence => Vec::new(),
 
@@ -164,7 +188,10 @@ impl Pattern {
                                 if local_end <= local_begin {
                                     continue;
                                 }
-                                for e in inner.query(Span::new(local_begin, local_end)) {
+                                let local_anchor = (anchor - slot) / step_dur;
+                                for e in inner
+                                    .query_from(Span::new(local_begin, local_end), local_anchor)
+                                {
                                     out.push(Event {
                                         begin: slot + e.begin * step_dur,
                                         end: slot + e.end * step_dur,
@@ -178,14 +205,28 @@ impl Pattern {
                 out
             }
 
-            Pattern::Stack(ps) => ps.iter().flat_map(|p| p.query(span)).collect(),
+            Pattern::Stack(ps) => ps.iter().flat_map(|p| p.query_from(span, anchor)).collect(),
 
+            // The change of clock, in both directions: the span asked for is
+            // mapped into the pattern's own time, and every onset found there
+            // is mapped back out to where it is actually played. A note's end
+            // goes through the same map as its beginning, so a note struck
+            // while the tempo is moving is as long as the pattern says it is in
+            // its own time — which is what makes an accelerando shorten notes
+            // as well as gaps.
+            //
+            // The inner pattern is anchored at its own zero rather than handed
+            // this one: past this point time is the pattern's, and it began
+            // when the pattern did.
             Pattern::Fast(rate, p) => {
-                if *rate <= 0.0 || !rate.is_finite() { return Vec::new(); }
-                let inner = Span { begin: span.begin * rate, end: span.end * rate };
-                p.query(inner).into_iter().map(|e| Event {
-                    begin: e.begin / rate,
-                    end: e.end / rate,
+                if !rate.is_usable() { return Vec::new(); }
+                let inner = Span {
+                    begin: rate.phase(span.begin, anchor),
+                    end: rate.phase(span.end, anchor),
+                };
+                p.query_from(inner, 0.0).into_iter().map(|e| Event {
+                    begin: rate.unphase(e.begin, anchor),
+                    end: rate.unphase(e.end, anchor),
                     value: e.value,
                 }).collect()
             }
@@ -204,8 +245,23 @@ impl Pattern {
     /// Exact rather than `at * events_per_cycle`, because `Fast` may put a
     /// non-whole number of onsets in a cycle: each layer is counted in its own
     /// time, and only `Steps` — which is periodic in one cycle by construction —
-    /// multiplies out.
+    /// multiplies out. A rate that varies makes that the only workable answer
+    /// rather than merely the exact one: there is no note-per-cycle figure to
+    /// multiply when every cycle holds a different number of them.
     pub fn onsets_before(&self, at: f64) -> usize {
+        self.onsets_before_from(at, 0.0)
+    }
+
+    /// `onsets_before`, against the clock a rate curve is measured from. The
+    /// anchor means what it means in [`query_from`](Pattern::query_from), and
+    /// has to match it — a lane reads by position, so a note counted against a
+    /// different clock than the one that played it takes the wrong value.
+    ///
+    /// `Steps` counts a cycle of itself and multiplies, which rests on a cycle
+    /// being like every other. That holds because a rate curve always wraps a
+    /// whole pattern — it is `play`'s argument — so it sits above this, never
+    /// inside the periodic part.
+    pub fn onsets_before_from(&self, at: f64, anchor: f64) -> usize {
         if !at.is_finite() || at <= 0.0 {
             return 0;
         }
@@ -234,15 +290,16 @@ impl Pattern {
                     + in_cycle.iter().filter(|s| **s < within).count()
             }
 
-            Pattern::Stack(ps) => ps.iter().map(|p| p.onsets_before(at)).sum(),
+            Pattern::Stack(ps) => ps.iter().map(|p| p.onsets_before_from(at, anchor)).sum(),
 
             // `Fast` is a change of clock, so the count is the inner pattern's
-            // at the inner time.
+            // at the inner time. Phase is monotonic, so this stays a count of
+            // everything that really came first however the rate moved.
             Pattern::Fast(rate, p) => {
-                if *rate <= 0.0 || !rate.is_finite() {
+                if !rate.is_usable() {
                     return 0;
                 }
-                p.onsets_before(at * rate)
+                p.onsets_before_from(rate.phase(at, anchor), 0.0)
             }
         }
     }
@@ -336,9 +393,12 @@ impl Pattern {
             // fallback rather than silently summing.
             Pattern::Stack(ps) => ps.iter().find_map(|p| p.sample(at)),
 
+            // Anchored at zero, like `query` without an anchor: this answers
+            // about a pattern rather than about a binding, and a pattern on its
+            // own has no window to have opened.
             Pattern::Fast(rate, p) => {
-                if *rate <= 0.0 || !rate.is_finite() { return None; }
-                p.sample(at * rate)
+                if !rate.is_usable() { return None; }
+                p.sample(rate.phase(at, 0.0))
             }
         }
     }
@@ -419,6 +479,105 @@ mod tests {
     fn slow_halves_density() {
         let p = Pattern::slow(2.0, Pattern::steps([Some(1.0), Some(2.0)]));
         assert_eq!(onsets(&p.query(Span::new(0.0, 2.0))), vec![0.0, 1.0]);
+    }
+
+    /// A rate curve puts the notes closer and closer together, and covers
+    /// exactly the pattern its integral says: from 1x to 3x over four cycles is
+    /// eight notes of a one-per-cycle pattern in those four cycles.
+    #[test]
+    fn an_accelerating_pattern_closes_its_gaps() {
+        let p = Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)]));
+        let ons = onsets(&p.query(Span::new(0.0, 4.0)));
+
+        assert_eq!(ons.len(), 8, "eight passes fit in the four cycles: {ons:?}");
+        assert_eq!(ons[0], 0.0);
+        let gaps: Vec<f64> = ons.windows(2).map(|w| w[1] - w[0]).collect();
+        for pair in gaps.windows(2) {
+            assert!(pair[1] < pair[0], "gaps should keep shrinking: {gaps:?}");
+        }
+        // The eighth note is the last that fits: a ninth would land past the
+        // four cycles the curve takes to cover eight.
+        assert!(*ons.last().unwrap() < 4.0);
+    }
+
+    /// A note is as long as the pattern says in its own time, so it is shorter
+    /// where the pattern is running faster. Without that a note would outlast
+    /// the gap to the one after it by the end of an accelerando.
+    #[test]
+    fn an_accelerating_note_is_shorter_than_the_one_before_it() {
+        let p = Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)]));
+        let evs = p.query(Span::new(0.0, 4.0));
+
+        let durations: Vec<f64> = evs.iter().map(|e| e.duration()).collect();
+        for pair in durations.windows(2) {
+            assert!(pair[1] < pair[0], "notes should keep shortening: {durations:?}");
+        }
+        // Each still fills the gap to the next, which is what makes it one
+        // continuous line rather than notes with holes between them.
+        for (e, next) in evs.iter().zip(evs.iter().skip(1)) {
+            assert!((e.end - next.begin).abs() < 1e-9);
+        }
+    }
+
+    /// The anchor is where the curve starts. Handed one, the same pattern is at
+    /// its opening rate there rather than wherever the curve had got to by
+    /// then — this is what makes `accel` mean "from this section's first note".
+    #[test]
+    fn a_curve_starts_at_its_anchor() {
+        let p = Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)]));
+
+        let from_zero = onsets(&p.query(Span::new(0.0, 4.0)));
+        let from_two = onsets(&p.query_from(Span::new(2.0, 6.0), 2.0));
+        let shifted: Vec<f64> = from_two.iter().map(|t| t - 2.0).collect();
+
+        assert_eq!(from_zero.len(), shifted.len());
+        for (a, b) in from_zero.iter().zip(&shifted) {
+            assert!((a - b).abs() < 1e-9, "{from_zero:?} vs {shifted:?}");
+        }
+    }
+
+    /// A fixed rate is deliberately deaf to the anchor: patterns share one grid
+    /// running from the clock's origin, and a `.then` cuts a window onto it.
+    #[test]
+    fn a_fixed_rate_is_not_moved_by_an_anchor() {
+        let p = Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)]));
+        assert_eq!(
+            onsets(&p.query_from(Span::new(1.0, 2.0), 1.0)),
+            onsets(&p.query(Span::new(1.0, 2.0))),
+        );
+    }
+
+    /// Lanes are read by position, so the count has to follow the same clock
+    /// the notes were placed on.
+    #[test]
+    fn onsets_are_counted_against_the_anchor_too() {
+        let p = Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)]));
+        let ons = onsets(&p.query_from(Span::new(2.0, 6.0), 2.0));
+
+        for (i, at) in ons.iter().enumerate() {
+            assert_eq!(p.onsets_before_from(*at, 2.0), i, "note {i} at {at}");
+        }
+    }
+
+    /// Chunked querying still partitions the timeline exactly — the property
+    /// the scheduler rests on, now over a moving rate.
+    #[test]
+    fn a_curve_survives_being_queried_in_pieces() {
+        let p = Pattern::fast(Rate::accel(0.5, 4.0, 3.0), Pattern::steps([Some(1.0), Some(2.0)]));
+        let whole = onsets(&p.query(Span::new(0.0, 5.0)));
+
+        let mut pieced = Vec::new();
+        let mut t = 0.0;
+        while t < 5.0 {
+            pieced.extend(onsets(&p.query(Span::new(t, t + 0.13))));
+            t += 0.13;
+        }
+        pieced.retain(|&x| x < 5.0);
+
+        assert_eq!(whole.len(), pieced.len(), "same notes, however the span was cut");
+        for (a, b) in whole.iter().zip(&pieced) {
+            assert!((a - b).abs() < 1e-9, "{whole:?} vs {pieced:?}");
+        }
     }
 
     #[test]
