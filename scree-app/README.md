@@ -364,7 +364,7 @@ it.
 | `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
 | `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
-| `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` named here or a play written out, and either way its own `play` calls start where this one stops; it is lowered at eval time, not called from the audio thread. |
+| `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` named here or a play written out, and either way its own `play` calls start where this one stops; it is lowered at eval time, not called from the audio thread. A play bound to a `let` is not a section — it already sounded where it was written. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
 
 ### Arrangement
@@ -397,6 +397,22 @@ forward — it is written where it belongs in the first place, exactly as the
 body of a named `fn` is. Write it out when a two-bar variation is not worth a
 name; name it when the name says something, or when the same section is used
 twice.
+
+A play bound to a `let` is **not** a section, and this is the one place the
+difference shows:
+
+```rust
+let verse = playn(riff, lead, 4)   // this sounds, here, at the origin
+playn(intro, bass, 2).then(verse)  // refused: `verse` was already placed
+```
+
+`let` does not defer anything. A `play` sounds where it is written, so by the
+time the name holds a value the notes are on the timeline at cycle 0, and there
+is nothing left for `then` to place — moving them afterwards is exactly the
+fixup the mechanism above avoids. What a named play *is* good for is the other
+side of the call: it is a handle, so `verse.then(chorus)` chains from it. To
+place the same music later instead, name it as a `fn` — `fn verse() = playn(riff,
+lead, 4)` — and nothing about the call site changes.
 
 A section captures nothing, because closures do not exist here; whatever `play`
 calls it contains are written relative to where the section was placed, so
@@ -466,7 +482,7 @@ play itself.
 | `maybe` | `maybe(play, chance, section)` | A section with probability `chance` (0 to 1), decided afresh each time round. A `wthen` whose other arm is silence. |
 | `shuffle_then` | `shuffle_then(play, sections)` | Every section once each, in an order drawn now. The counterpart to `rthen` rather than a variant: a weighted choice may pass a section over for a long time, and this cannot. |
 
-#### Why `quantize` exists
+#### `quantize`
 
 `rate` divides into the count — or an `accel` integrates into it — so a
 section's length need not be a whole number.

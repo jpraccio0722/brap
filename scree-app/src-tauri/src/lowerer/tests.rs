@@ -1904,6 +1904,75 @@ fn the_combinators_that_rerun_a_section_still_want_a_fn() {
     }
 }
 
+/// A play bound to a name has already sounded where it was written, so it is
+/// not a section. Accepting it placed nothing at all: the notes stayed at the
+/// origin and the `.then` read as though it had moved them, which is the same
+/// music whether the `.then` is there or commented out.
+#[test]
+fn a_play_bound_to_a_name_is_not_a_section() {
+    let e = play_err(&format!(
+        "{SECTIONS}let named = playn([c4, e4], lead, 2)\n\
+         playn([c3], bass, 4).then(named)\n"));
+    assert!(e.contains("already been placed"), "got: {e}");
+    assert!(e.contains("sounds at cycle 0"), "got: {e}");
+    assert!(e.contains("Wrap it in a `fn`"), "got: {e}");
+}
+
+/// Every combinator that places a section refuses the same thing, since they
+/// all place it through `place`.
+#[test]
+fn no_combinator_places_a_play_bound_to_a_name() {
+    for src in [
+        "playn([c3], bass, 2).then(named)",
+        "playn([c3], bass, 2).then_after(1, named)",
+        "playn([c3], bass, 2).overlap(1, named)",
+        "playn([c3], bass, 2).with(named)",
+        "playn([c3], bass, 2).then_n(named, 2)",
+        "at(8, named)",
+        "seq(named, tail)",
+    ] {
+        let e = play_err(&format!(
+            "{SECTIONS}let named = playn([c4, e4], lead, 2)\n{src}\n"));
+        assert!(e.contains("already been placed"), "`{src}` got: {e}");
+    }
+}
+
+/// The named `fn` the refusal points at is the spelling that works, and it
+/// places the section exactly where the chain had reached.
+#[test]
+fn naming_the_section_as_a_fn_places_it() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}fn named() = playn([c4, e4], lead, 2)\n\
+         playn([c3], bass, 4).then(named)\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[0].start, 0.0);
+    assert_eq!(bs[1].instrument, "lead");
+    assert_eq!(bs[1].start, 4.0);
+}
+
+/// Reaching back is refused however it is spelled: a chain hung off a play that
+/// was written earlier puts its new notes after *that* play, not where the
+/// section is being placed.
+#[test]
+fn a_section_chained_off_an_older_play_is_refused() {
+    let e = play_err(&format!(
+        "{SECTIONS}let named = playn([c4], lead, 2)\n\
+         playn([c3], bass, 4).then(named.then(tail))\n"));
+    assert!(e.contains("already been placed"), "got: {e}");
+}
+
+/// The rule is about *placing* a section, not about naming a play at all: a
+/// handle is still what a chain continues from, which is the whole reason to
+/// bind one to a name.
+#[test]
+fn a_named_play_is_still_a_receiver() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}let intro = playn([c3], bass, 4)\nintro.then(chorus)\n"));
+    assert_eq!(bs.len(), 2);
+    assert_eq!(bs[1].instrument, "lead");
+    assert_eq!(bs[1].start, 4.0);
+}
+
 /// A section is still only a `fn` or a play, and the refusal names both.
 #[test]
 fn then_refuses_what_is_neither_a_function_nor_a_play() {
@@ -3396,3 +3465,6 @@ mod metrical_tests {
         assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(400.0), Some(2000.0)]);
     }
 }
+
+
+
