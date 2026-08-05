@@ -14,6 +14,11 @@
 //! `.then(chorus)` and `.then(playn(...))` the same thing by the same
 //! mechanism, rather than two spellings with two implementations. See `place`.
 //!
+//! The same sentence says why a play *bound to a name* is not a section:
+//! `let a = playn(...)` already ran, and already sounds where it was written.
+//! The name is a handle for chaining *from* — `a.then(b)` — and never a section
+//! to be placed. `place` refuses it rather than lowering nothing.
+//!
 //! Not every combinator can take a section written out, and the line is drawn
 //! by whether it needs to run the section *again*. `then_n` re-lowers its
 //! argument once per pass, so it can. `then_each`, `wthen`, `rthen`,
@@ -265,12 +270,22 @@ impl Lowerer {
     ///
     /// - a bare `fn` name evaluates to a function and writes nothing, so it is
     ///   inlined, exactly as it always was;
-    /// - anything else has already written its notes at `offset` by the time it
-    ///   answers, because that is what `play_start` means, so there is nothing
-    ///   left to do.
+    /// - a play *written here* has already written its notes at `offset` by the
+    ///   time it answers, because that is what `play_start` means, so there is
+    ///   nothing left to do.
     ///
     /// The second case is why `.then(playn(...))` is not a fixup of notes
     /// placed at the origin: they are never placed at the origin.
+    ///
+    /// Which is exactly why the third case is refused. `let a = playn(...)`
+    /// sounds where it was written, like every other `play`, and what the name
+    /// holds afterwards is a handle to notes already on the timeline — so
+    /// `.then(a)` would evaluate to a play that this call did not write, place
+    /// nothing, and leave `a` at the origin while reading as though it had been
+    /// moved. Lowering it a second time is not on offer either: the notes exist
+    /// once, and a name may be used twice. So a handle from elsewhere is named
+    /// as the mistake it is, rather than accepted as a section that turns out to
+    /// be silent.
     fn place(&mut self, who: &str, what: &str, p: &Params, i: usize, offset: f64)
         -> Result<Section, String>
     {
@@ -285,9 +300,23 @@ impl Lowerer {
             return Err(format!("{who}: {what} is missing"));
         };
         let expr = &arg.value;
+        // Where this placement's bindings begin — the same index `at_offset`
+        // takes, since nothing is written between here and there. A play that
+        // answers with anything below it is reaching back to notes written
+        // before the section started, which is what tells the two cases apart.
+        let mark = self.bindings.len();
         self.at_offset(who, offset, |me| match me.expr(expr)? {
             Value::Function(def) => me.inline_body(who, def, Vec::new()),
-            Value::Play { .. } => Ok(()),
+            // `chain_first` as well as `first`: a chain hung off an older play,
+            // `a.then(playn(...))`, writes its new notes after `a` rather than
+            // here, and is reaching back just as plainly.
+            Value::Play { first, chain_first, .. }
+                if first >= mark && chain_first >= mark => Ok(()),
+            Value::Play { starts_at, .. } => Err(format!(
+                "{who}: {what} is a play that has already been placed — it sounds at cycle \
+                 {starts_at}, where it was written, and a section is lowered where it is \
+                 placed rather than moved there afterwards. Wrap it in a `fn` and name that \
+                 here, or write the play out at this call.")),
             _ => Err(format!(
                 "{who}: {what} must be either a `fn` written by name, such as `chorus`, \
                  or a play written out, such as `playn(pat, inst, 4)`")),

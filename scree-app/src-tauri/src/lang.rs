@@ -1156,7 +1156,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is either a no-parameter `fn` named here or a play written out — `.then(playn(riff, lead, 2))` needs no name — and either way its own `play` calls start where this one stops. Lowered at eval time, not called by the audio thread.",
+        doc: "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is either a no-parameter `fn` named here or a play written out — `.then(playn(riff, lead, 2))` needs no name — and either way its own `play` calls start where this one stops. A play bound to a `let` is not a section: it already sounded where it was written, so name it as a `fn` instead. Lowered at eval time, not called by the audio thread.",
     },
     ListBuiltin {
         name: "then_after",
