@@ -12,10 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
-# Audio runs on a real-time deadline, and an unoptimized fundsp misses it: a
-# debug build costs ~47% of real time per pad voice, so a three-note chord
-# underruns and crackles. Optimizing dependencies fully — fundsp is where all
-# the DSP time goes — buys that back while this crate stays cheap to rebuild.
+# Audio runs on a real-time deadline, and an unoptimized fundsp misses it. On a
+# program holding six delay-tapped voices open, the callback costs 3% of real
+# time with dependencies optimized and 122% without — the second one is not a
+# near miss, it is silence with a gap in it every buffer. Optimizing them fully
+# — fundsp is where all the DSP time goes — buys that back while this crate
+# stays cheap to rebuild.
 [profile.dev]
 opt-level = 1
 
