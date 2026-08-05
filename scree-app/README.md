@@ -259,6 +259,10 @@ One cycle is four beats, the same four `bpm` counts. A bar that does not come to
 four therefore runs against the cycle rather than with it, which is exactly what
 makes `[c4;q, e4, g4]` polymeter against a four-square drum part.
 
+That same beat is available inside an instrument as a number, for writing a
+sweep or an envelope in note values rather than in seconds — see [Syncing to the
+beat](#syncing-to-the-beat).
+
 ### Tuplets
 
 A group inside such a sequence is a tuplet, and says so with `;t`:
@@ -366,6 +370,49 @@ it.
 | `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
 | `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` named here or a play written out, and either way its own `play` calls start where this one stops; it is lowered at eval time, not called from the audio thread. A play bound to a `let` is not a section — it already sounded where it was written. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
+| `qvs` | `qvs` | The quarter note in seconds — 0.5 at the default 120 bpm. A binding rather than a function. See [Syncing to the beat](#syncing-to-the-beat). |
+| `qvh` | `qvh` | The quarter note in hertz, which is `1 / qvs` — 2 at the default 120 bpm. See [Syncing to the beat](#syncing-to-the-beat). |
+
+### Syncing to the beat
+
+`qvs` and `qvh` are the beat, as a number, wherever a number can be written.
+They are the same quarter note the transport counts and `bpm` converts, in the
+two units a signal asks for it in: **`qvs` is a length in seconds** for
+everything that takes a time — `env`, `perc`, `line`, `delay` — and **`qvh` is a
+frequency in hertz** for everything that takes one.
+
+```rust
+fn stab(n) = lowpass(saw(n.m2h), 400 + 3000 * sin(qvh * 2), 3) * perc(0, qvs / 2)
+```
+
+Which way round to divide follows from the unit, and the two go opposite ways:
+`qvs / 2` is *half as long*, so it is an eighth; `qvh * 2` is *twice as fast*,
+so it is also an eighth. Multiply for shorter notes in hertz, divide for them in
+seconds. Dots and triplets are the arithmetic they always were — `qvs * 1.5` is
+a dotted quarter's worth of delay, `qvh * 3` a quarter triplet.
+
+**Inside an instrument the beat is the one that instrument is being played on.**
+A `play` at rate 2 packs two passes into a cycle, and its voices are told a beat
+half as long to match — so one instrument follows whatever speed it is put at,
+and two patterns can run the same instrument at two speeds:
+
+```rust
+play(riff, stab)          // sweeps on the eighth
+play(riff, stab, 2)       // the same instrument, sweeping twice as fast
+```
+
+Under an `accel` this is read afresh for every note, at the speed the curve has
+reached by then, so a sweep tightens along with the rhythm.
+
+Outside an instrument — in the persistent graph — the beat is the transport's
+own, fixed at the eval that wrote it. **Dragging the tempo moves the patterns and
+leaves the graph where it was** until the next eval; play the file again to
+bring it along. A voice has no such gap, since it is built afresh per note.
+
+One other thing they do not do: they set a *speed*, not a phase. A voice starts
+its shapes at its own note, so an envelope or a sweep written with `qvs` lands
+where the note does. An oscillator in the persistent graph runs at the right
+rate but from wherever the eval left it, so it will not be on the downbeat.
 
 ### Arrangement
 

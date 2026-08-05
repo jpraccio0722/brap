@@ -795,6 +795,9 @@ impl Lowerer {
             cycles: Some(span),
             repeat: None,
             choice: None,
+            // A fill's own speed, not the one it is filling for: the pattern
+            // here is new, and this is the rate it was given.
+            rate: rate.into(),
         };
         let first = self.bindings.len();
         self.bindings.push(fill);

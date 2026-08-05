@@ -3,7 +3,7 @@
 use crate::engine::{stop as stop_graph, swap_program};
 use crate::{
     scree_graph::realizer::realize,
-    lowerer::lower::lower_with_samples,
+    lowerer::lower::lower_at_tempo,
     parser::parser::parse,
 };
 use crate::diagnostic::{Diagnostic, Stage};
@@ -95,7 +95,17 @@ fn run_code(
     let loaded = samples::Samples::load(&ast, workspace.dir().as_deref(), &samples)
         .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
 
-    let lowered = lower_with_samples(&ast, loaded.clone())
+    // The tempo the graph is written against. Read here rather than passed
+    // along with the origin below, because lowering needs it and the origin is
+    // settled after — and read under its own short lock, so an eval never holds
+    // the engine across a parse or a decode.
+    let beat_secs = engine
+        .lock()
+        .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?
+        .clock
+        .beat_secs();
+
+    let lowered = lower_at_tempo(&ast, loaded.clone(), beat_secs)
         .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
     let audio_graph = realize(&lowered.graph)
         .map_err(|e| Diagnostic::message(Stage::Realize, e))?;

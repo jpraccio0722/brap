@@ -625,7 +625,7 @@ mod envelope_tests {
     /// Render `src` as a voice with note length `dur` and return its samples.
     fn render_voice(src: &str, dur: f64, secs: f64) -> Vec<f32> {
         let items = parse(src.to_string()).expect("parse failed");
-        let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
+        let lowered = lower_voice(&items, dur, crate::lowerer::lower::DEFAULT_BEAT_SECS, Default::default()).expect("lower failed");
         let mut net = realize(&lowered.graph).expect("realize failed");
         net.check();
         net.set_sample_rate(SR);
@@ -743,7 +743,7 @@ mod envelope_tests {
     /// needs to finish what it started.
     fn tail_of(src: &str, dur: f64) -> f64 {
         let items = parse(src.to_string()).expect("parse failed");
-        let lowered = lower_voice(&items, dur, Default::default()).expect("lower failed");
+        let lowered = lower_voice(&items, dur, crate::lowerer::lower::DEFAULT_BEAT_SECS, Default::default()).expect("lower failed");
         tail_secs(&lowered.graph, dur)
     }
 

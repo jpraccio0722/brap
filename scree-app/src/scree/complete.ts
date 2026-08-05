@@ -322,7 +322,8 @@ function kindOf(expr: string, scope: Scope, depth = 4): ValueKind {
     return scope.index.get(word)?.returns ?? "any";
   }
 
-  // A bare builtin name is that name too — `dur` is the one that matters.
+  // A bare builtin name is that name too — the bound values, `dur` and the
+  // beat, are the ones that matter.
   const builtin = scope.index.get(word);
   if (builtin && !scope.locals.has(word)) return builtin.returns;
 

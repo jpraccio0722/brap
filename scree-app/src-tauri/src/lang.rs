@@ -1357,6 +1357,24 @@ pub static SPECIALS: &[ListBuiltin] = &[
         doc: "The current note's length in seconds. Bound only inside a voice — pass it to `env`.",
     },
     ListBuiltin {
+        name: "qvs",
+        params: &[],
+        arities: &[],
+        variadic: false,
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Number,
+        doc: "The quarter note in seconds: 0.5 at the default 120 bpm. Anything that takes a length of time can be written in beats with it — `perc(0, qvs / 2)` decays over an eighth, `delay(qvs * 0.75)` is a dotted-eighth delay. Inside a voice it is the beat of the clock that note is played on, so a `play` at rate 2 gives its instrument a beat half as long; in the persistent graph it is the transport's own, fixed at the eval that wrote it.",
+    },
+    ListBuiltin {
+        name: "qvh",
+        params: &[],
+        arities: &[],
+        variadic: false,
+        receives: ValueKind::Nothing,
+        returns: ValueKind::Number,
+        doc: "The quarter note in hertz — `1 / qvs`, which is 2 at the default 120 bpm. What an oscillator wants: `sin(qvh * 2)` sweeps on the eighth, `sin(qvh / 2)` on the half. Multiplying is what makes it faster here, because this is a rate and not a length. Rate and tempo reach it exactly as they reach `qvs`.",
+    },
+    ListBuiltin {
         name: "load",
         params: &["path"],
         arities: &[1],
@@ -1926,18 +1944,23 @@ mod tests {
         }
     }
 
-    /// `dur` aside, every special is a name `lowerer::call` picks off its own
-    /// path rather than finding in a table — and it has to intercept exactly
-    /// those. A name in the table the lowerer does not know is completable but
-    /// not callable; one it knows that is missing here is callable but
-    /// invisible to the editor.
+    /// The bound values aside, every special is a name `lowerer::call` picks
+    /// off its own path rather than finding in a table — and it has to
+    /// intercept exactly those. A name in the table the lowerer does not know
+    /// is completable but not callable; one it knows that is missing here is
+    /// callable but invisible to the editor.
     #[test]
     fn the_table_and_the_lowerer_agree_on_the_specials() {
         use crate::lowerer::lower::Lowerer;
+        // Numbers the lowerer defines in the environment before the program
+        // runs, rather than calls: the note's length and the beat, in both the
+        // units a signal asks for it in. The editor needs them in the table to
+        // complete and document them, and nothing calls them.
+        const BOUND: [&str; 3] = ["dur", "qvs", "qvh"];
         for b in SPECIALS {
-            // `dur` is a bound value rather than a call. Everything else is
-            // intercepted somewhere: the `play` family, `then`, `play_all`,
-            // `load`, `accel`, and the three that begin from a buffer.
+            // Everything else is intercepted somewhere: the `play` family,
+            // `then`, `play_all`, `load`, `accel`, and the three that begin
+            // from a buffer.
             let intercepted = Lowerer::is_play(b.name)
                 || Lowerer::is_section(b.name)
                 || Lowerer::is_play_all(b.name)
@@ -1946,7 +1969,7 @@ mod tests {
                 || Lowerer::is_rate(b.name);
             assert_eq!(
                 intercepted,
-                b.name != "dur",
+                !BOUND.contains(&b.name),
                 "{} is in the table but nothing intercepts it (or the reverse)",
                 b.name,
             );

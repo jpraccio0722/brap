@@ -92,12 +92,17 @@ pub struct Voice {
 ///
 /// `pan` is the exception: it is taken off the lanes rather than passed on, and
 /// spent on where the finished voice sits rather than on how it sounds.
+///
+/// `beat_secs` is the quarter note of the clock this note is on — already
+/// divided by the binding's rate, so this is a length the instrument can shape
+/// itself against without knowing anything about how it came to be playing.
 pub fn build_voice(
     instruments: &Instruments,
     instrument: &str,
     value: f64,
     lanes: &[(String, f64)],
     dur_secs: f64,
+    beat_secs: f64,
 ) -> Result<Voice, String> {
     let Some(params) = instruments.param_count(instrument) else {
         return Err(format!("no instrument named `{instrument}`"));
@@ -118,7 +123,7 @@ pub fn build_voice(
         args,
     }));
 
-    let lowered = lower_voice(&items, dur_secs, instruments.samples.clone())?;
+    let lowered = lower_voice(&items, dur_secs, beat_secs, instruments.samples.clone())?;
     let net = realize(&lowered.graph)?;
 
     // `play` refuses a lane given twice, so at most one of these exists.
@@ -156,9 +161,31 @@ fn place(voice: Net, pan: f64) -> Net {
     placed
 }
 
+/// `build_voice` at the default tempo.
+///
+/// Every test module below imports this *as* `build_voice`, so the tests that
+/// have nothing to say about the beat — which is all of them that existed
+/// before `qvs` did — go on reading as they did. A test about the beat calls
+/// `build_voice` by its real name and says what it wants.
+#[cfg(test)]
+fn build_voice_at_default_tempo(
+    instruments: &Instruments,
+    instrument: &str,
+    value: f64,
+    lanes: &[(String, f64)],
+    dur_secs: f64,
+) -> Result<Voice, String> {
+    build_voice(
+        instruments, instrument, value, lanes, dur_secs,
+        crate::lowerer::lower::DEFAULT_BEAT_SECS,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::build_voice_at_default_tempo as build_voice;
+    use crate::lowerer::lower::DEFAULT_BEAT_SECS;
     use crate::parser::parser::parse;
     use fundsp::prelude64::AudioUnit;
 
@@ -202,6 +229,46 @@ mod tests {
             (crossings as i64 - 110).abs() <= 1,
             "expected ~110 rising zero crossings, got {crossings}"
         );
+    }
+
+    /// The beat reaches the instrument, and it is the one this voice was built
+    /// with rather than the transport's — which is how a `play` at rate 2 gets
+    /// an instrument that sweeps twice as fast without being written twice.
+    ///
+    /// Counted in zero crossings, exactly as the event value is above: a beat
+    /// of 1/110 s is 110 Hz, and an oscillator at `qvh` really runs there.
+    #[test]
+    fn the_beat_reaches_the_instrument() {
+        let ins = instruments("fn tone() = sin(qvh)\n");
+        let mut net = super::build_voice(&ins, "tone", 0.0, &[], 1.0, 1.0 / 110.0)
+            .expect("should build")
+            .net;
+        net.set_sample_rate(44100.0);
+
+        let samples: Vec<f32> = (0..44100).map(|_| net.get_mono()).collect();
+        let crossings = samples
+            .windows(2)
+            .filter(|w| w[0] <= 0.0 && w[1] > 0.0)
+            .count();
+        assert!(
+            (crossings as i64 - 110).abs() <= 1,
+            "expected ~110 rising zero crossings, got {crossings}"
+        );
+    }
+
+    /// A beat that is not a length leaves both names unbound rather than
+    /// filling the voice with NaNs. Nothing produces one today — the clock
+    /// refuses a tempo like this and so does `accel` — and this is what makes
+    /// the failure legible if anything ever does.
+    #[test]
+    fn an_impossible_beat_is_an_unbound_name_rather_than_silence() {
+        let ins = instruments("fn tone() = sin(qvh)\n");
+        for beat in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            match super::build_voice(&ins, "tone", 0.0, &[], 1.0, beat) {
+                Err(e) => assert!(e.contains("unbound name: qvh"), "beat {beat}: {e}"),
+                Ok(_) => panic!("beat {beat} should not have built a voice"),
+            }
+        }
     }
 
     /// Instruments can use the full language, not a restricted subset.
@@ -521,6 +588,7 @@ mod tests {
 #[cfg(test)]
 mod envelope_voice_tests {
     use super::*;
+    use super::build_voice_at_default_tempo as build_voice;
     use crate::lowerer::lower::lower;
     use crate::parser::parser::parse;
     use fundsp::prelude64::AudioUnit;
@@ -613,6 +681,7 @@ play([110, 165], bass, 0.5)
 #[cfg(test)]
 mod kick_example_tests {
     use super::*;
+    use super::build_voice_at_default_tempo as build_voice;
     use fundsp::prelude64::AudioUnit;
 
     /// A synth kick. The pattern number is the fundamental; everything else is
@@ -676,6 +745,7 @@ fn kick(f) = {
 #[cfg(test)]
 mod zero_param_tests {
     use super::*;
+    use super::build_voice_at_default_tempo as build_voice;
     use crate::parser::parser::parse;
     use fundsp::prelude64::AudioUnit;
 

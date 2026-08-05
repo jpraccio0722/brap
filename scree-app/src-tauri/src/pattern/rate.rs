@@ -106,6 +106,31 @@ impl Rate {
         }
     }
 
+    /// The speed the pattern is running at *at* outer cycle `at` — the slope of
+    /// [`phase`](Rate::phase) rather than its value.
+    ///
+    /// Neither of the two questions this type was built for; it is what a voice
+    /// asks. A note wanting to shape itself in beats needs the beat it is being
+    /// played on, and under a curve that is a different length for every note.
+    /// Piecewise exactly as `phase` is — flat at `from` before the anchor and at
+    /// `to` past the curve's end — so the beat a note is given is the beat its
+    /// own placement was worked out from.
+    pub fn at(&self, at: f64, anchor: f64) -> f64 {
+        match self {
+            Rate::Fixed(r) => *r,
+            Rate::Accel { from, to, cycles } => {
+                let c = at - anchor;
+                if c <= 0.0 {
+                    *from
+                } else if c >= *cycles {
+                    *to
+                } else {
+                    from + (to - from) * c / cycles
+                }
+            }
+        }
+    }
+
     /// The outer cycle at which the pattern reaches inner time `phase` — the
     /// inverse of [`phase`](Rate::phase), and where every onset a query found
     /// is actually played.
@@ -210,6 +235,27 @@ mod tests {
         assert!((rate.unphase(8.0, 0.0) - 4.0).abs() < 1e-12);
         // And a fixed rate still just divides.
         assert_eq!(Rate::Fixed(2.0).unphase(8.0, 0.0), 4.0);
+    }
+
+    /// The speed at a moment is the slope of the phase there, which is what a
+    /// voice is told when it asks how long a beat is. Checked against a
+    /// difference quotient rather than against the formula written a second
+    /// time, so the two really are the same curve.
+    #[test]
+    fn the_rate_at_a_moment_is_the_slope_of_its_phase() {
+        let rate = Rate::accel(1.0, 3.0, 4.0);
+        let h = 1e-6;
+        for c in [0.5, 1.0, 2.0, 3.9] {
+            let slope = (rate.phase(c + h, 0.0) - rate.phase(c - h, 0.0)) / (2.0 * h);
+            assert!((rate.at(c, 0.0) - slope).abs() < 1e-5, "at {c}: {} vs {slope}", rate.at(c, 0.0));
+        }
+        // Flat outside the curve, at either end's speed.
+        assert_eq!(rate.at(-1.0, 0.0), 1.0);
+        assert_eq!(rate.at(0.0, 0.0), 1.0);
+        assert_eq!(rate.at(4.0, 0.0), 3.0);
+        assert_eq!(rate.at(100.0, 0.0), 3.0);
+        // And a fixed rate is that rate wherever it is asked.
+        assert_eq!(Rate::Fixed(2.0).at(7.0, 3.0), 2.0);
     }
 
     /// Degenerate curves are constants, which is what keeps every division in
