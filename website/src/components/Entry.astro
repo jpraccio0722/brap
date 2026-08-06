@@ -1,0 +1,32 @@
+---
+import DocText from "./DocText.astro";
+import { signature, isChainable, type Builtin } from "../lib/reference";
+
+interface Props {
+	builtin: Builtin;
+}
+
+const { builtin } = Astro.props;
+const chained = isChainable(builtin);
+---
+
+{/* The name is the anchor, so the search and a ⌘-click from the app's panel
+    can both land on one entry rather than on the top of its category. */}
+<article id={builtin.name} class="scroll-mt-6 border-t border-neutral-200 py-4 dark:border-neutral-800">
+	<div class="flex items-baseline gap-3">
+		<h3 class="font-mono text-sm text-blue-700 dark:text-blue-400">
+			<a href={`#${builtin.name}`} class="hover:underline">{signature(builtin)}</a>
+		</h3>
+		{
+			chained && (
+				<span class="ml-auto shrink-0 font-mono text-[10px] text-neutral-500">
+					{builtin.receives} → {builtin.returns}
+				</span>
+			)
+		}
+	</div>
+
+	<p class="mt-1.5 max-w-2xl text-sm leading-relaxed text-neutral-600 dark:text-neutral-400">
+		<DocText text={builtin.doc} />
+	</p>
+</article>

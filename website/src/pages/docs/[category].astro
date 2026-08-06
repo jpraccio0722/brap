@@ -1,0 +1,72 @@
+---
+import type { GetStaticPaths } from "astro";
+import DocsLayout from "../../layouts/DocsLayout.astro";
+import Entry from "../../components/Entry.astro";
+import { CATEGORIES, membersOf } from "../../lib/reference";
+
+/** One page per category, straight off the table — a category added in Rust
+ *  becomes a page here with nothing to remember. */
+export const getStaticPaths = (() =>
+	CATEGORIES.map((category) => ({
+		params: { category: category.slug },
+		props: { category, members: membersOf(category.key) },
+	}))) satisfies GetStaticPaths;
+
+const { category, members } = Astro.props;
+---
+
+<DocsLayout
+	title={category.label}
+	description={category.blurb}
+	current={category.slug}
+>
+	<header class="mb-6">
+		{/* The way back, in the place the eyebrow label was already occupying.
+		    Below `lg` the sidebar is gone, so on a phone this is the only route
+		    out of a category — which is why it is a link in the page rather
+		    than something the layout only shows on wide screens. */}
+		<a
+			href="/docs/"
+			class="group inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-500 transition-colors hover:text-neutral-900 dark:hover:text-neutral-100"
+		>
+			<span aria-hidden="true" class="transition-transform group-hover:-translate-x-0.5">←</span>
+			Function Reference
+		</a>
+		<h1 class="mt-1 text-3xl font-semibold tracking-tight">{category.label}</h1>
+		<p class="mt-2 max-w-2xl text-neutral-600 dark:text-neutral-400">
+			{category.blurb}
+		</p>
+	</header>
+
+	{/* Alphabetical, like the panel: over a hundred names across the reference,
+	    and a reader who arrives knowing the name should not have to read prose
+	    to find it. */}
+	<nav aria-label={`${category.label} names`} class="mb-8">
+		<ul class="flex flex-wrap gap-x-3 gap-y-1">
+			{
+				members.map((b) => (
+					<li>
+						<a
+							href={`#${b.name}`}
+							class="font-mono text-xs text-neutral-600 hover:text-blue-700 dark:text-neutral-400 dark:hover:text-blue-400"
+						>
+							{b.name}
+						</a>
+					</li>
+				))
+			}
+		</ul>
+	</nav>
+
+	<div>
+		{members.map((b) => <Entry builtin={b} />)}
+	</div>
+
+	<p class="mt-10 text-sm text-neutral-500">
+		{members.length}
+		{members.length === 1 ? "name" : "names"} in {category.label}. <a
+			href="/docs/"
+			class="text-blue-700 hover:underline dark:text-blue-400">All categories</a
+		>.
+	</p>
+</DocsLayout>

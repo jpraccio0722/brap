@@ -29,7 +29,9 @@ mod imports;
 mod parser;
 mod scree_graph;
 mod lowerer;
-mod lang;
+// Public for `src/bin/dump-metadata.rs`, which writes the same tables the
+// editor reads out to the website's reference so the two cannot disagree.
+pub mod lang;
 mod library;
 mod project;
 mod samples;
