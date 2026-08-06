@@ -83,6 +83,8 @@ Completion reads the buffer with regexes, because the text being completed is ha
 - **What a `use kit::*` brought in.** Those names live in a file the frontend has never read, so the `module_symbols` command runs the real expander and reports the spellings *this file* would write (`kick`, `kit::kick`, `k::kick`). `src/scree/symbols.ts` asks only when the document's `use` lines change, and answers nothing when the file does not expand — which is most keystrokes, and is the right answer while it is half-typed.
 - **Which argument of a call the cursor is in.** `src/scree/callsite.ts` holds `callAt`, shared with signature help rather than written twice. It is what makes `play(pat, ` offer only playable `fn`s and `play(pat, kick, ` offer that instrument's lanes — both rules live in `lowerer/play.rs` and are otherwise invisible until the program is run.
 
+`src/scree/indent.ts` is the third thing the frontend cannot read off the buffer alone: which line breaks end a statement. It mirrors `cont_next` in `parser/lex.rs`, so a line opening with `.` or `>>` is indented one step from the line that began the statement. It applies through `indentOnInput` rather than on Enter — a break after `some()` ends a statement until the `.` is typed, and the `.` is the only moment the answer changes.
+
 Icons are imported as components via `vite-plugin-svgr` (`import Icon from "./icon.svg?react"`), so they take a `className` and inherit `currentColor`. Styling is Tailwind 4 via the Vite plugin.
 
 ## Conventions

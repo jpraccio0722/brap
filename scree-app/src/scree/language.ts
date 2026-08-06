@@ -8,6 +8,7 @@ import {
 import type { CompletionSource } from "@codemirror/autocomplete";
 import { Prec } from "@codemirror/state";
 import { Tag, tags as t } from "@lezer/highlight";
+import { INDENT_ON_INPUT, screeIndent } from "./indent";
 import type { BuiltinIndex, LanguageMetadata } from "./metadata";
 
 /**
@@ -178,6 +179,10 @@ function parser(meta: LanguageMetadata, index: BuiltinIndex): StreamParser<State
 
     languageData: {
       commentTokens: { line: "//" },
+      // Read by `indentOnInput` in `basicSetup`, and the only thing that
+      // triggers the continuation indent: see `indent.ts` for why it is typing
+      // the `.` rather than pressing Enter that decides a line is continued.
+      indentOnInput: INDENT_ON_INPUT,
     },
 
     // Only names that are NOT already resolvable are listed here.
@@ -248,6 +253,9 @@ export function screeLanguage(
   const language = StreamLanguage.define(parser(meta, index));
   return new LanguageSupport(language, [
     language.data.of({ autocomplete }),
+    // Attached to the language rather than the extension bundle so it applies
+    // where scree does, and stops where a future embedded language would.
+    screeIndent(),
     // The editor's `theme="dark"` ships its own highlight style, and the first
     // highlighter with a rule for a tag wins. Without raising precedence only
     // the tags that theme does not define (`rest`, `builtin`) would be ours,
