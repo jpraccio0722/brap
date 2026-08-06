@@ -1,0 +1,2272 @@
+{
+  "builtins": [
+    {
+      "name": "adsr",
+      "params": [
+        "gate",
+        "attack",
+        "decay",
+        "sustain",
+        "release"
+      ],
+      "arities": [
+        5
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Gated ADSR envelope. Rises while the gate is positive, releases when it returns to zero. Times are in seconds; sustain is a level in 0..=1."
+    },
+    {
+      "name": "afollow",
+      "params": [
+        "signal",
+        "attack",
+        "release"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Asymmetric parameter follower. Smooths rising segments over `attack` and falling ones over `release` (halfway response times, in seconds)."
+    },
+    {
+      "name": "allpass",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Allpass filter. Passes all frequencies but shifts their phase around the center frequency."
+    },
+    {
+      "name": "allpole",
+      "params": [
+        "audio",
+        "delay"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "First-order allpass filter with a configurable delay at DC, in samples (must be > 0)."
+    },
+    {
+      "name": "bandpass",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bandpass filter. Keeps frequencies near the center, attenuating either side."
+    },
+    {
+      "name": "bandrez",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Resonant two-pole bandpass filter."
+    },
+    {
+      "name": "bell",
+      "params": [
+        "audio",
+        "frequency",
+        "q",
+        "gain"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bell equalizer. Boosts or cuts a band around the center frequency by `gain` (an amplitude multiplier, not dB)."
+    },
+    {
+      "name": "biquad",
+      "params": [
+        "signal",
+        "a1",
+        "a2",
+        "b0",
+        "b1",
+        "b2"
+      ],
+      "arities": [
+        6
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Arbitrary biquad filter with coefficients in normalized form. All five coefficients must be constants."
+    },
+    {
+      "name": "brown",
+      "params": [],
+      "arities": [
+        0
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "nothing",
+      "returns": "signal",
+      "doc": "Brown noise: -6 dB per octave. Darker than pink."
+    },
+    {
+      "name": "butterpass",
+      "params": [
+        "audio",
+        "cutoff"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Second-order Butterworth lowpass. Maximally flat passband, no resonance control."
+    },
+    {
+      "name": "chorus",
+      "params": [
+        "audio",
+        "seed",
+        "separation",
+        "variation",
+        "mod_frequency"
+      ],
+      "arities": [
+        5
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Five-voice mono chorus, mixed with the dry signal. Stack two with different seeds for stereo. All parameters except the audio input are constants."
+    },
+    {
+      "name": "clip",
+      "params": [
+        "signal"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Hard-clip the signal to -1..=1."
+    },
+    {
+      "name": "clip_to",
+      "params": [
+        "signal",
+        "minimum",
+        "maximum"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Hard-clip the signal to `minimum`..=`maximum`. Both bounds are constants."
+    },
+    {
+      "name": "dcblock",
+      "params": [
+        "signal"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Remove DC offset, keeping the signal zero-centered. Cutoff is 10 Hz."
+    },
+    {
+      "name": "declick",
+      "params": [
+        "signal"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Fade the signal in over 10 ms from time zero, suppressing the click at the start of a graph."
+    },
+    {
+      "name": "delay",
+      "params": [
+        "signal",
+        "time"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Fixed delay of `time` seconds, rounded to the nearest sample. The time is a constant — use `tap` for a modulatable delay."
+    },
+    {
+      "name": "dsf_saw",
+      "params": [
+        "frequency",
+        "roughness"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Saw-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated."
+    },
+    {
+      "name": "env",
+      "params": [
+        "attack",
+        "decay",
+        "sustain",
+        "release",
+        "duration"
+      ],
+      "arities": [
+        5
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "number",
+      "returns": "signal",
+      "doc": "Time-based ADSR for one-shot voices. Attack, decay and sustain fill `duration`; the release starts where that ends and rings on for its own time past it, so the note is held for `duration` and the voice lasts `duration + release`. Pass the voice-bound `dur` as the duration — `legato` shortens the held part and leaves the release alone. All arguments are constants."
+    },
+    {
+      "name": "dsf_square",
+      "params": [
+        "frequency",
+        "roughness"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Square-like discrete summation formula oscillator. `roughness` in 0..=1 sets how much successive partials are attenuated."
+    },
+    {
+      "name": "fir3",
+      "params": [
+        "signal",
+        "gain"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Three-point symmetric FIR filter, specified by its `gain` (>= 0) at the Nyquist frequency. A gain below 1 gives a gentle lowpass."
+    },
+    {
+      "name": "follow",
+      "params": [
+        "signal",
+        "response_time"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Parameter follower. Smooths the signal with the given halfway response time, in seconds."
+    },
+    {
+      "name": "hammond",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Hammond organ wavetable oscillator. Emphasizes the first three partials."
+    },
+    {
+      "name": "highpass",
+      "params": [
+        "audio",
+        "cutoff",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Resonant highpass filter."
+    },
+    {
+      "name": "highpole",
+      "params": [
+        "audio",
+        "cutoff"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "First-order one-pole one-zero highpass. No resonance."
+    },
+    {
+      "name": "highshelf",
+      "params": [
+        "audio",
+        "frequency",
+        "q",
+        "gain"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "High shelf filter. Scales everything above the center frequency by `gain` (an amplitude multiplier)."
+    },
+    {
+      "name": "hold",
+      "params": [
+        "signal",
+        "frequency",
+        "variability"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Sample-and-hold. Samples the signal at `frequency` Hz; `variability` in 0..=1 jitters the sampling interval and is a constant."
+    },
+    {
+      "name": "impulse",
+      "params": [],
+      "arities": [
+        0
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "nothing",
+      "returns": "signal",
+      "doc": "A single one followed by silence. Useful for exciting `pluck` or measuring an impulse response."
+    },
+    {
+      "name": "limiter",
+      "params": [
+        "signal",
+        "attack",
+        "release"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Look-ahead limiter holding the signal to -1..=1. Look-ahead equals the attack time. Times are constants, in seconds."
+    },
+    {
+      "name": "line",
+      "params": [
+        "start",
+        "end",
+        "duration"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "number",
+      "returns": "signal",
+      "doc": "One straight segment: `start` to `end` over `duration` seconds, held at `end` after that. Measured from the onset — the note's in a voice, the eval's in the persistent graph — so it needs no note length and works in either: `sin(line(880, 220, 0.05))` is a kick's pitch drop. Unlike `perc` it ends at a level rather than at silence, so it holds a voice open past its note only when `end` is 0 and the shape really finishes. All three arguments are constants; for a sweep between signals, scale it — `start + (end - start) * line(0, 1, d)`."
+    },
+    {
+      "name": "lorenz",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Lorenz chaotic oscillator. The frequency input has only a slight effect on the output."
+    },
+    {
+      "name": "lowpass",
+      "params": [
+        "audio",
+        "cutoff",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Resonant lowpass filter."
+    },
+    {
+      "name": "lowpole",
+      "params": [
+        "audio",
+        "cutoff"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "First-order one-pole lowpass. No resonance."
+    },
+    {
+      "name": "lowrez",
+      "params": [
+        "audio",
+        "cutoff",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Resonant two-pole lowpass filter."
+    },
+    {
+      "name": "lowshelf",
+      "params": [
+        "audio",
+        "frequency",
+        "q",
+        "gain"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Low shelf filter. Scales everything below the center frequency by `gain` (an amplitude multiplier)."
+    },
+    {
+      "name": "mls",
+      "params": [],
+      "arities": [
+        0
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "nothing",
+      "returns": "signal",
+      "doc": "Maximum length sequence noise: a repeating pseudorandom run of -1 and 1."
+    },
+    {
+      "name": "mls_bits",
+      "params": [
+        "bits"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "number",
+      "returns": "signal",
+      "doc": "Maximum length sequence noise from an n-bit sequence (1..=31). More bits means a longer period before it repeats. Constant."
+    },
+    {
+      "name": "moog",
+      "params": [
+        "signal",
+        "cutoff",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Moog-style resonant lowpass ladder filter."
+    },
+    {
+      "name": "morph",
+      "params": [
+        "signal",
+        "frequency",
+        "q",
+        "morph"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Filter that morphs continuously between modes: `morph` runs -1 (lowpass) to 0 (peak) to 1 (highpass)."
+    },
+    {
+      "name": "noise",
+      "params": [],
+      "arities": [
+        0
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "nothing",
+      "returns": "signal",
+      "doc": "White noise."
+    },
+    {
+      "name": "notch",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Notch filter. Removes a narrow band around the center frequency."
+    },
+    {
+      "name": "organ",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Organ wavetable oscillator. Emphasizes octave partials."
+    },
+    {
+      "name": "peak",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Peaking filter."
+    },
+    {
+      "name": "perc",
+      "params": [
+        "attack",
+        "release"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "number",
+      "returns": "signal",
+      "doc": "Self-contained percussive envelope: rise, fall, silence. Needs no note length, so it works in a voice or the persistent graph — and in a voice the shape is measured from the onset and always finishes, so a drum longer than the step it sits on rings on into the next rather than being cut off. Both times are constants."
+    },
+    {
+      "name": "pink",
+      "params": [],
+      "arities": [
+        0
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "nothing",
+      "returns": "signal",
+      "doc": "Pink noise: -3 dB per octave."
+    },
+    {
+      "name": "pinkpass",
+      "params": [
+        "signal"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Pinking filter: -3 dB per octave. Turns white noise into pink."
+    },
+    {
+      "name": "pluck",
+      "params": [
+        "excitation",
+        "frequency",
+        "gain_per_second",
+        "damping"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Karplus-Strong plucked string. Feed it a burst — `impulse()` or a short noise envelope — as the excitation. Frequency, gain and damping (0..=1) are constants."
+    },
+    {
+      "name": "poly_pulse",
+      "params": [
+        "frequency",
+        "width"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "PolyBLEP pulse wave. Fast and fairly bandlimited; `width` in 0..=1 is the duty cycle."
+    },
+    {
+      "name": "poly_saw",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "PolyBLEP saw wave. Fast and fairly bandlimited."
+    },
+    {
+      "name": "poly_square",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "PolyBLEP square wave. Fast and fairly bandlimited."
+    },
+    {
+      "name": "pulse",
+      "params": [
+        "frequency",
+        "width"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bandlimited pulse wave oscillator. `width` in 0..=1 is the duty cycle."
+    },
+    {
+      "name": "ramp",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of the cycle, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end."
+    },
+    {
+      "name": "resonator",
+      "params": [
+        "audio",
+        "frequency",
+        "q"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Constant-gain bandpass resonator."
+    },
+    {
+      "name": "reverb",
+      "params": [
+        "audio",
+        "room_size",
+        "time",
+        "damping"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Reverb (32-channel FDN). `room_size` is in meters (10 is an average room), `time` is the decay to -60 dB in seconds, `damping` in 0..=1 rolls off the highs. Wet only: `x + reverb(x, 10, 3, 0.5) * 0.2`. All parameters except the audio input are constants."
+    },
+    {
+      "name": "reverb2",
+      "params": [
+        "audio",
+        "room_size",
+        "time",
+        "diffusion",
+        "modulation",
+        "damping_cutoff"
+      ],
+      "arities": [
+        6
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Hybrid FDN reverb — richer and more expensive than `reverb`. `room_size` is in meters and clamps to 10..=30, `diffusion` in 0..=1 thickens the tail, `modulation` around 1 adds movement (higher goes audibly Doppler), and `damping_cutoff` is the lowpass applied to each loop pass, in hertz. Wet only. All parameters except the audio input are constants."
+    },
+    {
+      "name": "reverb3",
+      "params": [
+        "audio",
+        "time",
+        "diffusion",
+        "damping_cutoff"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Allpass-loop reverb, with no room size — just `time` to -60 dB, `diffusion` in 0..=1, and a `damping_cutoff` in hertz applied to each loop pass. Wet only. All parameters except the audio input are constants."
+    },
+    {
+      "name": "reverb4",
+      "params": [
+        "audio",
+        "room_size",
+        "time"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Reverb with a slow fade-in, for swells rather than rooms. `room_size` is in meters and is treated as at least 15; below that the delay times stop sounding like a space. Wet only. Both `room_size` and `time` are constants."
+    },
+    {
+      "name": "rossler",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Rossler chaotic oscillator, with peaks at multiples of the frequency input."
+    },
+    {
+      "name": "saw",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bandlimited saw wavetable oscillator."
+    },
+    {
+      "name": "sin",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Sine oscillator."
+    },
+    {
+      "name": "soft_saw",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Soft saw wavetable oscillator. Contains all partials but falls off like a triangle wave."
+    },
+    {
+      "name": "square",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bandlimited square wavetable oscillator."
+    },
+    {
+      "name": "tap",
+      "params": [
+        "signal",
+        "delay",
+        "min_delay",
+        "max_delay"
+      ],
+      "arities": [
+        4
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Tapped delay line with cubic interpolation. Unlike `delay`, the delay time is a signal, so it can be modulated — it must stay within the constant `min_delay`..=`max_delay` bounds, in seconds."
+    },
+    {
+      "name": "tick",
+      "params": [
+        "signal"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Single-sample delay. The building block for feedback and comb filters."
+    },
+    {
+      "name": "triangle",
+      "params": [
+        "frequency"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "ugen",
+      "receives": "signal",
+      "returns": "signal",
+      "doc": "Bandlimited triangle wavetable oscillator."
+    },
+    {
+      "name": "len",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "number",
+      "doc": "The number of elements in the list."
+    },
+    {
+      "name": "zip",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": true,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Pair elements positionally: `zip([1, 2], [3, 4])` is `[[1, 3], [2, 4]]`. Every argument must be a list, and all must be the same length."
+    },
+    {
+      "name": "stack",
+      "params": [
+        "pattern"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": true,
+      "category": "list",
+      "receives": "pattern",
+      "returns": "pattern",
+      "doc": "Patterns that sound at once instead of in turn: `stack([c4;2, e4;2], [g4;4])` is a two-note line under a held g. Each argument keeps its own division, so the layers need not agree on a rhythm — a three against a four is written by stacking them. This is how a chord is written, and how a drawn part with overlapping notes is split into voices. Lanes read a stack as all its values in order, layer by layer."
+    },
+    {
+      "name": "rev",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "The list, back to front."
+    },
+    {
+      "name": "palindrome",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "The list followed by its mirror: `[a, b, c]` becomes `[a, b, c, c, b, a]`."
+    },
+    {
+      "name": "rotl",
+      "params": [
+        "list",
+        "amount"
+      ],
+      "arities": [
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Rotate left, wrapping. `amount` defaults to 1; a negative amount rotates right."
+    },
+    {
+      "name": "rotr",
+      "params": [
+        "list",
+        "amount"
+      ],
+      "arities": [
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Rotate right, wrapping. `amount` defaults to 1; a negative amount rotates left."
+    },
+    {
+      "name": "push",
+      "params": [
+        "list",
+        "value"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "A new list with `value` appended. Lists are immutable — the original is unchanged."
+    },
+    {
+      "name": "pop",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "A new list without its last element. Index the list to read that element."
+    },
+    {
+      "name": "sort",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "The list sorted ascending. Every element must be a compile-time number."
+    },
+    {
+      "name": "sum",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "any",
+      "doc": "Add every element together. Folds numbers at compile time and emits mixing nodes for signals, so a list of oscillators sums into the graph."
+    },
+    {
+      "name": "split",
+      "params": [
+        "list",
+        "size"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Break the list into chunks of `size`. A short final chunk is kept."
+    },
+    {
+      "name": "choice",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "any",
+      "doc": "One element picked at random. Re-rolled on every eval."
+    },
+    {
+      "name": "wchoice",
+      "params": [
+        "values",
+        "weights"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "any",
+      "doc": "One element picked at random, weighted. The two lists run in parallel; weights must be finite and >= 0."
+    },
+    {
+      "name": "scramble",
+      "params": [
+        "list"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "The list shuffled. Re-rolled on every eval."
+    },
+    {
+      "name": "map",
+      "params": [
+        "list",
+        "transform"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Apply a function to every element: `riff.map(up)`. The transform is an ordinary user `fn` of one argument, and may answer with anything — mapping to oscillators is the only way to hold several voices apart, since a `for` over audio sums instead of collecting."
+    },
+    {
+      "name": "dot",
+      "params": [
+        "value",
+        "dots"
+      ],
+      "arities": [
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "duration",
+      "returns": "duration",
+      "doc": "Dot a written note value: `q.dot` is a dotted quarter, a quarter and an eighth. `dots` defaults to 1; `q.dot(2)` is the doubly-dotted quarter, which is a quarter and an eighth and a sixteenth. Written as a count rather than by repeating `.dot`, because each dot adds half of the note itself rather than half of what the last one left."
+    },
+    {
+      "name": "filter",
+      "params": [
+        "list",
+        "predicate"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "list",
+      "receives": "list",
+      "returns": "list",
+      "doc": "Keep the elements the predicate answers non-zero for. The predicate is an ordinary user `fn` of one argument."
+    },
+    {
+      "name": "m2h",
+      "params": [
+        "note"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "MIDI note number to frequency in hertz: `69.m2h` is 440. Equal temperament, A4 = 440 Hz."
+    },
+    {
+      "name": "h2m",
+      "params": [
+        "hz"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Frequency in hertz to MIDI note number, the inverse of `m2h`: `440.h2m` is 69. The result may be fractional."
+    },
+    {
+      "name": "db",
+      "params": [
+        "decibels"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Decibels to a linear amplitude: `0.db` is 1, `-6.db` is about 0.5. Use it to write gains the way you hear them."
+    },
+    {
+      "name": "amp",
+      "params": [
+        "amplitude"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Linear amplitude to decibels, the inverse of `db`: `1.amp` is 0. The amplitude must be above zero."
+    },
+    {
+      "name": "cents",
+      "params": [
+        "hz",
+        "cents"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Detune a frequency by cents, 1/100 of a semitone: `440.cents(-14)` flattens A4 slightly."
+    },
+    {
+      "name": "bpm",
+      "params": [
+        "beats"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Beats per minute to cycles per second, taking one cycle as four beats: `120.bpm` is 0.5, which is the default tempo."
+    },
+    {
+      "name": "oct",
+      "params": [
+        "note",
+        "octaves"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Transpose a MIDI note by whole octaves: `60.oct(-1)` is 48."
+    },
+    {
+      "name": "semi",
+      "params": [
+        "note",
+        "semitones"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Transpose a MIDI note by semitones: `60.semi(7)` is 67."
+    },
+    {
+      "name": "scale",
+      "params": [
+        "note",
+        "scale"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Snap a MIDI note to the nearest tone of a scale, given as semitone offsets within an octave: `61.scale([0, 2, 4, 5, 7, 9, 11])` is 60. Ties snap down."
+    },
+    {
+      "name": "clamp",
+      "params": [
+        "x",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Constrain a number to `lo..=hi`."
+    },
+    {
+      "name": "norm",
+      "params": [
+        "x",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Map 0..1 onto `lo..hi`. Values outside 0..1 extrapolate; `clamp` first if you do not want that."
+    },
+    {
+      "name": "wrap",
+      "params": [
+        "x",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Fold a number back into `lo..hi`, wrapping around rather than clamping. Useful for modular pitch."
+    },
+    {
+      "name": "round",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Nearest whole number, halves away from zero."
+    },
+    {
+      "name": "floor",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Largest whole number at or below `x`."
+    },
+    {
+      "name": "ceil",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Smallest whole number at or above `x`."
+    },
+    {
+      "name": "abs",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Magnitude, dropping the sign."
+    },
+    {
+      "name": "pow",
+      "params": [
+        "x",
+        "exponent"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "`x` raised to a power: `2.pow(10)` is 1024. Good for exponential curve shaping."
+    },
+    {
+      "name": "sqrt",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Square root. `x` must not be negative."
+    },
+    {
+      "name": "log2",
+      "params": [
+        "x"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "math",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Base-2 logarithm. `x` must be above zero."
+    },
+    {
+      "name": "rand",
+      "params": [
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        0,
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A uniform number. `rand()` draws from 0..1; `rand(lo, hi)` — or `60.rand(72)` — draws from `lo..hi`, with `hi` excluded."
+    },
+    {
+      "name": "randi",
+      "params": [
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A uniform whole number in `lo..hi`, with `hi` excluded: `randi(60, 72)` is an octave of notes that never repeats the root. Both bounds must be whole."
+    },
+    {
+      "name": "coin",
+      "params": [
+        "probability"
+      ],
+      "arities": [
+        0,
+        1
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "1 or 0, at odds you choose. `coin()` is even; `coin(0.25)` answers 1 one time in four. Multiply by it to drop a note, or add it to a velocity."
+    },
+    {
+      "name": "seed",
+      "params": [
+        "seed"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Fix every draw made after it, and answer with the seed. `seed(42)` at the top of a program makes its lists, lanes and patterns come out the same on every evaluation — which is how a happy accident gets kept. A voice is lowered per note and does not see a top-level seed, so a `seed` inside an instrument pins that instrument instead, identically on every note."
+    },
+    {
+      "name": "gauss",
+      "params": [
+        "mean",
+        "deviation"
+      ],
+      "arities": [
+        0,
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A normally distributed number: clustered around `mean`, two thirds of it within one `deviation`. Both default to the standard 0 and 1. Unbounded — `clamp` it if a stray value would hurt."
+    },
+    {
+      "name": "humanize",
+      "params": [
+        "x",
+        "amount"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "Nudge a number off its grid: `x` plus a normal draw of deviation `amount`, so most nudges are small and a few are not. `0.5.humanize(0.05)` is a velocity that no longer sounds typed in."
+    },
+    {
+      "name": "expo",
+      "params": [
+        "mean"
+      ],
+      "arities": [
+        0,
+        1
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "An exponentially distributed number above zero with the given `mean` (default 1). Short values are common and long ones rare — the shape of a wait between events."
+    },
+    {
+      "name": "tri",
+      "params": [
+        "lo",
+        "hi",
+        "mode"
+      ],
+      "arities": [
+        2,
+        3
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A triangular draw over `lo..hi`, peaking at `mode` — the midpoint if you leave it out. Bounded like `rand` but with a centre, so it favours a value without ever leaving the range."
+    },
+    {
+      "name": "cauchy",
+      "params": [
+        "median",
+        "spread"
+      ],
+      "arities": [
+        0,
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A heavy-tailed draw around `median` (default 0) with the given `spread` (default 1). Mostly close in, but far more prone to a wild outlier than `gauss` — which is the point when you want the occasional lurch."
+    },
+    {
+      "name": "pareto",
+      "params": [
+        "scale",
+        "shape"
+      ],
+      "arities": [
+        0,
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A power-law draw at or above `scale` (default 1). A smaller `shape` (default 1) makes big values likelier. Everything is near the floor, with rare excursions far above it."
+    },
+    {
+      "name": "poisson",
+      "params": [
+        "mean"
+      ],
+      "arities": [
+        0,
+        1
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "number",
+      "doc": "A whole count averaging `mean` (default 1) — how many things happened, when each was independent. Good for deciding how many hits land in a bar."
+    },
+    {
+      "name": "rands",
+      "params": [
+        "count",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        1,
+        3
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "list",
+      "doc": "A list of `count` uniform numbers, from 0..1 or from `lo..hi`. A pattern in one line: `rands(8, 0.2, 0.9)` is eight velocities."
+    },
+    {
+      "name": "randis",
+      "params": [
+        "count",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "list",
+      "doc": "A list of `count` whole numbers in `lo..hi`, `hi` excluded: `randis(8, 60, 72) >> play(lead)` is an eight-note riff."
+    },
+    {
+      "name": "walk",
+      "params": [
+        "count",
+        "start",
+        "step"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "list",
+      "doc": "A random walk: `count` numbers beginning at `start`, each drifting from the one before by up to `step` either way. Neighbours stay close, so it moves rather than jumps — what `rands` is not. Good for a cutoff or a pan."
+    },
+    {
+      "name": "walki",
+      "params": [
+        "count",
+        "start",
+        "step"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "list",
+      "doc": "`walk` in whole steps: each move is a whole number from `-step` to `step`, so the result stays on the semitone grid. `walki(16, 60, 2)` wanders a melody around middle C. `step` must be whole."
+    },
+    {
+      "name": "choices",
+      "params": [
+        "list",
+        "count"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "list",
+      "returns": "list",
+      "doc": "`count` elements drawn without replacement, in a random order — `choice` several times over may repeat itself, and this cannot. Asking for the whole list is `scramble`; asking for more than it holds is an error."
+    },
+    {
+      "name": "randscale",
+      "params": [
+        "count",
+        "scale",
+        "lo",
+        "hi"
+      ],
+      "arities": [
+        2,
+        4
+      ],
+      "variadic": false,
+      "category": "random",
+      "receives": "number",
+      "returns": "list",
+      "doc": "`count` notes drawn evenly from the tones of a scale, given as semitone offsets within an octave, between MIDI `lo` and `hi` (60..72 by default). Unlike snapping a uniform draw with `scale`, every degree is equally likely and nothing lands outside the range: `randscale(8, [0, 3, 5, 7, 10], 48, 72)` is a pentatonic riff over two octaves."
+    },
+    {
+      "name": "then",
+      "params": [
+        "play",
+        "section"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must be `play_once` or `playn` — plain `play` never finishes. `section` is either a no-parameter `fn` named here or a play written out — `.then(playn(riff, lead, 2))` needs no name — and either way its own `play` calls start where this one stops. A play bound to a `let` is not a section: it already sounded where it was written, so name it as a `fn` instead. Lowered at eval time, not called by the audio thread."
+    },
+    {
+      "name": "then_after",
+      "params": [
+        "play",
+        "cycles",
+        "section"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "`then`, with `cycles` of silence in between: `playn(verse, lead, 4).then_after(1, chorus)` leaves a bar's rest before the chorus. The gap cannot be negative — `overlap` is how a section starts early."
+    },
+    {
+      "name": "overlap",
+      "params": [
+        "play",
+        "cycles",
+        "section"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "`then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join: `playn(verse, lead, 8).overlap(2, chorus)`. Never earlier than the receiver's own start. The chain carries on from whichever of the two ends later."
+    },
+    {
+      "name": "with",
+      "params": [
+        "play",
+        "section"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Run a section *alongside* this one, from where it began: `playn(verse, lead, 4).with(drums).then(chorus)`. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. The pair finishes when the later of them does."
+    },
+    {
+      "name": "at",
+      "params": [
+        "cycle",
+        "section"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "number",
+      "returns": "play",
+      "doc": "Place a section at an absolute cycle, counted from the origin: `at(8, chorus)`. The escape hatch from chaining — an arrangement whose shape you already know is often clearer written down than derived one `.then` at a time."
+    },
+    {
+      "name": "seq",
+      "params": [
+        "section"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": true,
+      "category": "special",
+      "receives": "section",
+      "returns": "play",
+      "doc": "Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. Each is a no-parameter `fn` or a play written out, and each must finish for the next to follow."
+    },
+    {
+      "name": "then_n",
+      "params": [
+        "play",
+        "section",
+        "times"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Run a section `times` times, back to back: `play_once(intro, lead).then_n(verse, 4)`. Lowered afresh each pass rather than written once and repeated, so a `rand` inside the section is a different number every time round — the same rule a voice already follows, and it holds whether the section is a `fn` named here or a play written out."
+    },
+    {
+      "name": "loop",
+      "params": [
+        "play",
+        "times"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Everything chained so far, `times` times through: `playn(groove, kit, 3).then_fill(roll).loop(4)` is four bars of groove-and-fill. The counterpart to `then_n` — that one names a `fn` and runs it *after* this section, this one takes no section at all because the section it repeats is the chain it is written on. The whole chain has to finish, so bound an endless part with `.take(n)` or `.stop()` first. The passes are copies, so a `rand` inside the chain was already spent and every pass is the same music; `then_n` is the one that draws afresh."
+    },
+    {
+      "name": "then_each",
+      "params": [
+        "play",
+        "list",
+        "body"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "One pass of the section per element of the list, in sequence, with the element passed in: `play_once(intro, lead).then_each([1, 2, 4], faster)` calls `faster(1)`, then `faster(2)`, then `faster(4)`. `body` takes exactly one parameter — the element. Arrangement by list — every list function in the language already builds the shape of a piece, and this is what spends one. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once."
+    },
+    {
+      "name": "then_fill",
+      "params": [
+        "play",
+        "pattern",
+        "rate"
+      ],
+      "arities": [
+        2,
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "One pass of a pattern on this section's *own* instrument: `playn(groove, drums, 4).then_fill([1, 1, 1, 1])`. Unlike `then` there is no `fn` and no second `play` — a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. The left side has to be a single `play`: a group of them has no one instrument to be a fill for. `rate` defaults to 1, and here is a plain number — a fill is one pass, with no room to speed up over."
+    },
+    {
+      "name": "quantize",
+      "params": [
+        "play",
+        "grid"
+      ],
+      "arities": [
+        1,
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Round where the chain has reached up to a multiple of `grid` cycles, without touching what is already playing: `playn(pat, inst, 3, 2).quantize().then(chorus)`. `grid` defaults to 1. The cure for a section whose length is not a whole number — `rate` divides into the count, so `playn(pat, inst, 3, 2)` is 1.5 cycles long and every `.then` after it would otherwise be permanently off the downbeat."
+    },
+    {
+      "name": "take",
+      "params": [
+        "play",
+        "cycles"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "This section, cut to `cycles`: `play(riff, lead).take(8).then(chorus)`. What gives a plain `play` an end — `playn` only bounds a single play, not a `play_all` group or a whole nested section. A part that already stops sooner is left alone, since a cut is a ceiling and not a length."
+    },
+    {
+      "name": "stop",
+      "params": [
+        "play"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Cut everything still open in this section at the moment its last *counted* part finishes: `play_all(play(groove, drums), playn(riff, lead, 8)).stop()` lets the eight-cycle riff decide when the endless drums give up. One pattern as the trigger to stop the rest. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at."
+    },
+    {
+      "name": "wthen",
+      "params": [
+        "play",
+        "sections",
+        "weights"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Choose between sections, afresh each time round: `playn(intro, lead, 2).wthen([verse, chorus], [0.7, 0.3])`. Weights are relative and need not sum to 1. Unlike `choice`, which draws once while the program is lowered, this is decided by the scheduler as the music reaches it — so the block repeats forever and deals a new hand every time. Every arm must finish, and they all come back to the same place; the block itself never finishes, so bound it with `.take(n)` if something should follow. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once."
+    },
+    {
+      "name": "rthen",
+      "params": [
+        "play",
+        "sections"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "`wthen` with every section equally likely: `playn(intro, lead, 2).rthen([verse, chorus, bridge])`. Rerolls each time round and never finishes, exactly as `wthen` does. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once."
+    },
+    {
+      "name": "maybe",
+      "params": [
+        "play",
+        "chance",
+        "section"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Play a section with probability `chance` (0 to 1), decided afresh each time round: `playn(groove, drums, 4).maybe(0.25, fill)`. A `wthen` whose other arm is silence — it repeats and rerolls for the same reason, since a coin flipped once is just an `if`. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once."
+    },
+    {
+      "name": "shuffle_then",
+      "params": [
+        "play",
+        "sections"
+      ],
+      "arities": [
+        2
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Every section once each, in an order drawn now: `play_once(intro, lead).shuffle_then([verse, chorus, bridge])`. The counterpart to `rthen` rather than a variant of it — a weighted choice may pass a section over for a long time, and this cannot. It settles at eval time like `scramble`, so it has a length and a `.then` may follow it. Unlike `then`, the sections here must be `fn`s named rather than plays written out: this runs one afresh rather than placing it once."
+    },
+    {
+      "name": "play",
+      "params": [
+        "pattern",
+        "instrument",
+        "rate"
+      ],
+      "arities": [
+        2,
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "pattern",
+      "returns": "play",
+      "doc": "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the sequence is as long as its values add up to rather than one cycle: `[c4;q, e4, g4]` is a 3/4 bar, and a value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right)."
+    },
+    {
+      "name": "play_once",
+      "params": [
+        "pattern",
+        "instrument",
+        "rate"
+      ],
+      "arities": [
+        2,
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "pattern",
+      "returns": "play",
+      "doc": "`play`, stopping after one pass of the pattern: `[60, 64, 67] >> play_once(stab)`. Started while something is already playing it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again."
+    },
+    {
+      "name": "playn",
+      "params": [
+        "pattern",
+        "instrument",
+        "times",
+        "rate"
+      ],
+      "arities": [
+        3,
+        4
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "pattern",
+      "returns": "play",
+      "doc": "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two cycles. Lanes work as they do on `play`."
+    },
+    {
+      "name": "play_all",
+      "params": [
+        "play"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": true,
+      "category": "special",
+      "receives": "play",
+      "returns": "play",
+      "doc": "Treat several plays that run at once as one section: `play_all(playn(verse, lead, 4), playn(bassline, bass, 4)).then(chorus)`. Every argument must be a `play_once`, `playn`, `play`, or another `play_all` — they all start together, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow."
+    },
+    {
+      "name": "accel",
+      "params": [
+        "from",
+        "to",
+        "cycles"
+      ],
+      "arities": [
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "number",
+      "returns": "rate",
+      "doc": "A rate that moves: `from` to `to` over `cycles` cycles, holding at `to` after that. Written where a `play` takes a number — `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four cycles — and it is a straight line in rate, so the pattern covers the area under it rather than the rate at either end. Measured from the section's own first note, and started afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero: at zero the pattern would stop rather than slow, and a bounded section would never finish."
+    },
+    {
+      "name": "dur",
+      "params": [],
+      "arities": [],
+      "variadic": false,
+      "category": "special",
+      "receives": "nothing",
+      "returns": "number",
+      "doc": "The current note's length in seconds. Bound only inside a voice — pass it to `env`."
+    },
+    {
+      "name": "qvs",
+      "params": [],
+      "arities": [],
+      "variadic": false,
+      "category": "special",
+      "receives": "nothing",
+      "returns": "number",
+      "doc": "The quarter note in seconds: 0.5 at the default 120 bpm. Anything that takes a length of time can be written in beats with it — `perc(0, qvs / 2)` decays over an eighth, `delay(qvs * 0.75)` is a dotted-eighth delay. Inside a voice it is the beat of the clock that note is played on, so a `play` at rate 2 gives its instrument a beat half as long; in the persistent graph it is the transport's own, fixed at the eval that wrote it."
+    },
+    {
+      "name": "qvh",
+      "params": [],
+      "arities": [],
+      "variadic": false,
+      "category": "special",
+      "receives": "nothing",
+      "returns": "number",
+      "doc": "The quarter note in hertz — `1 / qvs`, which is 2 at the default 120 bpm. What an oscillator wants: `sin(qvh * 2)` sweeps on the eighth, `sin(qvh / 2)` on the half. Multiplying is what makes it faster here, because this is a rate and not a length. Rate and tempo reach it exactly as they reach `qvs`."
+    },
+    {
+      "name": "load",
+      "params": [
+        "path"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "text",
+      "returns": "buffer",
+      "doc": "Read an audio file into a buffer: `let amen = load(\"breaks/amen.wav\")`. The path is relative to the file it is written in, the same way a `use` path is, and must be written out rather than computed — every file is decoded once, before the program runs, so no note ever waits on a disk. Any format symphonia reads: wav, mp3, flac, ogg. Nothing comes out of a buffer until `sample` reads it."
+    },
+    {
+      "name": "sample",
+      "params": [
+        "buffer",
+        "position",
+        "channel"
+      ],
+      "arities": [
+        2,
+        3
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "buffer",
+      "returns": "signal",
+      "doc": "Read a buffer at a position: 0 is the start, 1 is the end, and anything outside that is silence. `position` is a signal, which is where speed, direction and chopping all come from — `sample(b, ramp(1 / b.secs))` plays it forwards, `1 - ramp(...)` backwards, `ramp(...) * 0.25` reads the first quarter. Cubic interpolation, so it holds up away from its own speed. `channel` defaults to 0 and wraps if the buffer has fewer."
+    },
+    {
+      "name": "secs",
+      "params": [
+        "buffer"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "buffer",
+      "returns": "number",
+      "doc": "How long a buffer is, in seconds. A compile-time number, so it divides into a `ramp` frequency: `ramp(1 / amen.secs)` is a phasor that reads the whole buffer once at its own speed."
+    },
+    {
+      "name": "channels",
+      "params": [
+        "buffer"
+      ],
+      "arities": [
+        1
+      ],
+      "variadic": false,
+      "category": "special",
+      "receives": "buffer",
+      "returns": "number",
+      "doc": "How many channels a buffer has — 1 for mono, 2 for a stereo file. Useful for deciding whether a second `sample` on channel 1 would say anything different."
+    }
+  ],
+  "keywords": [
+    "fn",
+    "let",
+    "if",
+    "else",
+    "for",
+    "in",
+    "use",
+    "as"
+  ],
+  "durations": [
+    {
+      "name": "w",
+      "beats": 4.0,
+      "marksGroup": false,
+      "doc": "Whole note — four beats, which is one cycle."
+    },
+    {
+      "name": "h",
+      "beats": 2.0,
+      "marksGroup": false,
+      "doc": "Half note — two beats."
+    },
+    {
+      "name": "q",
+      "beats": 1.0,
+      "marksGroup": false,
+      "doc": "Quarter note — one beat."
+    },
+    {
+      "name": "e",
+      "beats": 0.5,
+      "marksGroup": false,
+      "doc": "Eighth note — half a beat."
+    },
+    {
+      "name": "s",
+      "beats": 0.25,
+      "marksGroup": false,
+      "doc": "Sixteenth note — a quarter of a beat."
+    },
+    {
+      "name": "t",
+      "beats": null,
+      "marksGroup": true,
+      "doc": "Tuplet — play this group in the next lower power of two. Three quarters in the time of two, five eighths in the time of four. Its contents have to fill the division, and cannot already come to a plain duration."
+    }
+  ]
+}
