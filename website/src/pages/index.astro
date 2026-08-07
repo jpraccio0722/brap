@@ -6,7 +6,7 @@ import IslandCheck from "../components/IslandCheck.tsx";
 <Layout title="Scree">
 	<main class="mx-auto flex min-h-screen max-w-2xl flex-col justify-center gap-8 px-6 py-16">
 		<div class="space-y-3">
-			<h1 class="text-4xl font-semibold tracking-tight">Scree</h1>
+			<h1 class="text-6xl font-semibold tracking-tight">Scree</h1>
 			<p class="text-lg text-neutral-600 dark:text-neutral-400">
 				A rust-like live coding and synthesis language built on top of{" "}
 				<a
@@ -15,15 +15,26 @@ import IslandCheck from "../components/IslandCheck.tsx";
 				>.
 			</p>
 		</div>
-
-		<p>
-			<a
-				href="/docs/"
-				class="inline-flex items-center gap-1.5 text-sm font-medium text-blue-700 hover:underline dark:text-blue-400"
-			>
-				Function reference
-				<span aria-hidden="true">→</span>
-			</a>
-		</p>
+		
+		<div class="flex flex-col gap-1.5">
+			<div>
+				<a
+					href="/tutorial/getting-started/"
+					class="inline-flex items-center gap-1.5 text-md font-medium text-blue-700 hover:underline dark:text-blue-400"
+				>Tutorial</a>
+			</div>
+			<div>
+				<a
+					href="/docs/"
+					class="inline-flex items-center gap-1.5 text-md font-medium text-blue-700 hover:underline dark:text-blue-400"
+				>Function reference</a>
+			</div>
+			<div>
+				<a
+					href="https://github.com/jpraccio0722/scree"
+					class="inline-flex items-center gap-1.5 text-md font-medium text-blue-700 hover:underline dark:text-blue-400"
+				>Github</a>
+			</div>	
+		</div>
 	</main>
 </Layout>
