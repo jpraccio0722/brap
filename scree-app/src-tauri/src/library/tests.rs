@@ -602,7 +602,7 @@ fn a_library_can_be_packed_installed_and_played() {
         crate::scheduler::voice::Instruments::from_program(&items).with_samples(samples);
     crate::scheduler::voice::build_voice(
         &instruments, "kit::hit", 50.0, &[], 0.5,
-        crate::lowerer::lower::DEFAULT_BEAT_SECS,
+        crate::lowerer::lower::DEFAULT_BEAT_SECS, Default::default(),
     )
         .unwrap_or_else(|e| panic!("should build a voice: {e}"));
 

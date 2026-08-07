@@ -31,7 +31,7 @@ import {
   type GraphicalPattern,
   type WirePattern,
 } from "./patterns";
-import { Transport, type TransportState } from "./component/Transport";
+import { Transport, type Meter, type TransportState } from "./component/Transport";
 
 
 /** A project's drawn patterns, as `read_patterns` returns them. */
@@ -50,6 +50,8 @@ interface ProjectSettings {
   name: string;
   /** Beats per minute. */
   bpm: number;
+  /** The time signature, which is how long a bar is. */
+  meter: Meter;
   /** Linear amplitude, 0 to 1. */
   volume: number;
 }
@@ -276,6 +278,11 @@ function App() {
   // where its file says, and moving either writes that file. Null until
   // something has said where they sit — the engine on launch, or a project.
   const [transport, setTransport] = useState<TransportState | null>(null);
+  // How many beats the drawn-pattern grids should rule a bar into. Four until
+  // the transport has been read, which is what every project is in until its
+  // file says otherwise — and a guide drawn a moment early in the wrong meter
+  // is worse than one that is right from the first paint.
+  const beatsPerBar = transport?.meter.top ?? 4;
   // What the project is called, which is the panel's to show and to edit. Null
   // while no project is open, and again after one that could not be read.
   const [projectName, setProjectName] = useState<string | null>(null);
@@ -576,7 +583,11 @@ function App() {
         if (projectRootRef.current !== root) return; // the project moved on
         setProjectPath(file.path);
         setProjectName(file.project.name);
-        setTransport({ bpm: file.project.bpm, volume: file.project.volume });
+        setTransport({
+          bpm: file.project.bpm,
+          meter: file.project.meter,
+          volume: file.project.volume,
+        });
         projectOnDisk.current = JSON.stringify(file.project);
         projectFrom.current = root;
       } catch (e) {
@@ -610,6 +621,7 @@ function App() {
     const settings: ProjectSettings = {
       name: projectName,
       bpm: transport.bpm,
+      meter: transport.meter,
       volume: transport.volume,
     };
     const json = JSON.stringify(settings);
@@ -1066,7 +1078,7 @@ function App() {
    *
    * It has already dropped the bindings and cut what it had pushed — a voice it
    * cannot build is one it cannot build for any later step either, so carrying
-   * on would be the same failure every cycle with nothing to hear for it. This
+   * on would be the same failure every bar with nothing to hear for it. This
    * side finishes the job: `stop_audio` takes down the persistent graph too and
    * puts the clock back, so what is left is a real stop rather than a scheduler
    * sitting out a performance the rest of the engine thinks is still going.
@@ -1435,6 +1447,7 @@ function App() {
                 <PatternComposer
                   pattern={pattern}
                   error={nameError(pattern, patterns)}
+                  beatsPerBar={beatsPerBar}
                   onChange={(next) =>
                     setPatterns(patterns.map((p) => (p.id === next.id ? next : p)))
                   }
@@ -1493,6 +1506,7 @@ function App() {
               onOpenFile={(path) => void openPatternsFile(path)}
               patternsPath={patternsPath}
               hasProject={projectRoot !== null}
+              beatsPerBar={beatsPerBar}
             />
           }
           docs={<DocsPanel builtins={metadata.builtins} focus={docsFocus} />}

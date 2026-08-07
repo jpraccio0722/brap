@@ -12,7 +12,7 @@ use crate::imports::Workspace;
 use crate::pattern::graphical::{self, GraphicalPattern};
 use crate::pattern::patterns::Patterns;
 use crate::project::Project;
-use crate::scheduler::clock::{bpm_from_cps, cps_from_bpm};
+use crate::scheduler::clock::Meter;
 use crate::scheduler::scheduler::SchedulerState;
 use crate::scheduler::voice::Instruments;
 
@@ -97,17 +97,20 @@ fn run_code(
     let loaded = samples::Samples::load(&ast, workspace.dir().as_deref(), &samples)
         .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
 
-    // The tempo the graph is written against. Read here rather than passed
-    // along with the origin below, because lowering needs it and the origin is
-    // settled after — and read under its own short lock, so an eval never holds
-    // the engine across a parse or a decode.
-    let beat_secs = engine
-        .lock()
-        .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?
-        .clock
-        .beat_secs();
+    // The tempo and signature the graph is written against. Read here rather
+    // than passed along with the origin below, because lowering needs them and
+    // the origin is settled after — and read together under one short lock, so
+    // that a bar length and the beat it is made of can never come from either
+    // side of a change. An eval never holds the engine across a parse or a
+    // decode.
+    let (beat_secs, meter) = {
+        let eng = engine
+            .lock()
+            .map_err(|_| Diagnostic::message(Stage::Engine, "audio engine poisoned"))?;
+        (eng.clock.beat_secs(), eng.clock.meter())
+    };
 
-    let lowered = lower_at_tempo(&ast, loaded.clone(), beat_secs)
+    let lowered = lower_at_tempo(&ast, loaded.clone(), beat_secs, meter)
         .map_err(|e| Diagnostic::message(Stage::Lower, e))?;
     let audio_graph = realize(&lowered.graph)
         .map_err(|e| Diagnostic::message(Stage::Realize, e))?;
@@ -131,7 +134,7 @@ fn run_code(
     // moves *before* the patterns are published, so the scheduler can never
     // see the new bindings against the old origin.
     //
-    // Whatever cycle that leaves us on is the origin the bounded bindings —
+    // Whatever bar that leaves us on is the origin the bounded bindings —
     // `play_once`, `playn` — count from, read under the same lock as the reset
     // so the two can never disagree.
     let origin = {
@@ -141,7 +144,7 @@ fn run_code(
         if starting_from_silence && !lowered.bindings.is_empty() {
             eng.clock.reset();
         }
-        eng.clock.now_cycles()
+        eng.clock.now_bars()
     };
 
     *sched
@@ -185,10 +188,12 @@ fn stop_audio(
 }
 
 /// The transport panel's controls, as the frontend shows them: tempo in beats
-/// per minute, volume as a linear amplitude between silence and unity.
+/// per minute, the signature those beats are barred into, and volume as a
+/// linear amplitude between silence and unity.
 #[derive(serde::Serialize)]
 struct Transport {
     bpm: f64,
+    meter: Meter,
     volume: f64,
 }
 
@@ -198,7 +203,8 @@ struct Transport {
 fn transport(engine: tauri::State<Mutex<AudioEngine>>) -> Result<Transport, String> {
     let eng = engine.lock().map_err(|_| "audio engine poisoned")?;
     Ok(Transport {
-        bpm: bpm_from_cps(eng.clock.cps()),
+        bpm: eng.clock.bpm(),
+        meter: eng.clock.meter(),
         volume: eng.master.value() as f64,
     })
 }
@@ -216,7 +222,37 @@ fn set_tempo(bpm: f64, engine: tauri::State<Mutex<AudioEngine>>) -> Result<(), S
         .lock()
         .map_err(|_| "audio engine poisoned")?
         .clock
-        .set_cps(cps_from_bpm(bpm));
+        .set_bpm(bpm);
+    Ok(())
+}
+
+/// Set the time signature.
+///
+/// This changes how long a bar is, and therefore what every bare pattern in
+/// the program fills and what every `take` and `at` counts — but it does *not*
+/// change the tempo, and it does not re-evaluate anything. The graph and the
+/// bindings already on the timeline were lowered against the old signature and
+/// keep the lengths they were given; play the file again to bring them along.
+/// That is the same gap a tempo drag leaves, for the same reason.
+#[tauri::command]
+fn set_meter(
+    top: u32,
+    bottom: u32,
+    engine: tauri::State<Mutex<AudioEngine>>,
+) -> Result<(), String> {
+    let meter = Meter { top, bottom };
+    if !meter.is_valid() {
+        return Err(format!(
+            "{meter} is not a signature that can be written: the beat must be a \
+             note value — 1, 2, 4, 8, 16 or 32 — and a bar must hold between 1 \
+             and 64 of them"
+        ));
+    }
+    engine
+        .lock()
+        .map_err(|_| "audio engine poisoned")?
+        .clock
+        .set_meter(meter);
     Ok(())
 }
 
@@ -345,11 +381,21 @@ fn open_project(
 
     let project = match saved {
         Some(project) => {
-            eng.clock.set_cps(cps_from_bpm(project.bpm));
+            // The signature before the tempo, and not the other way round:
+            // `set_bpm` works out a bar rate from the meter running when it is
+            // called, so a 3/4 project opened tempo-first would spend the rest
+            // of the session a bar rate short until something moved.
+            eng.clock.set_meter(project.meter);
+            eng.clock.set_bpm(project.bpm);
             eng.master.set(project.volume as f32);
             project
         }
-        None => Project::new(root, bpm_from_cps(eng.clock.cps()), eng.master.value() as f64),
+        None => Project::new(
+            root,
+            eng.clock.bpm(),
+            eng.clock.meter(),
+            eng.master.value() as f64,
+        ),
     };
 
     Ok(ProjectFile { path: project::file_path(root).display().to_string(), project })
@@ -763,7 +809,7 @@ const MENU_EXPORT_LIBRARY: &str = "library-export";
 /// The event a playback failure reaches the editor on.
 ///
 /// Not a command's return value, because nothing asked: the scheduler free-runs
-/// on its own thread, and the note that fails to build is being built cycles
+/// on its own thread, and the note that fails to build is being built bars
 /// after the eval that bound it. The payload is a `Diagnostic`, the same shape
 /// a refused eval comes back as, so the problems panel needs no second reader.
 const SCHEDULER_ERROR: &str = "scheduler-error";
@@ -972,6 +1018,7 @@ pub fn run() {
             stop_audio,
             transport,
             set_tempo,
+            set_meter,
             set_master_volume,
             save_file,
             read_file,

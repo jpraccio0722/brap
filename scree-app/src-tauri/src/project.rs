@@ -19,7 +19,7 @@
 
 use crate::diagnostic::{Diagnostic, Stage};
 use crate::engine::DEFAULT_MASTER_VOLUME;
-use crate::scheduler::clock::{bpm_from_cps, DEFAULT_CPS};
+use crate::scheduler::clock::{bpm_from_cps, Meter, DEFAULT_CPS, DEFAULT_METER};
 
 use std::path::{Path, PathBuf};
 
@@ -29,7 +29,13 @@ pub const FILE: &str = "scree-project.json";
 /// The tempo a project plays at when its file does not say — the clock's own
 /// default, so a project that predates this file sounds as it always did.
 fn default_bpm() -> f64 {
-    bpm_from_cps(DEFAULT_CPS)
+    bpm_from_cps(DEFAULT_CPS, DEFAULT_METER)
+}
+
+/// The signature a project is in when its file does not say. Four four, which
+/// is what every project written before this field existed was in.
+fn default_meter() -> Meter {
+    DEFAULT_METER
 }
 
 /// The same for the master, which defaults to unity: a program is heard as
@@ -60,6 +66,15 @@ pub struct Project {
     /// Beats per minute, as the transport reads it.
     #[serde(default = "default_bpm")]
     pub bpm: f64,
+    /// The time signature, which is how long a bar is and therefore what every
+    /// `take`, `at` and bare pattern in the project is counted in.
+    ///
+    /// It belongs to the piece rather than to the app for the same reason the
+    /// tempo does — and more so: a program written in 3/4 means something else
+    /// entirely when read in 4/4, so this travels with the files rather than
+    /// with whoever last dragged a control.
+    #[serde(default = "default_meter")]
+    pub meter: Meter,
     /// Master output, as a linear amplitude between silence and unity.
     #[serde(default = "default_volume")]
     pub volume: f64,
@@ -69,8 +84,8 @@ impl Project {
     /// A project for a folder that has none saved, taking the transport as it
     /// stands. Opening a folder must not move a fader, so what is playing now
     /// *is* the answer until the file says otherwise.
-    pub fn new(root: &Path, bpm: f64, volume: f64) -> Project {
-        Project { name: folder_name(root), bpm, volume }.sanitized(root)
+    pub fn new(root: &Path, bpm: f64, meter: Meter, volume: f64) -> Project {
+        Project { name: folder_name(root), bpm, meter, volume }.sanitized(root)
     }
 
     /// Make a file safe to hand the engine.
@@ -87,6 +102,13 @@ impl Project {
         }
         if !self.bpm.is_finite() || self.bpm <= 0.0 {
             self.bpm = default_bpm();
+        }
+        // A signature nobody could write in note values — 4/5, or a bar of a
+        // thousand — is replaced rather than refused, exactly as a nonsense
+        // tempo is. The alternative is a project that will not open because a
+        // hand-edited number is wrong.
+        if !self.meter.is_valid() {
+            self.meter = default_meter();
         }
         self.volume = if self.volume.is_finite() {
             self.volume.clamp(0.0, 1.0)
@@ -169,7 +191,7 @@ mod tests {
     #[test]
     fn settings_survive_a_project_being_reopened() {
         let root = temp_project("roundtrip");
-        let saved = Project { name: "Nocturne".into(), bpm: 96.0, volume: 0.7 };
+        let saved = Project { name: "Nocturne".into(), bpm: 96.0, meter: Default::default(), volume: 0.7 };
 
         let path = write(&root, &saved).expect("should write");
         assert_eq!(path, file_path(&root));
@@ -242,7 +264,7 @@ mod tests {
     #[test]
     fn what_is_written_can_always_be_read_back() {
         let root = temp_project("sanitised");
-        let wild = Project { name: String::new(), bpm: f64::NAN, volume: -3.0 };
+        let wild = Project { name: String::new(), bpm: f64::NAN, meter: Default::default(), volume: -3.0 };
         write(&root, &wild).expect("should write");
 
         let read = read(&root).expect("should read").expect("should be a project");
@@ -258,10 +280,65 @@ mod tests {
     #[test]
     fn a_new_project_takes_the_transport_as_it_is() {
         let root = temp_project("fresh");
-        let project = Project::new(&root, 132.0, 0.5);
+        let project = Project::new(&root, 132.0, Meter { top: 3, bottom: 4 }, 0.5);
         assert_eq!(project.name, folder_name(&root));
         assert_eq!(project.bpm, 132.0);
+        assert_eq!(project.meter, Meter { top: 3, bottom: 4 });
         assert_eq!(project.volume, 0.5);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// The signature travels with the piece. A program in 3/4 means something
+    /// else read in 4/4, so this is the field it would be worst to lose.
+    #[test]
+    fn the_signature_survives_a_round_trip() {
+        let root = temp_project("signature");
+        let saved = Project {
+            name: "Waltz".into(),
+            bpm: 120.0,
+            meter: Meter { top: 3, bottom: 4 },
+            volume: 0.8,
+        };
+        write(&root, &saved).expect("should write");
+
+        let read = read(&root).expect("should read").expect("should be a project");
+        assert_eq!(read.meter, Meter { top: 3, bottom: 4 });
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A project written before the field existed opens in 4/4, which is what
+    /// it was written in — there was nothing else to be.
+    #[test]
+    fn a_project_without_a_signature_opens_in_four_four() {
+        let root = temp_project("no-signature");
+        std::fs::write(
+            file_path(&root),
+            r#"{ "name": "Older", "bpm": 96.0, "volume": 0.5 }"#,
+        )
+        .expect("should write");
+
+        let read = read(&root).expect("should read").expect("should be a project");
+        assert_eq!(read.meter, DEFAULT_METER);
+        assert_eq!(read.bpm, 96.0);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// And one hand-edited into a signature nobody can write opens anyway,
+    /// in 4/4 — the same forgiveness a nonsense tempo gets.
+    #[test]
+    fn an_impossible_signature_is_replaced_rather_than_refused() {
+        let root = temp_project("bad-signature");
+        std::fs::write(
+            file_path(&root),
+            r#"{ "name": "Odd", "bpm": 96.0, "meter": { "top": 4, "bottom": 5 }, "volume": 0.5 }"#,
+        )
+        .expect("should write");
+
+        let read = read(&root).expect("should read").expect("should be a project");
+        assert_eq!(read.meter, DEFAULT_METER);
+
         std::fs::remove_dir_all(&root).ok();
     }
 }

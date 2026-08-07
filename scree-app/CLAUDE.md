@@ -44,6 +44,16 @@ Every stage returns `Result<_, Diagnostic>` tagged with a `Stage`, and nothing i
 
 **Two things make sound, by different routes.** The graph is continuous and lives in `engine.slot`, replaced by a 0.2s crossfade. Patterns are discrete: the scheduler thread (`scheduler/scheduler.rs`) free-runs from app start, wakes every 25ms, and pushes voices into a `Sequencer` 0.2s ahead of the audio clock. An eval never "triggers" the scheduler — it swaps the state the scheduler reads on its next pass. Ordering inside `run_code` matters and is commented where it does: instruments before patterns, clock reset before patterns are published.
 
+## Bars, passes, and the one place "cycle" survives
+
+Musical time is counted in **bars**. A **pass** is one trip through a pattern: a list of shares is one pass and fills the bar in any signature, while a pass written in note values is as long as its values add up to and rotates against the bar when they disagree. The two words are not interchangeable, and the tests say which they mean — `a_three_beat_pass_fills_a_three_four_bar` against `a_three_beat_pass_takes_three_quarters_of_a_four_four_bar` is the whole distinction in two cases.
+
+How long a bar is comes from `Meter` in `scheduler/clock.rs`, a project setting saved in `scree-project.json`. **It reaches only two places**, and both are conversions *out of* beats: `to_pattern_timed` in `lowerer/play.rs`, where a metrical pass becomes a fraction of a bar, and the `bpm` builtin, which answers in bars per second. Everything else — the scheduler, `Rate`, `Pattern::query`, every `Binding` — already counted bars and never asks how many beats made one, which is why a signature could be added without touching them.
+
+The clock keeps `cps` as a field name, and that is deliberate: it is bars per second, but `bps` reads as *beats* per second and the two differ by the whole signature. It is the only survival of the older word, and it survives as an abbreviation rather than as a unit.
+
+Two orderings are load-bearing. `set_bpm` converts through whatever meter is running, so **`set_meter` comes first** when a project opens — `open_project` says so. And a signature change moves the transport but does not re-lower anything: what is playing keeps the bar it was lowered against until the next eval, the same gap a tempo drag leaves on the persistent graph.
+
 ## Language surface lives in one table
 
 `src-tauri/src/lang.rs` holds every callable name with its arity, parameter names, `receives`/`returns` kinds and doc string. The lowerer dispatches off these tables, and the `language_metadata` Tauri command serves the same data to `src/scree/metadata.ts`, which drives highlighting, completion, signature help and the docs panel.
@@ -52,7 +62,7 @@ So **adding a builtin means adding one entry to `UGENS` (or `LIST_BUILTINS`, etc
 
 ## Projects, patterns, imports
 
-A project is a folder with a `scree-project.json` (name, bpm, volume), written debounced as you change things. `src-tauri/src/project.rs` and `files/` own it. Two other files may sit beside it — a `scree-library.json` naming what the project exports as, and a hidden `.scree/libraries/` holding vendored libraries — both covered below.
+A project is a folder with a `scree-project.json` (name, bpm, meter, volume), written debounced as you change things. `src-tauri/src/project.rs` and `files/` own it. Two other files may sit beside it — a `scree-library.json` naming what the project exports as, and a hidden `.scree/libraries/` holding vendored libraries — both covered below.
 
 Drawn patterns from the right-hand panel are a real file, `patterns.scree` at the project root, folded into every eval as an implicit `use patterns::*`. The panel also sends its patterns *with* the eval rather than relying on the write having landed, so `run_code` takes `Option<Vec<GraphicalPattern>>`: `None` means "the panel has nothing to say, use the disk", `Some([])` means "the panel read this project and it has no patterns" — only the second may hide a file on disk.
 

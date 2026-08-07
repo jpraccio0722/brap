@@ -1,7 +1,7 @@
 //! How fast a pattern runs, as a function of when.
 //!
 //! A rate is a change of clock, and the only thing `Pattern::Fast` ever needed
-//! of it was two maps: *outer* cycle time — the clock everything is scheduled
+//! of it was two maps: *outer* bar time — the clock everything is scheduled
 //! against — to the *inner* time the pattern is written in, and back again. A
 //! constant rate does both by multiplying. Anything that varies has to
 //! integrate instead, because the inner time reached at some moment is the
@@ -10,7 +10,7 @@
 //! That integral is why the shapes here are a closed enum rather than a
 //! callback. Both directions have to be *exact*: the inverse places every
 //! onset the query answers with, and the lowerer needs it a second time to say
-//! how many cycles a bounded section lasts, long before anything is scheduled.
+//! how many bars a bounded section lasts, long before anything is scheduled.
 //! A numeric integration would answer both a little differently each time it
 //! was asked, and a section whose length disagrees with its own last note is a
 //! gap in an arrangement.
@@ -18,8 +18,8 @@
 /// The rate a pattern runs at.
 ///
 /// Two things use this, and they ask opposite questions. `Pattern::Fast` asks
-/// *where are we in the pattern at this cycle* — [`phase`](Rate::phase), the
-/// integral. The lowerer asks *how many cycles until the pattern has run this
+/// *where are we in the pattern at this bar* — [`phase`](Rate::phase), the
+/// integral. The lowerer asks *how many bars until the pattern has run this
 /// far* — [`unphase`](Rate::unphase), its inverse, which is what gives a
 /// bounded section a length.
 ///
@@ -29,17 +29,17 @@
 /// clock's origin — a `.then` cuts a window onto that grid rather than starting
 /// a pattern of its own. Anchoring a constant rate would shift every existing
 /// arrangement off that grid to no audible end. A curve has a real beginning,
-/// on the other hand: `accel(1, 2, 8)` means eight cycles from *this section's*
+/// on the other hand: `accel(1, 2, 8)` means eight bars from *this section's*
 /// first note, so it is measured from where its window opens and starts again
 /// each time that window comes back around.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rate {
     /// One speed throughout — every `rate` written before `accel` existed.
     Fixed(f64),
-    /// A straight line in rate: `from` to `to` over `cycles` cycles, holding at
+    /// A straight line in rate: `from` to `to` over `bars` bars, holding at
     /// `to` after that. Held rather than continuing, because `play` loops
     /// forever and a rate that kept climbing would end at a smear.
-    Accel { from: f64, to: f64, cycles: f64 },
+    Accel { from: f64, to: f64, bars: f64 },
 }
 
 impl Rate {
@@ -48,13 +48,13 @@ impl Rate {
     /// Both degenerate cases fold rather than fail. Equal ends *are* a constant
     /// rate, and a curve given no time to happen in is its own endpoint — the
     /// same reading `line` gives a zero duration. Folding them here is what
-    /// lets the rest of this file divide by `cycles` and by `to - from`
+    /// lets the rest of this file divide by `bars` and by `to - from`
     /// without asking first.
-    pub fn accel(from: f64, to: f64, cycles: f64) -> Rate {
-        if !cycles.is_finite() || cycles <= 0.0 || from == to {
+    pub fn accel(from: f64, to: f64, bars: f64) -> Rate {
+        if !bars.is_finite() || bars <= 0.0 || from == to {
             return Rate::Fixed(to);
         }
-        Rate::Accel { from, to, cycles }
+        Rate::Accel { from, to, bars }
     }
 
     /// Is this a speed a pattern can actually be played at?
@@ -67,8 +67,8 @@ impl Rate {
     pub fn is_usable(&self) -> bool {
         match self {
             Rate::Fixed(r) => *r > 0.0 && r.is_finite(),
-            Rate::Accel { from, to, cycles } => {
-                *from > 0.0 && *to > 0.0 && from.is_finite() && to.is_finite() && *cycles > 0.0
+            Rate::Accel { from, to, bars } => {
+                *from > 0.0 && *to > 0.0 && from.is_finite() && to.is_finite() && *bars > 0.0
             }
         }
     }
@@ -80,7 +80,7 @@ impl Rate {
         matches!(self, Rate::Fixed(r) if *r == 1.0)
     }
 
-    /// The inner time the pattern has reached by outer cycle `at`.
+    /// The inner time the pattern has reached by outer bar `at`.
     ///
     /// For a curve this is ∫r from the anchor, which for a straight line in
     /// rate is the area of a trapezium — `from * c` plus the triangle the
@@ -93,20 +93,20 @@ impl Rate {
     pub fn phase(&self, at: f64, anchor: f64) -> f64 {
         match self {
             Rate::Fixed(r) => at * r,
-            Rate::Accel { from, to, cycles } => {
+            Rate::Accel { from, to, bars } => {
                 let c = at - anchor;
                 if c <= 0.0 {
                     c * from
-                } else if c >= *cycles {
-                    (from + to) * cycles / 2.0 + (c - cycles) * to
+                } else if c >= *bars {
+                    (from + to) * bars / 2.0 + (c - bars) * to
                 } else {
-                    from * c + (to - from) * c * c / (2.0 * cycles)
+                    from * c + (to - from) * c * c / (2.0 * bars)
                 }
             }
         }
     }
 
-    /// The speed the pattern is running at *at* outer cycle `at` — the slope of
+    /// The speed the pattern is running at *at* outer bar `at` — the slope of
     /// [`phase`](Rate::phase) rather than its value.
     ///
     /// Neither of the two questions this type was built for; it is what a voice
@@ -118,20 +118,20 @@ impl Rate {
     pub fn at(&self, at: f64, anchor: f64) -> f64 {
         match self {
             Rate::Fixed(r) => *r,
-            Rate::Accel { from, to, cycles } => {
+            Rate::Accel { from, to, bars } => {
                 let c = at - anchor;
                 if c <= 0.0 {
                     *from
-                } else if c >= *cycles {
+                } else if c >= *bars {
                     *to
                 } else {
-                    from + (to - from) * c / cycles
+                    from + (to - from) * c / bars
                 }
             }
         }
     }
 
-    /// The outer cycle at which the pattern reaches inner time `phase` — the
+    /// The outer bar at which the pattern reaches inner time `phase` — the
     /// inverse of [`phase`](Rate::phase), and where every onset a query found
     /// is actually played.
     ///
@@ -149,14 +149,14 @@ impl Rate {
     pub fn unphase(&self, phase: f64, anchor: f64) -> f64 {
         match self {
             Rate::Fixed(r) => phase / r,
-            Rate::Accel { from, to, cycles } => {
-                let full = (from + to) * cycles / 2.0;
+            Rate::Accel { from, to, bars } => {
+                let full = (from + to) * bars / 2.0;
                 let c = if phase <= 0.0 {
                     phase / from
                 } else if phase >= full {
-                    cycles + (phase - full) / to
+                    bars + (phase - full) / to
                 } else {
-                    let k = (to - from) / (2.0 * cycles);
+                    let k = (to - from) / (2.0 * bars);
                     2.0 * phase / (from + (from * from + 4.0 * k * phase).sqrt())
                 };
                 anchor + c
@@ -211,7 +211,7 @@ mod tests {
         assert_eq!(rate.unphase(6.0, 100.0), 3.0);
     }
 
-    /// The trapezium: a run from 1x to 3x over 4 cycles covers the 8 cycles of
+    /// The trapezium: a run from 1x to 3x over 4 bars covers the 8 bars of
     /// pattern that the average of the two rates says it should, and holds that
     /// end rate afterwards.
     #[test]
@@ -228,7 +228,7 @@ mod tests {
 
     /// What the lowerer asks: how long does a section of `n` passes last? A
     /// pattern accelerating from 1x to 3x gets eight passes done in the four
-    /// cycles the same eight would have taken five and a bit of at 1.5x.
+    /// bars the same eight would have taken five and a bit of at 1.5x.
     #[test]
     fn a_curve_says_how_long_a_section_lasts() {
         let rate = Rate::accel(1.0, 3.0, 4.0);

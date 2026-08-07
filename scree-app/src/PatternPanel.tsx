@@ -24,9 +24,11 @@ interface PatternRowProps {
   error: string | null;
   onOpen: () => void;
   onRemove: () => void;
+  /** Beats in a bar, for the picture's guide lines. */
+  beatsPerBar: number;
 }
 
-function PatternRow({ pattern, error, onOpen, onRemove }: PatternRowProps) {
+function PatternRow({ pattern, error, onOpen, onRemove, beatsPerBar }: PatternRowProps) {
   return (
     <div className="group rounded-md border border-neutral-800 bg-neutral-900/60 p-2 transition-colors hover:border-neutral-700">
       <div className="flex items-center gap-1">
@@ -56,7 +58,7 @@ function PatternRow({ pattern, error, onOpen, onRemove }: PatternRowProps) {
       {/* The picture is a button too: it is the biggest thing in the row and
           the most obvious thing to click. */}
       <button onClick={onOpen} title="Open in the composer" className="mt-2 block w-full">
-        <PatternMini pattern={pattern} />
+        <PatternMini pattern={pattern} beatsPerBar={beatsPerBar} />
       </button>
     </div>
   );
@@ -77,11 +79,16 @@ interface PatternPanelProps {
    *  panel that quietly writes a file into someone's project should say so —
    *  and because it is a file they can open, edit and keep. */
   path: string | null;
+  /** Beats in a bar, from the project's time signature. The cells are shares
+   *  of a bar and so mean the same thing in any signature; what this moves is
+   *  the beat lines they are read against. */
+  beatsPerBar: number;
 }
 
 export function PatternPanel({
   patterns,
   onChange,
+  beatsPerBar,
   onOpen,
   onOpenFile,
   path,
@@ -140,6 +147,7 @@ export function PatternPanel({
               error={nameError(p, patterns)}
               onOpen={() => onOpen(p.id)}
               onRemove={() => onChange(patterns.filter((q) => q.id !== p.id))}
+              beatsPerBar={beatsPerBar}
             />
           ))}
         </div>

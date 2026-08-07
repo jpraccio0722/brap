@@ -7,10 +7,43 @@ import { ValueControl } from "./ValueControl";
 const MIN_BPM = 40;
 const MAX_BPM = 240;
 
+/**
+ * A time signature: how many of what note make a bar.
+ *
+ * `bottom` is a note value — 4 is a quarter, 8 an eighth — so the pair reads
+ * as it is written on a stave.
+ */
+export interface Meter {
+  top: number;
+  bottom: number;
+}
+
+/**
+ * The signatures the menu offers.
+ *
+ * A list rather than two number fields, because a signature is a choice from a
+ * short set of things musicians actually write, and a free pair invites 4/5.
+ * The backend refuses one it cannot write anyway; this keeps that refusal off
+ * the screen.
+ */
+const METERS: Meter[] = [
+  { top: 4, bottom: 4 },
+  { top: 3, bottom: 4 },
+  { top: 2, bottom: 4 },
+  { top: 5, bottom: 4 },
+  { top: 6, bottom: 8 },
+  { top: 7, bottom: 8 },
+  { top: 12, bottom: 8 },
+];
+
+const meterLabel = (m: Meter) => `${m.top}/${m.bottom}`;
+
 /** The engine's global controls, as the backend reports them. */
 export interface TransportState {
-  /** Beats per minute. One cycle is four beats. */
+  /** Beats per minute. The beat is the quarter note, in any signature. */
   bpm: number;
+  /** The time signature, which is how many beats make a bar. */
+  meter: Meter;
   /** Linear amplitude, 0 to 1. */
   volume: number;
 }
@@ -51,6 +84,22 @@ export function Transport({ play, stop, state, onChange }: TransportProps) {
       if (!state) return;
       onChange({ ...state, bpm });
       invoke("set_tempo", { bpm }).catch((e) => console.error("could not set tempo:", e));
+    },
+    [state, onChange],
+  );
+
+  // Changing the signature changes what a bar is, and therefore what every
+  // bare pattern in the program fills. The engine is told at once so the
+  // transport is right, but what is already playing was lowered against the
+  // old bar and keeps its lengths until the file is played again — the same
+  // gap a tempo drag leaves on the persistent graph.
+  const setMeter = useCallback(
+    (meter: Meter) => {
+      if (!state) return;
+      onChange({ ...state, meter });
+      invoke("set_meter", { top: meter.top, bottom: meter.bottom }).catch((e) =>
+        console.error("could not set the time signature:", e),
+      );
     },
     [state, onChange],
   );
@@ -101,6 +150,32 @@ export function Transport({ play, stop, state, onChange }: TransportProps) {
             unit=" bpm"
             onChange={setBpm}
           />
+
+          <label className="flex flex-col items-center gap-1 text-xs text-neutral-400">
+            <select
+              value={meterLabel(state.meter)}
+              onChange={(e) => {
+                const next = METERS.find((m) => meterLabel(m) === e.target.value);
+                if (next) setMeter(next);
+              }}
+              title="Time signature — how many beats make a bar"
+              className="rounded-md bg-neutral-800 px-1.5 py-0.5 text-neutral-200"
+            >
+              {/* A project's file is editable by hand, and the backend takes
+                  any signature it can write — 9/8 among them. One that is not
+                  on this list is still what the project is in, so it is added
+                  rather than shown as a blank box. */}
+              {(METERS.some((m) => meterLabel(m) === meterLabel(state.meter))
+                ? METERS
+                : [...METERS, state.meter]
+              ).map((m) => (
+                <option key={meterLabel(m)} value={meterLabel(m)}>
+                  {meterLabel(m)}
+                </option>
+              ))}
+            </select>
+            <div>time signature</div>
+          </label>
           <ValueControl
             label="volume"
             value={state.volume * 100}

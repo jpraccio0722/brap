@@ -510,7 +510,7 @@ pub static UGENS: &[Ugen] = &[
         params: &["frequency"],
         receives: ValueKind::Signal,
         returns: ValueKind::Signal,
-        doc: "Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of the cycle, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end.",
+        doc: "Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of its own period, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end.",
     },
     Ugen {
         name: "resonator",
@@ -845,7 +845,7 @@ pub static MATH_BUILTINS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Number,
         returns: ValueKind::Number,
-        doc: "Beats per minute to cycles per second, taking one cycle as four beats: `120.bpm` is 0.5, which is the default tempo.",
+        doc: "Beats per minute to bars per second. The beat is the quarter note; how many of them make a bar is the project's time signature, so `120.bpm` is 0.5 in 4/4 — the default tempo — and 0.667 in 3/4, where the bar is shorter.",
     },
     // --- pitch arithmetic ---
     ListBuiltin {
@@ -1160,21 +1160,21 @@ pub static SPECIALS: &[ListBuiltin] = &[
     },
     ListBuiltin {
         name: "then_after",
-        params: &["play", "cycles", "section"],
+        params: &["play", "bars", "section"],
         arities: &[3],
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "`then`, with `cycles` of silence in between: `playn(verse, lead, 4).then_after(1, chorus)` leaves a bar's rest before the chorus. The gap cannot be negative — `overlap` is how a section starts early.",
+        doc: "`then`, with `bars` of silence in between: `playn(verse, lead, 4).then_after(1, chorus)` leaves a bar's rest before the chorus. The gap cannot be negative — `overlap` is how a section starts early.",
     },
     ListBuiltin {
         name: "overlap",
-        params: &["play", "cycles", "section"],
+        params: &["play", "bars", "section"],
         arities: &[3],
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "`then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join: `playn(verse, lead, 8).overlap(2, chorus)`. Never earlier than the receiver's own start. The chain carries on from whichever of the two ends later.",
+        doc: "`then`, but the section starts `bars` *before* this one ends, so the two really do sound together over the join: `playn(verse, lead, 8).overlap(2, chorus)`. Never earlier than the receiver's own start. The chain carries on from whichever of the two ends later.",
     },
     ListBuiltin {
         name: "with",
@@ -1183,16 +1183,16 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Run a section *alongside* this one, from where it began: `playn(verse, lead, 4).with(drums).then(chorus)`. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. The pair finishes when the later of them does.",
+        doc: "Run a section *alongside* this one, from where it began: `playn(verse, lead, 4).with(drums).then(chorus)`. `play_all` opens its sections together as a group; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. The pair finishes when the later of them does.",
     },
     ListBuiltin {
         name: "at",
-        params: &["cycle", "section"],
+        params: &["bar", "section"],
         arities: &[2],
         variadic: false,
         receives: ValueKind::Number,
         returns: ValueKind::Play,
-        doc: "Place a section at an absolute cycle, counted from the origin: `at(8, chorus)`. The escape hatch from chaining — an arrangement whose shape you already know is often clearer written down than derived one `.then` at a time.",
+        doc: "Place a section at an absolute bar, counted from the origin: `at(8, chorus)`. Bars are counted from 0, so `at(8, …)` is the ninth bar — it is a distance from the start, the same number `then_after` would have added up to. The escape hatch from chaining, for an arrangement whose shape you already know.",
     },
     ListBuiltin {
         name: "seq",
@@ -1246,16 +1246,16 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Round where the chain has reached up to a multiple of `grid` cycles, without touching what is already playing: `playn(pat, inst, 3, 2).quantize().then(chorus)`. `grid` defaults to 1. The cure for a section whose length is not a whole number — `rate` divides into the count, so `playn(pat, inst, 3, 2)` is 1.5 cycles long and every `.then` after it would otherwise be permanently off the downbeat.",
+        doc: "Round where the chain has reached up to a multiple of `grid` bars, without touching what is already playing: `playn(pat, inst, 3, 2).quantize().then(chorus)`. `grid` defaults to 1. The cure for a section whose length is not a whole number of bars — `rate` divides into the count, so `playn(pat, inst, 3, 2)` is 1.5 bars long and every `.then` after it would otherwise be permanently off the downbeat.",
     },
     ListBuiltin {
         name: "take",
-        params: &["play", "cycles"],
+        params: &["play", "bars"],
         arities: &[2],
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "This section, cut to `cycles`: `play(riff, lead).take(8).then(chorus)`. What gives a plain `play` an end — `playn` only bounds a single play, not a `play_all` group or a whole nested section. A part that already stops sooner is left alone, since a cut is a ceiling and not a length.",
+        doc: "This section, cut to `bars`: `play(riff, lead).take(8).then(chorus)`. What gives a plain `play` an end — `playn` only bounds a single play, not a `play_all` group or a whole nested section. A part that already stops sooner is left alone, since a cut is a ceiling and not a length.",
     },
     ListBuiltin {
         name: "stop",
@@ -1264,7 +1264,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Play,
         returns: ValueKind::Play,
-        doc: "Cut everything still open in this section at the moment its last *counted* part finishes: `play_all(play(groove, drums), playn(riff, lead, 8)).stop()` lets the eight-cycle riff decide when the endless drums give up. One pattern as the trigger to stop the rest. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at.",
+        doc: "Cut everything still open in this section at the moment its last *counted* part finishes: `play_all(play(groove, drums), playn(riff, lead, 8)).stop()` lets the eight-bar riff decide when the endless drums give up. One pattern as the trigger to stop the rest. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at.",
     },
     ListBuiltin {
         name: "wthen",
@@ -1309,7 +1309,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the cycle evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the sequence is as long as its values add up to rather than one cycle: `[c4;q, e4, g4]` is a 3/4 bar, and a value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
+        doc: "Schedule a pattern on an instrument: `pat >> play(kick)`. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list is one pass, filling the bar, divided evenly unless a step is given a length with `;` — `[220;2, 330, 440, `;4]` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — `w` `h` `q` `e` `s` — and then the pass is as long as its values add up to rather than one bar: in 4/4 `[c4;q, e4, g4]` is three beats against a four-beat bar, so it comes round a beat early and rotates against the grid. A value carries to the steps after it. A bare `q` is a hit of that length. Written values and ratios cannot share a sequence. A group inside one is a tuplet and says so with `;t` — `[[c4;q, e4, g4];t, c5]` is a quarter triplet then a quarter — which needs no number: the count, the unit and the span it is played in all follow from what the group holds. Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field from -1 (left) through 0 (centre) to 1 (right).",
     },
     ListBuiltin {
         name: "play_once",
@@ -1318,7 +1318,7 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "`play`, stopping after one pass of the pattern: `[60, 64, 67] >> play_once(stab)`. Started while something is already playing it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again.",
+        doc: "`play`, stopping after one pass of the pattern: `[60, 64, 67] >> play_once(stab)`. Started while something is already playing it begins on the next bar, so the one-shot lands on a downbeat. Re-evaluating fires it again.",
     },
     ListBuiltin {
         name: "playn",
@@ -1327,25 +1327,25 @@ pub static SPECIALS: &[ListBuiltin] = &[
         variadic: false,
         receives: ValueKind::Pattern,
         returns: ValueKind::Play,
-        doc: "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two cycles. Lanes work as they do on `play`.",
+        doc: "`play`, stopping after `times` passes of the pattern: `playn([220, 330], bass, 4)`. `rate` follows the count and still defaults to 1 — at rate 2 the four passes take two bars. Lanes work as they do on `play`.",
     },
     ListBuiltin {
         name: "play_all",
-        params: &["play"],
+        params: &["section"],
         arities: &[1],
         variadic: true,
-        receives: ValueKind::Play,
+        receives: ValueKind::Section,
         returns: ValueKind::Play,
-        doc: "Treat several plays that run at once as one section: `play_all(playn(verse, lead, 4), playn(bassline, bass, 4)).then(chorus)`. Every argument must be a `play_once`, `playn`, `play`, or another `play_all` — they all start together, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow.",
+        doc: "Treat several sections that run at once as one: `play_all(verse, bassline).then(chorus)`. Each is a no-parameter `fn` or a play written out, exactly as in `seq` — the difference is that these all start together rather than one after another, and the group finishes when the last of them does. A plain `play` among them never finishes, so nothing may follow.",
     },
     ListBuiltin {
         name: "accel",
-        params: &["from", "to", "cycles"],
+        params: &["from", "to", "bars"],
         arities: &[3],
         variadic: false,
         receives: ValueKind::Number,
         returns: ValueKind::Rate,
-        doc: "A rate that moves: `from` to `to` over `cycles` cycles, holding at `to` after that. Written where a `play` takes a number — `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four cycles — and it is a straight line in rate, so the pattern covers the area under it rather than the rate at either end. Measured from the section's own first note, and started afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero: at zero the pattern would stop rather than slow, and a bounded section would never finish.",
+        doc: "A rate that moves: `from` to `to` over `bars` bars, holding at `to` after that. Written where a `play` takes a number — `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four bars — and it is a straight line in rate, so the pattern covers the area under it rather than the rate at either end. Measured from the section's own first note, and started afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero: at zero the pattern would stop rather than slow, and a bounded section would never finish.",
     },
     ListBuiltin {
         name: "dur",
@@ -1638,7 +1638,7 @@ pub struct WrittenValue {
 /// inventing a second letter for a value this rare is worse than writing the
 /// tuplet that reaches it.
 pub static DURATIONS: &[WrittenValue] = &[
-    WrittenValue { name: "w", num: 4, den: 1, doc: "Whole note — four beats, which is one cycle." },
+    WrittenValue { name: "w", num: 4, den: 1, doc: "Whole note — four beats, which is one bar in 4/4 and more than one in any shorter meter." },
     WrittenValue { name: "h", num: 2, den: 1, doc: "Half note — two beats." },
     WrittenValue { name: "q", num: 1, den: 1, doc: "Quarter note — one beat." },
     WrittenValue { name: "e", num: 1, den: 2, doc: "Eighth note — half a beat." },
@@ -2320,7 +2320,11 @@ mod receives_tests {
     /// compiles identifies what the receiver was.
     const PROBES: [(ValueKind, &str); 7] = [
         (ValueKind::List, "len"),
-        (ValueKind::Play, "play_all"),
+        // `take` rather than `play_all`: gathering takes sections, which are
+        // named `fn`s, so a play is exactly what may *not* be piped into it.
+        // Cutting one is the move that needs a play on its left and refuses
+        // everything else.
+        (ValueKind::Play, "take(1)"),
         // Nothing but a buffer has a length in seconds.
         (ValueKind::Buffer, "secs"),
         // `m2h` takes a number and refuses a signal; `clip` takes either. So a

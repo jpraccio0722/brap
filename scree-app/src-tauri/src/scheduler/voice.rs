@@ -8,6 +8,7 @@ use crate::lowerer::lower::lower_voice;
 use crate::parser::parser::{Arg, ScreeItem, Expr, Ident};
 use crate::pattern::patterns::PAN;
 use crate::samples::Samples;
+use crate::scheduler::clock::Meter;
 
 /// The instrument definitions from the most recent eval.
 ///
@@ -96,6 +97,11 @@ pub struct Voice {
 /// `beat_secs` is the quarter note of the clock this note is on — already
 /// divided by the binding's rate, so this is a length the instrument can shape
 /// itself against without knowing anything about how it came to be playing.
+///
+/// `meter` is the transport's, and reaches a voice for one reason: an
+/// instrument may call `bpm`, which answers in bars per second. Nothing about
+/// the note's own timing needs it — the pattern placed this note before the
+/// voice existed.
 pub fn build_voice(
     instruments: &Instruments,
     instrument: &str,
@@ -103,6 +109,7 @@ pub fn build_voice(
     lanes: &[(String, f64)],
     dur_secs: f64,
     beat_secs: f64,
+    meter: Meter,
 ) -> Result<Voice, String> {
     let Some(params) = instruments.param_count(instrument) else {
         return Err(format!("no instrument named `{instrument}`"));
@@ -123,7 +130,7 @@ pub fn build_voice(
         args,
     }));
 
-    let lowered = lower_voice(&items, dur_secs, beat_secs, instruments.samples.clone())?;
+    let lowered = lower_voice(&items, dur_secs, beat_secs, meter, instruments.samples.clone())?;
     let net = realize(&lowered.graph)?;
 
     // `play` refuses a lane given twice, so at most one of these exists.
@@ -177,7 +184,7 @@ fn build_voice_at_default_tempo(
 ) -> Result<Voice, String> {
     build_voice(
         instruments, instrument, value, lanes, dur_secs,
-        crate::lowerer::lower::DEFAULT_BEAT_SECS,
+        crate::lowerer::lower::DEFAULT_BEAT_SECS, Meter::default(),
     )
 }
 
@@ -240,7 +247,7 @@ mod tests {
     #[test]
     fn the_beat_reaches_the_instrument() {
         let ins = instruments("fn tone() = sin(qvh)\n");
-        let mut net = super::build_voice(&ins, "tone", 0.0, &[], 1.0, 1.0 / 110.0)
+        let mut net = super::build_voice(&ins, "tone", 0.0, &[], 1.0, 1.0 / 110.0, Meter::default())
             .expect("should build")
             .net;
         net.set_sample_rate(44100.0);
@@ -264,7 +271,7 @@ mod tests {
     fn an_impossible_beat_is_an_unbound_name_rather_than_silence() {
         let ins = instruments("fn tone() = sin(qvh)\n");
         for beat in [0.0, -1.0, f64::NAN, f64::INFINITY] {
-            match super::build_voice(&ins, "tone", 0.0, &[], 1.0, beat) {
+            match super::build_voice(&ins, "tone", 0.0, &[], 1.0, beat, Meter::default()) {
                 Err(e) => assert!(e.contains("unbound name: qvh"), "beat {beat}: {e}"),
                 Ok(_) => panic!("beat {beat} should not have built a voice"),
             }
@@ -721,7 +728,7 @@ fn kick(f) = {
     }
 
     /// The pitch envelope really sweeps: the first 50 ms contains far more
-    /// cycles than a later window of the same length.
+    /// bars than a later window of the same length.
     #[test]
     fn the_pitch_sweeps_downward() {
         let s = render(50.0, 1.0, 1.0);
@@ -738,7 +745,7 @@ fn kick(f) = {
     fn the_pattern_number_sets_the_fundamental() {
         let low = rising_crossings(&render(40.0, 1.0, 0.4)[4410..8820]);
         let high = rising_crossings(&render(120.0, 1.0, 0.4)[4410..8820]);
-        assert!(high > low * 2, "120 Hz should cycle faster: {high} vs {low}");
+        assert!(high > low * 2, "120 Hz should bar faster: {high} vs {low}");
     }
 }
 

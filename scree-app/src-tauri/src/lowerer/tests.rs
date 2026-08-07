@@ -162,6 +162,56 @@ fn for_loop_builds_a_list() {
         vec![Some(100.0), Some(200.0), Some(300.0), Some(400.0)]);
 }
 
+/// A `for` collecting a sequence may say how long one step of it is, and the
+/// list it builds is then the list that was written out — which is the only way
+/// a generated pattern reaches note values at all, since a list built by a
+/// builtin has nowhere to put a `;`.
+#[test]
+fn for_loop_steps_may_be_given_a_length() {
+    let built = bindings_of(&format!(
+        "{BASS}play(for i in 0..=4 {{ 65;e }}, bass)\n"));
+    let written = bindings_of(&format!(
+        "{BASS}play([65;e, 65, 65, 65, 65], bass)\n"));
+
+    assert_eq!(built[0].pattern, written[0].pattern);
+    assert_eq!(built[0].bars, written[0].bars);
+}
+
+/// The length is read where the body is, so it may be computed from the
+/// element the step was built from — the loop is one place, not two.
+#[test]
+fn a_step_may_be_as_long_as_the_element_it_came_from() {
+    let built = bindings_of(&format!(
+        "{BASS}play(for i in 1..=3 {{ 220 * i;i }}, bass)\n"));
+    let written = bindings_of(&format!(
+        "{BASS}play([220;1, 440;2, 660;3], bass)\n"));
+
+    assert_eq!(built[0].pattern, written[0].pattern);
+}
+
+/// The length a `for` gives its steps is read the same way a written one is,
+/// `;t` included — so a loop can build a sequence of tuplets, which is the one
+/// shape that is most tedious to write out.
+#[test]
+fn a_for_loop_may_collect_tuplets() {
+    let built = bindings_of(&format!(
+        "{BASS}play(for i in 1..=2 {{ [60;q, 63, 67];t }}, bass)\n"));
+    let written = bindings_of(&format!(
+        "{BASS}play([[60;q, 63, 67];t, [60;q, 63, 67];t], bass)\n"));
+
+    assert_eq!(built[0].pattern, written[0].pattern);
+    assert_eq!(built[0].bars, written[0].bars);
+}
+
+/// A `;` is a step's length, so it means nothing where the loop is not
+/// collecting steps: a loop over oscillators is summed into one voice, and
+/// there is no sequence left to have measured.
+#[test]
+fn a_length_on_a_loop_over_audio_is_refused() {
+    let err = lower_src("for i in 1..=3 { sin(i * 110);q }\n").unwrap_err();
+    assert!(err.contains("audio"), "got: {err}");
+}
+
 /// Each iteration gets its own scope; the loop variable does not outlive it.
 #[test]
 fn loop_variable_does_not_leak() {
@@ -763,13 +813,13 @@ fn accel_wraps_the_pattern_as_a_curve() {
 
 /// The number that makes an arrangement possible: a bounded section still has
 /// a length, and it is the one the curve's own integral gives — eight passes
-/// of a one-cycle pattern accelerating 1x to 3x over four cycles take exactly
-/// those four cycles, not the eight they would at 1x.
+/// of a one-bar pattern accelerating 1x to 3x over four bars take exactly
+/// those four bars, not the eight they would at 1x.
 #[test]
 fn a_section_that_speeds_up_still_knows_how_long_it_is() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 8, accel(1, 3, 4))\n");
-    let cycles = bs[0].cycles.expect("a counted play is bounded");
-    assert!((cycles - 4.0).abs() < 1e-9, "got {cycles}");
+    let bars = bs[0].bars.expect("a counted play is bounded");
+    assert!((bars - 4.0).abs() < 1e-9, "got {bars}");
 }
 
 /// And so `.then` can place what follows: the next section opens where the
@@ -785,17 +835,17 @@ fn then_starts_where_an_accelerating_section_ends() {
     assert!((bs[1].start - 4.0).abs() < 1e-9, "got {}", bs[1].start);
 }
 
-/// A rate curve is measured in cycles of the pattern, so the two halves of the
+/// A rate curve is measured in bars of the pattern, so the two halves of the
 /// language agree: `play_once` at a curve is one pass however fast it went.
 #[test]
 fn play_once_under_a_curve_is_still_one_pass() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, accel(2, 4, 1))\n");
-    // One pass at a rate rising 2x to 4x over the first cycle. Solving the
-    // curve for where it has covered one whole pattern gives √2 - 1 cycles —
-    // sooner than the half-cycle the opening 2x alone would take, because it
+    // One pass at a rate rising 2x to 4x over the first bar. Solving the
+    // curve for where it has covered one whole pattern gives √2 - 1 bars —
+    // sooner than the half-bar the opening 2x alone would take, because it
     // is already up to 2√2 by the time it gets there.
-    let cycles = bs[0].cycles.expect("play_once is bounded");
-    assert!((cycles - (2f64.sqrt() - 1.0)).abs() < 1e-9, "got {cycles}");
+    let bars = bs[0].bars.expect("play_once is bounded");
+    assert!((bars - (2f64.sqrt() - 1.0)).abs() < 1e-9, "got {bars}");
 }
 
 /// A curve that does not curve is the plain rate it describes, and lowers to
@@ -816,17 +866,17 @@ fn an_accel_that_is_no_change_at_all_adds_no_wrapper() {
 }
 
 /// A pattern written in note values is already wrapped once — it is as long as
-/// its values add up to rather than a cycle — so a curve wraps it a second
-/// time. The two clocks compose: four passes of a 3/4 bar is three cycles of
+/// its values add up to rather than a bar — so a curve wraps it a second
+/// time. The two clocks compose: four passes of a 3/4 bar is three bars of
 /// pattern, and the curve says how long covering that takes.
 #[test]
 fn a_curve_composes_with_a_pattern_written_in_note_values() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([c4;q, e4, g4], kick, 4, accel(1, 2, 4))\n");
-    let cycles = bs[0].cycles.expect("a counted play is bounded");
+    let bars = bs[0].bars.expect("a counted play is bounded");
 
-    // Solving `c + c²/8 = 3` — three cycles of pattern under a rate rising 1x
-    // to 2x over four cycles — against the 3 flat it would take at 1x.
-    assert!((cycles - 2.324555320336759).abs() < 1e-9, "got {cycles}");
+    // Solving `c + c²/8 = 3` — three bars of pattern under a rate rising 1x
+    // to 2x over four bars — against the 3 flat it would take at 1x.
+    assert!((bars - 2.324555320336759).abs() < 1e-9, "got {bars}");
 }
 
 /// Zero is not a slow pattern but a stopped one, and a bounded section at zero
@@ -859,52 +909,52 @@ fn a_rate_is_not_a_signal_or_a_step() {
 
 // ---- play_once / playn ----
 
-/// `play` loops; the whole of the difference is the binding's `cycles`.
+/// `play` loops; the whole of the difference is the binding's `bars`.
 #[test]
 fn play_loops_forever() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay([220], kick)\n");
-    assert_eq!(bs[0].cycles, None);
+    assert_eq!(bs[0].bars, None);
 }
 
 #[test]
-fn play_once_bounds_the_binding_to_one_cycle() {
+fn play_once_bounds_the_binding_to_one_bar() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220, 330], kick)\n");
     assert_eq!(bs[0].instrument, "kick");
     assert_eq!(bs[0].pattern, Pattern::seq(vec![
         Step::Value(220.0), Step::Value(330.0),
     ]));
-    assert_eq!(bs[0].cycles, Some(1.0));
+    assert_eq!(bs[0].bars, Some(1.0));
 }
 
 #[test]
 fn playn_bounds_the_binding_to_its_count() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4)\n");
-    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[0].bars, Some(4.0));
     assert_eq!(bs[0].pattern, Pattern::seq(vec![Step::Value(220.0)]));
 }
 
 /// Repeats count passes of the pattern, so a rate that packs two passes into
-/// each cycle halves the number of cycles they take.
+/// each bar halves the number of bars they take.
 #[test]
 fn a_rate_shortens_the_window_it_speeds_up() {
     let bs = bindings_of("fn kick(f) = sin(f)\nplayn([220], kick, 4, 2)\n");
-    assert_eq!(bs[0].cycles, Some(2.0));
+    assert_eq!(bs[0].bars, Some(2.0));
     assert_eq!(bs[0].pattern, Pattern::Fast(Rate::Fixed(2.0),
         Box::new(Pattern::seq(vec![Step::Value(220.0)]))));
 
     let bs = bindings_of("fn kick(f) = sin(f)\nplay_once([220], kick, 0.5)\n");
-    assert_eq!(bs[0].cycles, Some(2.0), "a half-speed pass takes two cycles");
+    assert_eq!(bs[0].bars, Some(2.0), "a half-speed pass takes two bars");
 }
 
 /// Both take a piped pattern and lanes, like `play`.
 #[test]
 fn the_bounded_plays_pipe_and_take_lanes() {
     let bs = bindings_of(&format!("{BASS}[220, 330] >> play_once(bass, cut: [400, 2000])\n"));
-    assert_eq!(bs[0].cycles, Some(1.0));
+    assert_eq!(bs[0].bars, Some(1.0));
     assert_eq!(bs[0].lanes.len(), 1);
 
     let bs = bindings_of(&format!("{BASS}[220] >> playn(bass, 3, legato: 0.5)\n"));
-    assert_eq!(bs[0].cycles, Some(3.0));
+    assert_eq!(bs[0].bars, Some(3.0));
     assert_eq!(bs[0].lanes.len(), 1);
 }
 
@@ -987,9 +1037,36 @@ fn rate_speeds_the_pattern_and_not_the_lanes() {
         Pattern::seq(vec![Step::Value(400.0), Step::Value(2000.0)]));
 }
 
+/// A sequenced section plays its pattern from the top, and its lane from its
+/// first value — end to end, in the shape that found this: seventeen eighths
+/// under a rising volume, placed eight bars in by a `.then`. The pass is 2.125
+/// bars, which divides neither the bar nor the offset, so laid on the
+/// transport's grid the section opened on its fourteenth note and the ramp
+/// began three quarters of the way up before jumping back to the bottom.
+#[test]
+fn a_sequenced_section_starts_at_the_top_of_its_pattern() {
+    use crate::pattern::pattern::Span;
+    use crate::pattern::patterns::Patterns;
+
+    let src = "\
+fn breath(n, vol = 1) = sin(n) * vol
+fn ramp() = play_once(for i in 0..=16 { 220;e }, breath, vol: 0..=16)
+fn lead(n) = sin(n)
+playn([220], lead, 8).then(ramp)
+";
+    let pats = Patterns { bindings: bindings_of(src), origin: 0.0, choices: Vec::new() };
+    let vols: Vec<f64> = (0..14)
+        .flat_map(|bar| pats.query(Span::new(bar as f64, bar as f64 + 1.0)))
+        .filter(|e| e.instrument == "breath")
+        .map(|e| e.args.iter().find(|(n, _)| n == "vol").expect("vol lane").1)
+        .collect();
+
+    assert_eq!(vols, (0..=16).map(|i| i as f64).collect::<Vec<_>>());
+}
+
 /// End to end, from source to scheduled events: a lane longer than the pattern
-/// walks its whole list rather than being squeezed into the pattern's cycle.
-/// Twenty cutoffs under two notes take ten cycles, and every one is heard.
+/// walks its whole list rather than being squeezed into the pattern's bar.
+/// Twenty cutoffs under two notes take ten bars, and every one is heard.
 #[test]
 fn a_long_lane_is_played_through_from_source() {
     use crate::pattern::pattern::Span;
@@ -1376,7 +1453,7 @@ fn random_lists_feed_patterns() {
 
 /// The draw happens once, while the program is lowered — so the riff a pattern
 /// is bound to is settled, and plays the same until the next eval. Something
-/// re-rolled per cycle would be a different feature, and not this one.
+/// re-rolled per bar would be a different feature, and not this one.
 #[test]
 fn a_random_pattern_is_settled_at_eval() {
     let bs = bindings_of("fn lead(n) = sin(n)\nplay(rands(6, 100, 900), lead)\n");
@@ -1641,7 +1718,7 @@ fn every_example_compiles_and_realizes() {
                 })
                 .collect();
             let voice = crate::scheduler::voice::build_voice(
-                &instruments, &binding.instrument, 60.0, &lanes, 0.5, DEFAULT_BEAT_SECS);
+                &instruments, &binding.instrument, 60.0, &lanes, 0.5, DEFAULT_BEAT_SECS, Default::default());
             if voice.is_err() {
                 panic!("{name}: instrument `{}` failed to build", binding.instrument);
             }
@@ -1672,17 +1749,17 @@ fn then_offsets_what_follows() {
 
     assert_eq!(bs[0].instrument, "bass");
     assert_eq!(bs[0].start, 0.0);
-    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[0].bars, Some(4.0));
 
-    // The chorus opens exactly where the four cycles ran out.
+    // The chorus opens exactly where the four bars ran out.
     assert_eq!(bs[1].instrument, "lead");
     assert_eq!(bs[1].start, 4.0);
-    assert_eq!(bs[1].cycles, None);
+    assert_eq!(bs[1].bars, None);
 }
 
-/// `play_once` is one cycle, so what follows starts at cycle 1.
+/// `play_once` is one bar, so what follows starts at bar 1.
 #[test]
-fn play_once_hands_over_after_one_cycle() {
+fn play_once_hands_over_after_one_bar() {
     let bs = bindings_of(&format!("{SECTIONS}play_once([c3], bass).then(chorus)\n"));
     assert_eq!(bs[1].start, 1.0);
 }
@@ -1693,8 +1770,8 @@ fn then_chains() {
     let bs = bindings_of(&format!(
         "{SECTIONS}playn([c3], bass, 2).then(tail).then(chorus)\n"));
     assert_eq!(bs.len(), 3);
-    assert_eq!(bs[0].start, 0.0);       // playn, 2 cycles
-    assert_eq!(bs[1].start, 2.0);       // tail: play_once, 1 cycle
+    assert_eq!(bs[0].start, 0.0);       // playn, 2 bars
+    assert_eq!(bs[1].start, 2.0);       // tail: play_once, 1 bar
     assert_eq!(bs[2].start, 3.0);       // chorus, after both
 }
 
@@ -1713,15 +1790,15 @@ playn([c2], bass, 2).then(outer)
     assert_eq!(bs.len(), 3);
     assert_eq!(bs[0].start, 0.0);   // the playn
     assert_eq!(bs[1].start, 2.0);   // outer's own play_once
-    assert_eq!(bs[2].start, 3.0);   // inner, one cycle after that
+    assert_eq!(bs[2].start, 3.0);   // inner, one bar after that
 }
 
-/// `rate` packs repeats into fewer cycles, and the handover follows.
+/// `rate` packs repeats into fewer bars, and the handover follows.
 #[test]
 fn rate_shortens_the_wait() {
     let bs = bindings_of(&format!("{SECTIONS}playn([c3], bass, 4, 2).then(chorus)\n"));
-    // Four passes at double rate is two cycles.
-    assert_eq!(bs[0].cycles, Some(2.0));
+    // Four passes at double rate is two bars.
+    assert_eq!(bs[0].bars, Some(2.0));
     assert_eq!(bs[1].start, 2.0);
 }
 
@@ -1739,7 +1816,7 @@ fn after() = play_once([c2], bass)
 play_once([c1], bass).then(both).then(after)
 ";
     let bs = bindings_of(src);
-    // both's two plays start at cycle 1; the longer runs 5, so `after` is at 6.
+    // both's two plays start at bar 1; the longer runs 5, so `after` is at 6.
     assert_eq!(bs[1].start, 1.0);
     assert_eq!(bs[2].start, 1.0);
     assert_eq!(bs[3].start, 6.0);
@@ -1755,7 +1832,7 @@ for i in 1..=3 { playn([c4], lead, i) }.then(after)
 ";
     let bs = bindings_of(src);
     assert_eq!(bs.len(), 4);
-    // The longest of the three runs 3 cycles.
+    // The longest of the three runs 3 bars.
     assert_eq!(bs[3].start, 3.0);
 }
 
@@ -1788,7 +1865,7 @@ fn then_refuses_a_function_taking_parameters() {
 fn shape(src: &str) -> Vec<(String, f64, Option<f64>)> {
     bindings_of(src)
         .into_iter()
-        .map(|b| (b.instrument, b.start, b.cycles))
+        .map(|b| (b.instrument, b.start, b.bars))
         .collect()
 }
 
@@ -1845,7 +1922,7 @@ fn written_out_sections_chain_with_named_ones() {
     assert_eq!(bs.len(), 4);
     assert_eq!(bs[0].start, 0.0);
     assert_eq!(bs[1].start, 2.0);
-    assert_eq!(bs[2].start, 4.0);   // tail: play_once, one cycle
+    assert_eq!(bs[2].start, 4.0);   // tail: play_once, one bar
     assert_eq!(bs[3].start, 5.0);
 }
 
@@ -1857,7 +1934,7 @@ fn a_chain_inside_a_written_out_section_composes() {
         "{SECTIONS}playn([c3], bass, 2).then(play_once([c2], bass).then(tail))\n"));
     assert_eq!(bs.len(), 3);
     assert_eq!(bs[1].start, 2.0);   // the inner section's own start
-    assert_eq!(bs[2].start, 3.0);   // one cycle further, not back at cycle 1
+    assert_eq!(bs[2].start, 3.0);   // one bar further, not back at bar 1
 }
 
 /// `then_n` re-lowers its section once per pass, so a `rand` inside it is
@@ -1873,7 +1950,7 @@ fn then_n_redraws_a_written_out_section_each_pass() {
         "{SECTIONS}seed(7)\nplayn([c3], bass, 2).then_n({drawn}, 3)\n");
     assert_eq!(shape(&named), shape(&written));
 
-    let passes: Vec<_> = bindings_of(&written)[1..].iter().map(|b| b.cycles).collect();
+    let passes: Vec<_> = bindings_of(&written)[1..].iter().map(|b| b.bars).collect();
     assert_eq!(passes.len(), 3);
     assert!(passes[0] != passes[1] || passes[1] != passes[2],
             "the passes were drawn once and copied: {passes:?}");
@@ -1937,7 +2014,7 @@ fn a_play_bound_to_a_name_is_not_a_section() {
         "{SECTIONS}let named = playn([c4, e4], lead, 2)\n\
          playn([c3], bass, 4).then(named)\n"));
     assert!(e.contains("already been placed"), "got: {e}");
-    assert!(e.contains("sounds at cycle 0"), "got: {e}");
+    assert!(e.contains("sounds at bar 0"), "got: {e}");
     assert!(e.contains("Wrap it in a `fn`"), "got: {e}");
 }
 
@@ -2025,8 +2102,8 @@ fn play_all_leaves_its_parts_where_they_were() {
     let bs = bindings_of(&format!(
         "{SECTIONS}play_all(playn([c3], bass, 4), play_once([c4], lead))\n"));
     assert_eq!(bs.len(), 2);
-    assert_eq!((bs[0].start, bs[0].cycles), (0.0, Some(4.0)));
-    assert_eq!((bs[1].start, bs[1].cycles), (0.0, Some(1.0)));
+    assert_eq!((bs[0].start, bs[0].bars), (0.0, Some(4.0)));
+    assert_eq!((bs[1].start, bs[1].bars), (0.0, Some(1.0)));
 }
 
 /// The point of the grouping: `.then` follows the longest part, not the last
@@ -2077,16 +2154,58 @@ fn play_all_with_an_endless_part_cannot_be_followed() {
     assert!(e.contains("never finishes"), "got: {e}");
 }
 
+/// A second counted section, for the tests that need two. `chorus` above is
+/// also the name of a UGen, which is only ever written bare here.
+const VERSE: &str = "fn verse() = playn([c3], bass, 4)\n";
+
 #[test]
-fn play_all_refuses_a_non_play_argument() {
+fn play_all_refuses_an_argument_that_is_not_a_section() {
     let e = play_err(&format!("{SECTIONS}play_all(play_once([c3], bass), 4)\n"));
-    assert!(e.contains("argument 2 is not a play"), "got: {e}");
+    assert!(e.contains("argument 2 is not a section"), "got: {e}");
+}
+
+/// A section is written the same two ways everywhere it is taken, `play_all`
+/// included: `seq(verse, chorus)` and `play_all(verse, chorus)` name their
+/// sections alike, and neither needs the parentheses the other does not.
+#[test]
+fn play_all_takes_a_section_by_name() {
+    let named = bindings_of(&format!("{SECTIONS}{VERSE}play_all(verse, tail)\n"));
+    let written = bindings_of(&format!("{SECTIONS}{VERSE}play_all(verse(), tail())\n"));
+
+    assert_eq!(named.len(), written.len());
+    for (a, b) in named.iter().zip(written.iter()) {
+        assert_eq!(a.instrument, b.instrument);
+        assert_eq!(a.start, b.start);
+        assert_eq!(a.bars, b.bars);
+    }
+}
+
+/// And it is a section wherever a section goes, so a group named inside a
+/// `seq` opens where the `seq` placed it rather than at the origin.
+#[test]
+fn a_named_section_inside_a_group_is_placed_with_the_group() {
+    let bs = bindings_of(&format!(
+        "{SECTIONS}{VERSE}seq(tail, play_all(verse, tail))\n"));
+    let intro = bs[0].bars.expect("a counted intro");
+
+    assert!(intro > 0.0);
+    for b in &bs[1..] {
+        assert_eq!(b.start, intro, "every part of the group opens where the seq reached");
+    }
+}
+
+/// A section that takes parameters is not one, whichever combinator is asking.
+#[test]
+fn play_all_refuses_a_section_that_needs_arguments() {
+    let e = play_err(&format!(
+        "{SECTIONS}fn faster(n) = playn([c4], lead, n)\nplay_all(tail, faster)\n"));
+    assert!(e.contains("no parameters"), "got: {e}");
 }
 
 #[test]
 fn play_all_needs_something_to_group() {
     let e = play_err(&format!("{SECTIONS}play_all()\n"));
-    assert!(e.contains("at least one play"), "got: {e}");
+    assert!(e.contains("at least one section"), "got: {e}");
 }
 
 /// A play handle is not audio and not pattern data.
@@ -2304,7 +2423,7 @@ fn the_readme_beat_example_builds_a_voice() {
     lower(&items).unwrap_or_else(|e| panic!("README example failed to lower: {e}"));
 
     let ins = crate::scheduler::voice::Instruments::from_program(&items);
-    crate::scheduler::voice::build_voice(&ins, "stab", 60.0, &[], 0.5, DEFAULT_BEAT_SECS)
+    crate::scheduler::voice::build_voice(&ins, "stab", 60.0, &[], 0.5, DEFAULT_BEAT_SECS, Default::default())
         .unwrap_or_else(|e| panic!("README example failed to build a voice: {e}"));
 }
 
@@ -2326,7 +2445,7 @@ fn the_readme_chop_instrument_builds_a_voice() {
     let ins = crate::scheduler::voice::Instruments::from_program(&items).with_samples(samples);
 
     let lanes = vec![("at".to_string(), 0.75)];
-    assert!(crate::scheduler::voice::build_voice(&ins, "chop", 1.0, &lanes, 0.25, DEFAULT_BEAT_SECS)
+    assert!(crate::scheduler::voice::build_voice(&ins, "chop", 1.0, &lanes, 0.25, DEFAULT_BEAT_SECS, Default::default())
         .is_ok());
 }
 
@@ -2340,6 +2459,7 @@ fn the_readme_chop_instrument_builds_a_voice() {
 mod length_tests {
     use super::*;
     use crate::pattern::pattern::{Slot, Span, UNIT};
+    use crate::scheduler::clock::Meter;
 
     const TONE: &str = "fn tone(n, cut = 800) = saw(n)\n";
 
@@ -2497,7 +2617,7 @@ mod stack_tests {
         got
     }
 
-    /// A chord: three notes struck together, all lasting the whole cycle.
+    /// A chord: three notes struck together, all lasting the whole bar.
     #[test]
     fn a_chord_sounds_all_its_notes_at_once() {
         let p = pattern_of(&format!("{TONE}play(stack([c4], [e4], [g4]), tone)\n"));
@@ -2533,7 +2653,7 @@ mod stack_tests {
         assert_eq!(evs.len(), 3);
 
         let held = evs.iter().find(|e| e.value == 67.0).expect("the g");
-        assert_eq!(held.duration(), 1.0, "the held note spans the cycle");
+        assert_eq!(held.duration(), 1.0, "the held note spans the bar");
         let moving: Vec<f64> = evs.iter().filter(|e| e.value != 67.0).map(|e| e.begin).collect();
         assert_eq!(moving, vec![0.0, 0.5]);
     }
@@ -2603,7 +2723,7 @@ fn endless() = play([c4], lead)
 fn then_after_leaves_a_gap() {
     let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).then_after(2, one)\n"));
     assert_eq!(bs.len(), 2);
-    assert_eq!(bs[0].cycles, Some(4.0));
+    assert_eq!(bs[0].bars, Some(4.0));
     assert_eq!(bs[1].start, 6.0);
 }
 
@@ -2611,8 +2731,8 @@ fn then_after_leaves_a_gap() {
 #[test]
 fn overlap_starts_the_next_section_early() {
     let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).overlap(1, two)\n"));
-    assert_eq!(bs[0].cycles, Some(4.0));
-    assert_eq!(bs[1].start, 3.0, "one cycle before the first ended");
+    assert_eq!(bs[0].bars, Some(4.0));
+    assert_eq!(bs[1].start, 3.0, "one bar before the first ended");
     // The chain carries on from the later of the two: 3 + 2 beats 4.
     let bs = bindings_of(&format!("{ARR}playn([c3], bass, 4).overlap(1, two).then(one)\n"));
     assert_eq!(bs[2].start, 5.0);
@@ -2681,10 +2801,10 @@ fn then_n_hands_over_after_the_last_pass() {
 fn then_each_passes_the_element() {
     let bs = bindings_of(&format!("{ARR}one().then_each([1, 2, 4], faster)\n"));
     assert_eq!(bs.len(), 4);
-    assert_eq!(bs[1].cycles, Some(1.0));
-    assert_eq!(bs[2].cycles, Some(2.0));
-    assert_eq!(bs[3].cycles, Some(4.0));
-    // And they follow one another rather than piling up at the same cycle.
+    assert_eq!(bs[1].bars, Some(1.0));
+    assert_eq!(bs[2].bars, Some(2.0));
+    assert_eq!(bs[3].bars, Some(4.0));
+    // And they follow one another rather than piling up at the same bar.
     assert_eq!(bs[1].start, 1.0);
     assert_eq!(bs[2].start, 2.0);
     assert_eq!(bs[3].start, 4.0);
@@ -2698,7 +2818,7 @@ fn then_fill_inherits_the_instrument_and_its_lanes() {
     assert_eq!(bs.len(), 2);
     assert_eq!(bs[1].instrument, "bass");
     assert_eq!(bs[1].start, 4.0);
-    assert_eq!(bs[1].cycles, Some(1.0), "one pass");
+    assert_eq!(bs[1].bars, Some(1.0), "one pass");
     assert_eq!(bs[1].lanes, bs[0].lanes, "the lanes came with it");
     assert_ne!(bs[1].pattern, bs[0].pattern, "only the pattern is new");
 }
@@ -2725,13 +2845,13 @@ fn loop_repeats_the_whole_chain_and_not_just_the_last_link() {
     let bs = bindings_of(&format!(
         "{ARR}playn([c3], bass, 3).then_fill([c2, c2]).loop(3)\n"));
     assert_eq!(bs.len(), 6, "groove and fill, three times over");
-    // Pass one is the original pair; every later pass is it, four cycles on.
+    // Pass one is the original pair; every later pass is it, four bars on.
     let starts: Vec<f64> = bs.iter().map(|b| b.start).collect();
     assert_eq!(starts, vec![0.0, 3.0, 4.0, 7.0, 8.0, 11.0]);
     assert_eq!(bs[2].instrument, "bass", "a copy plays what it copied");
     assert_eq!(bs[2].pattern, bs[0].pattern);
     assert_eq!(bs[3].pattern, bs[1].pattern);
-    assert_eq!(bs[2].cycles, Some(3.0), "and for as long");
+    assert_eq!(bs[2].bars, Some(3.0), "and for as long");
 }
 
 /// The chain carries on from the end of the last pass, not the first.
@@ -2749,7 +2869,7 @@ fn loop_copies_lanes_and_rate() {
     let bs = bindings_of(&format!(
         "{ARR}playn([c3], bass, 3, 2, cut: [500, 900]).loop(2)\n"));
     assert_eq!(bs.len(), 2);
-    assert_eq!(bs[1].start, 1.5, "1.5 cycles at rate 2");
+    assert_eq!(bs[1].start, 1.5, "1.5 bars at rate 2");
     assert_eq!(bs[1].lanes, bs[0].lanes);
     assert_eq!(bs[1].pattern, bs[0].pattern);
 }
@@ -2784,7 +2904,7 @@ fn loop_takes_a_chain_that_take_has_bounded() {
     let bs = bindings_of(&format!("{ARR}play([c3], bass).take(2).loop(3)\n"));
     assert_eq!(bs.len(), 3);
     assert_eq!(bs[2].start, 4.0);
-    assert_eq!(bs[2].cycles, Some(2.0), "the cut came with the copy");
+    assert_eq!(bs[2].bars, Some(2.0), "the cut came with the copy");
 }
 
 /// A choice already comes back around on a period of its own, and two
@@ -2818,7 +2938,7 @@ fn a_loop_can_be_looped() {
 }
 
 /// The hazard `quantize` exists for: `rate` divides into the count, so this
-/// section is 1.5 cycles long and everything after it would be off the beat.
+/// section is 1.5 bars long and everything after it would be off the beat.
 #[test]
 fn quantize_rounds_a_fractional_section_up() {
     let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3, 2).then(one)\n"));
@@ -2846,7 +2966,44 @@ fn quantize_takes_a_grid() {
 #[test]
 fn quantize_does_not_cut_what_is_playing() {
     let bs = bindings_of(&format!("{ARR}playn([c3], bass, 3, 2).quantize().then(one)\n"));
-    assert_eq!(bs[0].cycles, Some(1.5));
+    assert_eq!(bs[0].bars, Some(1.5));
+}
+
+/// The rest a section quantized to is part of the section, so naming it as a
+/// `fn` keeps it. Read off the bindings instead, the padding is invisible — no
+/// note was written into it — and the section would silently shorten to its
+/// last note the moment it was given a name.
+#[test]
+fn a_named_section_keeps_the_rest_it_quantized_to() {
+    let bs = bindings_of(&format!(
+        "{ARR}fn rounded() = playn([c3], bass, 3, 2).quantize()\n\
+         rounded().then(one)\n"));
+    assert_eq!(bs[0].bars, Some(1.5), "the notes are unchanged");
+    assert_eq!(bs[1].start, 2.0, "and what follows starts at the quantized end");
+}
+
+/// And `.loop` repeats the rest along with the notes. Without it a loop comes
+/// back early by exactly the padding that was asked for — the section is over,
+/// on paper, at its last note.
+#[test]
+fn a_loop_repeats_the_rest_a_section_quantized_to() {
+    let bs = bindings_of(&format!(
+        "{ARR}fn rounded() = playn([c3], bass, 3, 2).quantize()\n\
+         rounded().then(rounded).loop(2)\n"));
+    let starts: Vec<f64> = bs.iter().map(|b| b.start).collect();
+    assert_eq!(starts, vec![0.0, 2.0, 4.0, 6.0], "two-bar slots throughout");
+}
+
+/// `take` says how long a section is, which is a length and not only a cut:
+/// asking for more than the notes fill leaves a rest at the end, and that rest
+/// survives being named too.
+#[test]
+fn a_named_section_keeps_the_length_it_was_taken_to() {
+    let bs = bindings_of(&format!(
+        "{ARR}fn padded() = play_once([c4], lead).take(4)\n\
+         padded().then(one)\n"));
+    assert_eq!(bs[0].bars, Some(1.0), "a cut is a ceiling, so the note is untouched");
+    assert_eq!(bs[1].start, 4.0);
 }
 
 /// `take` is what gives a plain `play` an end, so a chain can follow one.
@@ -2856,7 +3013,7 @@ fn take_bounds_an_endless_play() {
     assert!(e.contains("never finishes"), "got: {e}");
 
     let bs = bindings_of(&format!("{ARR}play([c3], bass).take(8).then(one)\n"));
-    assert_eq!(bs[0].cycles, Some(8.0));
+    assert_eq!(bs[0].bars, Some(8.0));
     assert_eq!(bs[1].start, 8.0);
 }
 
@@ -2866,8 +3023,8 @@ fn take_bounds_an_endless_play() {
 fn take_leaves_a_shorter_part_alone() {
     let bs = bindings_of(&format!(
         "{ARR}play_all(play([c3], bass), playn([c4], lead, 2)).take(8)\n"));
-    assert_eq!(bs[0].cycles, Some(8.0), "the endless one was cut");
-    assert_eq!(bs[1].cycles, Some(2.0), "the short one was not lengthened");
+    assert_eq!(bs[0].bars, Some(8.0), "the endless one was cut");
+    assert_eq!(bs[1].bars, Some(2.0), "the short one was not lengthened");
 }
 
 /// One counted pattern as the trigger to stop the endless ones around it.
@@ -2875,9 +3032,9 @@ fn take_leaves_a_shorter_part_alone() {
 fn stop_cuts_the_endless_parts_where_the_counted_one_runs_out() {
     let bs = bindings_of(&format!(
         "{ARR}play_all(play([c3], bass), play([c5], hat), playn([c4], lead, 8)).stop()\n"));
-    assert_eq!(bs[0].cycles, Some(8.0));
-    assert_eq!(bs[1].cycles, Some(8.0));
-    assert_eq!(bs[2].cycles, Some(8.0));
+    assert_eq!(bs[0].bars, Some(8.0));
+    assert_eq!(bs[1].bars, Some(8.0));
+    assert_eq!(bs[2].bars, Some(8.0));
 }
 
 /// And having stopped, the chain has an end, so something may follow it.
@@ -2896,7 +3053,7 @@ fn stop_refuses_a_section_that_never_finishes() {
 
 // ---- choice ----
 
-/// Every arm is written, all starting at the same cycle, all marked as arms of
+/// Every arm is written, all starting at the same bar, all marked as arms of
 /// one choice — the scheduler is what picks between them.
 #[test]
 fn wthen_writes_every_arm_as_one_choice() {
@@ -2909,7 +3066,7 @@ fn wthen_writes_every_arm_as_one_choice() {
     assert_eq!(l.choices[0].weights, vec![0.7, 0.3]);
 
     let arms = &l.bindings[1..];
-    assert!(arms.iter().all(|b| b.start == 2.0), "every arm opens at the same cycle");
+    assert!(arms.iter().all(|b| b.start == 2.0), "every arm opens at the same bar");
     assert_eq!(arms[0].choice.map(|c| c.arm), Some(0));
     assert_eq!(arms[1].choice.map(|c| c.arm), Some(1));
     // The period is the longest arm, so the short one leaves silence rather
@@ -2927,7 +3084,7 @@ fn wthen_never_finishes_on_its_own() {
 
     let bs = bindings_of(&format!(
         "{ARR}playn([c3], bass, 2).wthen([one, two], [1, 1]).take(8).then(one)\n"));
-    assert_eq!(bs[3].start, 10.0, "eight cycles after the choice opened at 2");
+    assert_eq!(bs[3].start, 10.0, "eight bars after the choice opened at 2");
 }
 
 #[test]
@@ -3041,7 +3198,7 @@ play_once([c2], bass)
     assert_eq!(l.choices.len(), 1, "one choice, from the wthen");
     // Nothing may be left unbounded: `take` closed the choice, and every
     // section before it was counted.
-    assert!(l.bindings.iter().all(|b| b.cycles.is_some()));
+    assert!(l.bindings.iter().all(|b| b.bars.is_some()));
     // The arms of the choice repeat; nothing before them does.
     let repeating = l.bindings.iter().filter(|b| b.repeat.is_some()).count();
     assert!(repeating > 0, "the choice's arms should repeat");
@@ -3098,6 +3255,7 @@ fn outro() = play_once([c2], inst)
 mod metrical_tests {
     use super::*;
     use crate::pattern::pattern::{Slot, Span, UNIT};
+    use crate::scheduler::clock::Meter;
 
     const TONE: &str = "fn tone(n, cut = 800) = saw(n)\n";
 
@@ -3105,21 +3263,21 @@ mod metrical_tests {
         bindings_of(src).into_iter().next().expect("a binding").pattern
     }
 
-    /// Onsets and durations in cycles, which is the only thing about a pattern
+    /// Onsets and durations in bars, which is the only thing about a pattern
     /// that a written value is claiming to control.
-    fn timing(p: &Pattern, cycles: f64) -> (Vec<f64>, Vec<f64>) {
-        let evs = p.query(Span::new(0.0, cycles));
+    fn timing(p: &Pattern, bars: f64) -> (Vec<f64>, Vec<f64>) {
+        let evs = p.query(Span::new(0.0, bars));
         (evs.iter().map(|e| e.begin).collect(), evs.iter().map(|e| e.duration()).collect())
     }
 
-    fn binding_cycles(src: &str) -> Option<f64> {
-        bindings_of(src).into_iter().next().expect("a binding").cycles
+    fn binding_bars(src: &str) -> Option<f64> {
+        bindings_of(src).into_iter().next().expect("a binding").bars
     }
 
     // ---- compatibility ----
 
     /// The promise the whole design rests on. Four quarters are four beats are
-    /// one cycle, so the sequence is already the length a bare sequence is and
+    /// one bar, so the sequence is already the length a bare sequence is and
     /// nothing is wrapped around it — the pattern is the same value a list of
     /// four plain steps has always lowered to.
     #[test]
@@ -3146,16 +3304,23 @@ mod metrical_tests {
 
     // ---- division ----
 
-    /// Additive meter, and the reason a bare metrical list needs no marker: a
-    /// bar of three quarters is three beats, which is three quarters of a cycle.
+    /// Polymeter, and the reason a bare metrical list needs no marker: three
+    /// quarters is three beats, and in 4/4 that is three quarters of a bar.
+    ///
+    /// This is the case that makes *pass* and *bar* two words rather than one.
+    /// What is written here is a three-beat phrase — a musician would call it
+    /// a 3/4 bar — but the grid it is played against is still four beats, so
+    /// it does not fill a bar and does not claim to. Write it in 3/4 and it
+    /// does; see `a_three_beat_pass_fills_a_three_four_bar`.
     #[test]
-    fn a_three_beat_bar_takes_three_quarters_of_a_cycle() {
+    fn a_three_beat_pass_takes_three_quarters_of_a_four_four_bar() {
         let p = pattern_of(&format!("{TONE}play([220;q, 330, 440], tone)\n"));
         let (onsets, durations) = timing(&p, 0.75);
         assert_eq!(onsets, vec![0.0, 0.25, 0.5]);
-        assert_eq!(durations, vec![0.25, 0.25, 0.25], "each is a quarter of a cycle");
-        // The bar comes round at 0.75 rather than at 1, so two of them are one
-        // and a half cycles — which is the whole of what additive meter means.
+        assert_eq!(durations, vec![0.25, 0.25, 0.25], "each is a quarter of a bar");
+        // The pass comes round at 0.75 rather than at 1, so two of them are one
+        // and a half bars — and the second straddles the bar line, which is
+        // what rotating against the grid means.
         assert_eq!(p.query(Span::new(0.0, 1.5)).len(), 6);
     }
 
@@ -3229,7 +3394,7 @@ mod metrical_tests {
     #[test]
     fn a_half_and_a_quarter_are_a_legal_triplet() {
         // The triplet is the whole bar, so the bar is the half note it is
-        // played in — half a cycle.
+        // played in — half a bar.
         let p = pattern_of(&format!("{TONE}play([[220;h, 330;q];t], tone)\n"));
         let (onsets, durations) = timing(&p, 0.5);
         assert_eq!(onsets.len(), 2);
@@ -3248,7 +3413,7 @@ mod metrical_tests {
         // Six eighths played in four: the bar is a half note, and the opening
         // quarter fills two of the six slots — a third of the group.
         assert_eq!(durations.len(), 5);
-        // A third of a half note: two of the six slots, in a group half a cycle long.
+        // A third of a half note: two of the six slots, in a group half a bar long.
         assert!((durations[0] - 1.0 / 6.0).abs() < 1e-9, "got {}", durations[0]);
     }
 
@@ -3358,27 +3523,27 @@ mod metrical_tests {
 
     // ---- what a pass is worth ----
 
-    /// `playn` counts passes and binds in cycles, and a metrical pass is not a
-    /// cycle. Four passes of a three-beat bar are three cycles.
+    /// `playn` counts passes and binds in bars, and a metrical pass is not a
+    /// bar. Four passes of a three-beat bar are three bars.
     #[test]
-    fn playn_counts_passes_not_cycles_on_a_metrical_pattern() {
-        let cycles = binding_cycles(&format!("{TONE}playn([220;q, 330, 440], tone, 4)\n"));
-        assert_eq!(cycles, Some(3.0));
+    fn playn_counts_passes_not_bars_on_a_metrical_pattern() {
+        let bars = binding_bars(&format!("{TONE}playn([220;q, 330, 440], tone, 4)\n"));
+        assert_eq!(bars, Some(3.0));
     }
 
     /// And the conversion composes with `rate`, which is the other thing
-    /// standing between a pass and a cycle.
+    /// standing between a pass and a bar.
     #[test]
     fn rate_still_compounds_with_a_metrical_sequence() {
-        let cycles = binding_cycles(&format!("{TONE}playn([220;q, 330, 440], tone, 4, 2)\n"));
-        assert_eq!(cycles, Some(1.5), "same four passes, twice as fast");
+        let bars = binding_bars(&format!("{TONE}playn([220;q, 330, 440], tone, 4, 2)\n"));
+        assert_eq!(bars, Some(1.5), "same four passes, twice as fast");
     }
 
     /// A pattern written in shares is untouched by any of it.
     #[test]
     fn playn_on_a_sequence_of_shares_is_unchanged() {
-        let cycles = binding_cycles(&format!("{TONE}playn([220, 330, 440], tone, 4)\n"));
-        assert_eq!(cycles, Some(4.0));
+        let bars = binding_bars(&format!("{TONE}playn([220, 330, 440], tone, 4)\n"));
+        assert_eq!(bars, Some(4.0));
     }
 
     // ---- dots and ties ----
@@ -3402,7 +3567,7 @@ mod metrical_tests {
     #[test]
     fn a_double_dot_adds_half_and_then_a_quarter() {
         let double = pattern_of(&format!("{TONE}play([220;q.dot(2), 330;s], tone)\n"));
-        // 7/4 + 1/4 beats is two beats, which is half a cycle.
+        // 7/4 + 1/4 beats is two beats, which is half a bar.
         let (_, durations) = timing(&double, 0.5);
         assert!((durations[0] - 0.4375).abs() < 1e-9, "got {}", durations[0]);
         assert!((durations[1] - 0.0625).abs() < 1e-9, "got {}", durations[1]);
@@ -3468,6 +3633,9 @@ mod metrical_tests {
             "play([c4;q, [e4;e, f4, g4];t, c5], tone)",
             "play([c4;q.dot, e4;e], tone)",
             "play([c4;h + e, e4;e], tone)",
+            "play(for i in 0..=4 { f4;e }, tone)",
+            "play(for i in 0..=7 { 60 + i;s }, tone)",
+            "play(for i in 1..=3 { 220 * i;i }, tone)",
         ] {
             let src = format!("{TONE}{good}\n");
             let items = parse(src).expect("parse failed");
@@ -3479,7 +3647,7 @@ mod metrical_tests {
     }
 
     /// The paradigms cannot be mixed across a nesting either. A group is given
-    /// exactly one cycle of slot-local time, so a bar half a cycle long would
+    /// exactly one bar of slot-local time, so a bar half a bar long would
     /// sound its contents twice inside its own slot — a stutter, not a rhythm.
     #[test]
     fn a_metrical_group_cannot_sit_in_a_sequence_of_shares() {
@@ -3487,10 +3655,10 @@ mod metrical_tests {
         assert!(err.contains("note values"), "got: {err}");
     }
 
-    /// But a group that does come to a cycle is no different from the same
+    /// But a group that does come to a bar is no different from the same
     /// steps written as shares, so there is nothing to refuse.
     #[test]
-    fn a_group_of_exactly_one_cycle_still_nests_in_shares() {
+    fn a_group_of_exactly_one_bar_still_nests_in_shares() {
         let written = pattern_of(&format!(
             "{TONE}play([220;2, [330;q, 440, 550, 660]], tone)\n"));
         let plain = pattern_of(&format!("{TONE}play([220;2, [330, 440, 550, 660]], tone)\n"));
@@ -3505,7 +3673,124 @@ mod metrical_tests {
             "{TONE}play([220;q, 330, 440], tone, cut: [400, 2000])\n"));
         assert_eq!(bs[0].lanes[0].pattern.values(), vec![Some(400.0), Some(2000.0)]);
     }
+
+    // ---- the signature ----
+    //
+    // Everything above is written in 4/4, where a bar is four beats. These pin
+    // what the time signature changes, and — just as importantly — what it
+    // does not.
+
+    fn pattern_in(src: &str, meter: Meter) -> Pattern {
+        let items = parse(src.to_string()).expect("parse failed");
+        crate::lowerer::lower::lower_in_meter(&items, meter)
+            .expect("lower failed")
+            .bindings
+            .into_iter()
+            .next()
+            .expect("a binding")
+            .pattern
+    }
+
+    fn binding_bars_in(src: &str, meter: Meter) -> Option<f64> {
+        let items = parse(src.to_string()).expect("parse failed");
+        crate::lowerer::lower::lower_in_meter(&items, meter)
+            .expect("lower failed")
+            .bindings
+            .into_iter()
+            .next()
+            .expect("a binding")
+            .bars
+    }
+
+    const THREE_FOUR: Meter = Meter { top: 3, bottom: 4 };
+    const SIX_EIGHT: Meter = Meter { top: 6, bottom: 8 };
+
+    /// The question a musician asks first, and the reason the signature
+    /// exists: three quarters written in 3/4 is *a bar*, not three quarters of
+    /// one. The same three notes in 4/4 come round at 0.75 and rotate against
+    /// the grid — see `a_three_beat_pass_takes_three_quarters_of_a_four_four_bar`, which
+    /// pins exactly that. Both readings are right; the signature is what says
+    /// which one was meant.
+    #[test]
+    fn a_three_beat_pass_fills_a_three_four_bar() {
+        let p = pattern_in(&format!("{TONE}play([220;q, 330, 440], tone)\n"), THREE_FOUR);
+        let (onsets, durations) = timing(&p, 1.0);
+        assert_eq!(onsets, vec![0.0, 1.0 / 3.0, 2.0 / 3.0], "three even beats, filling the bar");
+        assert_eq!(durations.len(), 3);
+        // One pass to a bar, so a bar's query holds exactly one of each note —
+        // where in 4/4 the same query catches the first note of the next pass.
+        assert_eq!(p.query(Span::new(0.0, 1.0)).len(), 3);
+        assert_eq!(p.query(Span::new(0.0, 2.0)).len(), 6);
+    }
+
+    /// And a bare list of shares fills the bar in any signature, which is the
+    /// property that makes "a list is a bar" true rather than nearly true. It
+    /// is also why nothing here needed a conversion: shares were never counted
+    /// in beats.
+    #[test]
+    fn a_bare_list_fills_the_bar_in_any_signature() {
+        for meter in [Meter::default(), THREE_FOUR, SIX_EIGHT] {
+            let p = pattern_in(&format!("{TONE}play([220, 330, 440], tone)\n"), meter);
+            let (onsets, _) = timing(&p, 1.0);
+            assert_eq!(onsets, vec![0.0, 1.0 / 3.0, 2.0 / 3.0], "in {meter}");
+        }
+    }
+
+    /// Six eighths and three quarters are the same length, so a bar of 6/8
+    /// takes the same pass a bar of 3/4 does. What differs between the two is
+    /// where the accents fall, which is the writer's business and not the
+    /// clock's.
+    #[test]
+    fn six_eight_is_as_long_as_three_four() {
+        let six = pattern_in(&format!("{TONE}play([220;e, 330, 440, 550, 660, 770], tone)\n"),
+                             SIX_EIGHT);
+        let (onsets, _) = timing(&six, 1.0);
+        assert_eq!(onsets.len(), 6, "six eighths fill the bar");
+        assert_eq!(
+            binding_bars_in(&format!("{TONE}playn([220;q, 330, 440], tone, 2)\n"), SIX_EIGHT),
+            Some(2.0),
+            "and three quarters still fill it, since 6/8 and 3/4 are one length",
+        );
+    }
+
+    /// A counted section is as long as its passes, so the signature reaches
+    /// arrangement through the same arithmetic it reaches rhythm through: four
+    /// passes of a three-beat pattern are three bars in 4/4 and four in 3/4.
+    /// That is the whole practical point — `take` and `then` stop counting a
+    /// unit the music does not use.
+    #[test]
+    fn a_counted_section_follows_the_signature() {
+        let src = format!("{TONE}playn([220;q, 330, 440], tone, 4)\n");
+        assert_eq!(binding_bars_in(&src, Meter::default()), Some(3.0), "four three-beat passes in 4/4");
+        assert_eq!(binding_bars_in(&src, THREE_FOUR), Some(4.0), "one pass to a bar in 3/4");
+    }
+
+    /// A pass that disagrees with the bar still rotates against it — the
+    /// signature moves the bar line, it does not outlaw polymeter. Four beats
+    /// written in 3/4 is the same relationship as three beats in 4/4, the
+    /// other way up.
+    #[test]
+    fn a_four_beat_pass_rotates_against_a_three_four_bar() {
+        let p = pattern_in(&format!("{TONE}play([220;q, 330, 440, 550], tone)\n"), THREE_FOUR);
+        let (onsets, _) = timing(&p, 4.0 / 3.0);
+        assert_eq!(onsets.len(), 4, "the pass is four thirds of a bar");
+        assert_eq!(binding_bars_in(&format!("{TONE}playn([220;q, 330, 440, 550], tone, 3)\n"),
+                                   THREE_FOUR),
+                   Some(4.0),
+                   "so three passes come back onto the bar line after four bars");
+    }
 }
+
+
+
+
+
+
+
+
+
+
+
 
 
 

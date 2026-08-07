@@ -7,7 +7,7 @@
  * have built from `[c4;2, `;2, e4;4]`. That is the whole trick: nothing
  * downstream needs to know a pattern was drawn.
  *
- * The `length` on a step is in *cells*, not cycles. A note four cells wide is
+ * The `length` on a step is in *cells*, not bars. A note four cells wide is
  * written `;4`, and a row's cells always sum to the resolution it was drawn at
  * — which is why the resolution is derived rather than stored. See
  * `src-tauri/src/pattern/graphical.rs`, which this file is the other half of.
@@ -33,8 +33,11 @@ export interface GraphicalPattern {
   mode: Mode;
 }
 
-/** Grid widths the composer offers, in cells per cycle. One cycle is one bar,
- *  so 16 is sixteenth notes — the default because most rhythms fit it. */
+/** Grid widths the composer offers, in cells per bar. A cell is a share of the
+ *  bar rather than a note value, so in 4/4 the default 16 is sixteenth notes
+ *  and in 3/4 the same grid is sixteen to a three-beat bar. Powers of two
+ *  because that is what a rhythm drawn on a grid wants; the beat lines are
+ *  placed by fraction rather than by cell, which is what lets the two disagree. */
 export const RESOLUTIONS = [4, 8, 16, 32] as const;
 export const DEFAULT_RESOLUTION = 16;
 
@@ -142,7 +145,7 @@ export function fromCells(cells: (PatternStep | null)[]): PatternStep[] {
  * Anything the new note lands on is cut back to a rest rather than trimmed:
  * drawing over a note replaces it, which is what a roll does, and half a note
  * left behind is rarely what anyone meant. The grid keeps its width, so what
- * gets pushed off the end is lost — the cycle is a fixed length.
+ * gets pushed off the end is lost — the bar is a fixed length.
  */
 export function draw(
   steps: PatternStep[],
