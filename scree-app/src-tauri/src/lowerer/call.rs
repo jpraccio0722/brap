@@ -29,6 +29,15 @@ impl Lowerer {
             return self.section_builtin(&func.0, args, piped);
         }
 
+        // `play_all` is one of them in this respect: a section named among its
+        // arguments has to be inlined rather than evaluated, and a name that
+        // has already been evaluated is a `fn` value with nowhere left to put
+        // its notes. It differs only in *where* — the group's own start, which
+        // is where everything is already.
+        if Lowerer::is_play_all(&func.0) {
+            return self.play_all(args, piped);
+        }
+
         let mut arg_vals: Vec<Value> = Vec::with_capacity(args.len() + 1);
         let mut named: Vec<(String, Value)> = Vec::new();
 
@@ -54,12 +63,6 @@ impl Lowerer {
         if !named.is_empty() && !matches!(self.env.lookup(&func.0), Some(Value::Function(_))) {
             return Err(format!(
                 "{}: named arguments only work on a user `fn`", func.0));
-        }
-
-        // `play_all` only gathers handles its arguments have already produced
-        // by being evaluated above.
-        if Lowerer::is_play_all(&func.0) {
-            return self.play_all(&arg_vals);
         }
 
         // Before the UGen table: `sample` takes a buffer where the table's own

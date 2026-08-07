@@ -227,10 +227,16 @@ impl<'a> Scope<'a> {
                 result
             }
 
-            Expr::For { var, iter, body } => {
+            // The `;` length is inside the loop's scope like the body, because
+            // that is where the lowerer reads it — a length may be computed
+            // from `var` as freely as the step it measures.
+            Expr::For { var, iter, body, length } => {
                 self.expr(iter)?;
                 self.push([var.0.clone()]);
-                let result = self.expr(body);
+                let result = self.expr(body).and_then(|()| match length {
+                    Some(e) => self.expr(e),
+                    None => Ok(()),
+                });
                 self.pop();
                 result
             }

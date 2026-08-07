@@ -8,7 +8,7 @@
 //! rather than failing once per event on the scheduler thread.
 //!
 //! `play_once` and `playn` are the same binding with an end to it: they differ
-//! only in the `cycles` the binding carries, which is where the whole of "stop
+//! only in the `bars` the binding carries, which is where the whole of "stop
 //! after n passes" lives.
 //!
 //! `play_all` writes no binding of its own. It is the parallel counterpart to
@@ -22,13 +22,13 @@ use crate::parser::parser::{Arg, Expr, Ident};
 use crate::pattern::pattern::{Pattern, Slot, Step, UNIT};
 use crate::pattern::patterns::{Binding, Lane, RESERVED};
 use crate::pattern::rate::Rate;
-use crate::scheduler::clock::BEATS_PER_CYCLE;
+use crate::scheduler::clock::Meter;
 
 /// The one-shot: `play`, stopping after a single pass of the pattern.
 pub const PLAY_ONCE: &str = "play_once";
 /// The counted one: `playn(pattern, instrument, times, rate = 1)`.
 pub const PLAY_N: &str = "playn";
-/// A rate that moves: `accel(from, to, cycles)`.
+/// A rate that moves: `accel(from, to, bars)`.
 pub const ACCEL: &str = "accel";
 
 impl Lowerer {
@@ -42,38 +42,38 @@ impl Lowerer {
         name == ACCEL
     }
 
-    /// `accel(from, to, cycles)` — the only way to write a rate that moves.
+    /// `accel(from, to, bars)` — the only way to write a rate that moves.
     ///
     /// Refused rather than folded: a rate of zero or below is not a slow
     /// pattern but a stopped or reversed one, and a section bounded in passes
     /// would never reach its end to hand on to whatever follows. `Rate::accel`
     /// takes care of the shapes that are merely not curves.
     pub fn rate_builtin(&mut self, args: &[Value]) -> Result<Value, String> {
-        let [from, to, cycles] = args else {
+        let [from, to, bars] = args else {
             return Err(format!("{ACCEL} expects 3 arguments, got {}", args.len()));
         };
         let mut n = [0.0; 3];
         for (slot, (v, what)) in n.iter_mut().zip([
             (from, "from"),
             (to, "to"),
-            (cycles, "cycles"),
+            (bars, "bars"),
         ]) {
             match v {
                 Value::Number(x) if x.is_finite() => *slot = *x,
                 _ => return Err(format!("{ACCEL}: {what} must be a compile-time number")),
             }
         }
-        let [from, to, cycles] = n;
+        let [from, to, bars] = n;
         for (r, what) in [(from, "from"), (to, "to")] {
             if r <= 0.0 {
                 return Err(format!(
                     "{ACCEL}: {what} must be a positive rate, got {r}"));
             }
         }
-        if cycles < 0.0 {
-            return Err(format!("{ACCEL}: cycles cannot be negative, got {cycles}"));
+        if bars < 0.0 {
+            return Err(format!("{ACCEL}: bars cannot be negative, got {bars}"));
         }
-        Ok(Value::Rate(Rate::accel(from, to, cycles)))
+        Ok(Value::Rate(Rate::accel(from, to, bars)))
     }
 
     /// `play(pattern, instrument)` or `play(pattern, instrument, rate)`, plus
@@ -202,7 +202,7 @@ impl Lowerer {
                  length of time. A lane is read by note — the nth note takes the \
                  nth value — so how long a step lasts means nothing there; a `;` \
                  in a lane is how many notes the value covers"))?;
-            let pattern = to_pattern(&value)?;
+            let pattern = to_pattern(&value, self.meter)?;
             whole_lengths(&pattern).map_err(|len| format!(
                 "{name}: lane '{lane}' has a length of {len}. A lane is read by note, \
                  not by time — a `;` there is how many notes the value covers, so it \
@@ -221,7 +221,7 @@ impl Lowerer {
             }
         }
 
-        let (mut pattern, pass_cycles) = to_pattern_timed(&pattern_value)?;
+        let (mut pattern, pass_bars) = to_pattern_timed(&pattern_value, self.meter)?;
         if !rate.is_unit() {
             // Only the pattern. A lane is read by position — the nth note takes
             // the nth value — so it advances with the notes whatever speed they
@@ -230,17 +230,17 @@ impl Lowerer {
         }
 
         // Repeats are passes of the pattern, but the binding is bounded in
-        // cycles. Two things stand between the two: `rate` has just packed
-        // `rate` passes into each cycle, and a sequence of written note values
-        // was never one cycle long to begin with — `[q, q, q]` is three beats,
-        // so four passes of it are three cycles rather than four.
+        // bars. Two things stand between the two: `rate` has just packed
+        // `rate` passes into each bar, and a sequence of written note values
+        // was never one bar long to begin with — `[q, q, q]` is three beats,
+        // so four passes of it are three bars rather than four.
         //
         // Asking the rate rather than dividing by it is what lets a section
         // that speeds up still have a length: `unphase` is how long it takes to
         // cover that much pattern, which for one speed throughout is the same
         // division as before, and for a curve is the inverse of its integral.
         // Everything an arrangement does with a section rests on this number.
-        let cycles = repeats.map(|n| rate.unphase(n * pass_cycles, 0.0));
+        let bars = repeats.map(|n| rate.unphase(n * pass_bars, 0.0));
 
         // Anything already sequenced by a `.then` above this call has moved the
         // start; a bare `play` writes at the origin.
@@ -251,7 +251,7 @@ impl Lowerer {
             pattern,
             lanes,
             start,
-            cycles,
+            bars,
             // Written once and never chosen between: only `wthen` and `maybe`
             // set these, and they set them on bindings this call already made.
             repeat: None,
@@ -265,7 +265,7 @@ impl Lowerer {
         // output sum, like a bare number.
         Ok(Value::Play {
             starts_at: start,
-            ends_at: cycles.map(|c| start + c),
+            ends_at: bars.map(|c| start + c),
             first,
             last: self.bindings.len(),
             // Nothing precedes a `play`, so this is where the chain begins.
@@ -285,7 +285,7 @@ impl Lowerer {
 /// is no reading of a sequence holding both that is not a guess, so it is
 /// refused.
 enum Paradigm {
-    /// Slots divide one cycle in proportion. Every pattern written before note
+    /// Slots divide one bar in proportion. Every pattern written before note
     /// values existed, and everything the drawn-pattern panel writes.
     Proportional,
     /// Slots are written note values, and the sequence is as long as they add
@@ -312,7 +312,7 @@ fn paradigm(items: &[Item]) -> Result<Paradigm, String> {
     }
     match (written, share) {
         (true, Some(n)) => Err(format!(
-            "a sequence either divides its cycle by ratio or counts it in written \
+            "a sequence either divides its bar by ratio or counts it in written \
              note values, and this one does both. `;{n}` is a share of whatever \
              else is in the brackets; a written value is a length regardless of \
              them")),
@@ -332,7 +332,7 @@ type Part = (Step, Beats);
 /// rather than returned: a value written inside a tuplet describes that tuplet,
 /// and letting it escape would make a line's meaning turn on a bracket several
 /// tokens back.
-fn metrical_parts(items: &[Item], mut register: Option<Beats>) -> Result<Vec<Part>, String> {
+fn metrical_parts(items: &[Item], mut register: Option<Beats>, meter: Meter) -> Result<Vec<Part>, String> {
     let mut parts = Vec::with_capacity(items.len());
     for item in items.iter() {
         // `q` alone is a trigger of that length. A written value carries no
@@ -352,7 +352,7 @@ fn metrical_parts(items: &[Item], mut register: Option<Beats>) -> Result<Vec<Par
 
         let (step, beats) = match (length, group) {
             (Some(Length::Tuplet), true) => {
-                let (inner, span) = tuplet(value.expect("a group is a value"), register)?;
+                let (inner, span) = tuplet(value.expect("a group is a value"), register, meter)?;
                 (Step::Group(Box::new(inner)), span)
             }
             (Some(Length::Tuplet), false) => {
@@ -374,10 +374,10 @@ fn metrical_parts(items: &[Item], mut register: Option<Beats>) -> Result<Vec<Par
             }
             (Some(Length::Beats(b)), _) => {
                 register = Some(b);
-                (step_of(value)?, b)
+                (step_of(value, meter)?, b)
             }
             (None, _) => match register {
-                Some(b) => (step_of(value)?, b),
+                Some(b) => (step_of(value, meter)?, b),
                 None => {
                     return Err("a sequence of written note values has to say what its \
                                 first step is: `[c4;q, e4, g4]` — after that they \
@@ -392,9 +392,9 @@ fn metrical_parts(items: &[Item], mut register: Option<Beats>) -> Result<Vec<Par
 
 /// A step that stated its own value rather than carrying one: the bare `q`
 /// case, which sounds and carries nothing.
-fn step_of(value: Option<&Value>) -> Result<Step, String> {
+fn step_of(value: Option<&Value>, meter: Meter) -> Result<Step, String> {
     match value {
-        Some(v) => to_step(v),
+        Some(v) => to_step(v, meter),
         None => Ok(Step::Value(1.0)),
     }
 }
@@ -420,16 +420,16 @@ fn parts_to_steps(parts: Vec<Part>) -> Pattern {
 ///
 /// The pattern returned is the bare `Steps`, *not* wrapped in the `Fast` a
 /// sequence of this length would carry on its own. A group is given exactly one
-/// cycle of slot-local time, so only the ratios inside it survive and the span
+/// bar of slot-local time, so only the ratios inside it survive and the span
 /// supplies the scale; leaving the `Fast` on would repeat the group a fractional
 /// number of times inside its own slot.
-fn tuplet(v: &Value, register: Option<Beats>) -> Result<(Pattern, Beats), String> {
+fn tuplet(v: &Value, register: Option<Beats>, meter: Meter) -> Result<(Pattern, Beats), String> {
     let Value::List(items) = v else {
         return Err("`;t` marks a bracketed group as a tuplet, and a stack is layers \
                     rather than a sequence — there is nothing in it to count"
             .to_string());
     };
-    let parts = metrical_parts(items, register)?;
+    let parts = metrical_parts(items, register, meter)?;
     if parts.is_empty() {
         return Err("an empty group has nothing for `;t` to make a tuplet of".to_string());
     }
@@ -462,18 +462,18 @@ fn tuplet(v: &Value, register: Option<Beats>) -> Result<(Pattern, Beats), String
 }
 
 /// Interpret a lowered value rhythmically, and say how long one pass of it
-/// takes in cycles.
+/// takes in bars.
 ///
-/// The pass length is one cycle for everything written in shares, which is why
+/// The pass length is one bar for everything written in shares, which is why
 /// nothing needed to ask before written values existed. A metrical sequence is
 /// as long as its values add up to, and `playn`, `then` and `then_fill` all
-/// count passes while binding in cycles — so they need the conversion rather
+/// count passes while binding in bars — so they need the conversion rather
 /// than being able to assume it is one.
-pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
+pub fn to_pattern_timed(v: &Value, meter: Meter) -> Result<(Pattern, f64), String> {
     match v {
         Value::List(items) => match paradigm(items)? {
             // A `;` length here is time: the slot takes that share of the
-            // cycle, as one sustained event. Absent, it is `UNIT` and the
+            // bar, as one sustained event. Absent, it is `UNIT` and the
             // sequence divides evenly, exactly as it did before `;` existed.
             Paradigm::Proportional => {
                 let steps = items
@@ -484,21 +484,23 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
                             // `paradigm` has already refused the other kinds.
                             _ => UNIT,
                         };
-                        Ok(Slot::sized(to_step(&item.value)?, length))
+                        Ok(Slot::sized(to_step(&item.value, meter)?, length))
                     })
                     .collect::<Result<Vec<_>, String>>()?;
                 Ok((Pattern::Steps(steps), 1.0))
             }
             Paradigm::Metrical => {
-                let parts = metrical_parts(items, None)?;
+                let parts = metrical_parts(items, None, meter)?;
                 if parts.is_empty() {
                     return Ok((Pattern::Steps(Vec::new()), 1.0));
                 }
-                let pass = total_beats(&parts).to_f64() / BEATS_PER_CYCLE;
+                let pass = total_beats(&parts).to_f64() / meter.quarters_per_bar();
                 let steps = parts_to_steps(parts);
-                // A bar that is already a cycle long is left alone rather than
+                // A pass that already fills its bar is left alone rather than
                 // wrapped in a `Fast` of 1 — which is what makes four quarters
-                // lower to precisely what four bare steps have always lowered to.
+                // in 4/4 lower to precisely what four bare steps have always
+                // lowered to. Which passes qualify moves with the signature:
+                // three quarters is such a pass in 3/4 and not in 4/4.
                 if pass == 1.0 {
                     Ok((steps, 1.0))
                 } else {
@@ -506,7 +508,7 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
                 }
             }
         },
-        // Layers, each dividing the cycle in its own right. Nothing is done to
+        // Layers, each dividing the bar in its own right. Nothing is done to
         // reconcile their lengths — that they need not agree is the point, and
         // it is how a metrical layer polymeters against a proportional one. A
         // pass of the whole is over when the longest of them is.
@@ -514,8 +516,8 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
             let mut pass = 0.0f64;
             let mut out = Vec::with_capacity(layers.len());
             for layer in layers.iter() {
-                let (p, cycles) = to_pattern_timed(layer)?;
-                pass = pass.max(cycles);
+                let (p, bars) = to_pattern_timed(layer, meter)?;
+                pass = pass.max(bars);
                 out.push(p);
             }
             Ok((Pattern::Stack(out), if pass > 0.0 { pass } else { 1.0 }))
@@ -526,7 +528,7 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
         // A written value on its own is a single sounding step of that length,
         // for the same reason it is inside a sequence.
         Value::Duration(b) => {
-            let pass = b.to_f64() / BEATS_PER_CYCLE;
+            let pass = b.to_f64() / meter.quarters_per_bar();
             let step = Pattern::seq([Step::Value(1.0)]);
             if pass == 1.0 {
                 Ok((step, 1.0))
@@ -553,8 +555,8 @@ pub fn to_pattern_timed(v: &Value) -> Result<(Pattern, f64), String> {
 
 /// Interpret a lowered value rhythmically, where how long a pass takes does not
 /// matter — a lane, a fill's shape, or a check that something is a pattern at all.
-pub fn to_pattern(v: &Value) -> Result<Pattern, String> {
-    to_pattern_timed(v).map(|(pattern, _)| pattern)
+pub fn to_pattern(v: &Value, meter: Meter) -> Result<Pattern, String> {
+    to_pattern_timed(v, meter).map(|(pattern, _)| pattern)
 }
 
 /// Refuse a written note value anywhere in a pattern being used as a lane.
@@ -606,7 +608,7 @@ fn whole_lengths(p: &Pattern) -> Result<(), f64> {
     }
 }
 
-fn to_step(v: &Value) -> Result<Step, String> {
+fn to_step(v: &Value, meter: Meter) -> Result<Step, String> {
     match v {
         Value::Number(n) => Ok(Step::Value(*n)),
         Value::Rest => Ok(Step::Rest),
@@ -619,18 +621,18 @@ fn to_step(v: &Value) -> Result<Step, String> {
         //
         // Reached only from a sequence of shares — a metrical sequence handles
         // its own groups, which are tuplets and say so. So an inner pattern that
-        // is not one cycle long is a metrical group in a share sequence, and the
-        // two have no way to agree: the slot offers a share of a cycle, which
+        // is not one bar long is a metrical group in a share sequence, and the
+        // two have no way to agree: the slot offers a share of a bar, which
         // knows nothing of beats, while the group is a length that ignores the
         // slot. It is refused rather than squeezed, because a group is given
-        // exactly one cycle of slot-local time and a half-cycle bar would sound
+        // exactly one bar of slot-local time and a half-bar pass would sound
         // its contents twice inside its own slot.
         Value::List(_) | Value::Stack(_) => {
-            let (inner, pass) = to_pattern_timed(v)?;
+            let (inner, pass) = to_pattern_timed(v, meter)?;
             if pass != 1.0 {
                 return Err(
                     "a group written in note values cannot sit inside a sequence of \
-                     shares — the sequence would give it a share of the cycle, which \
+                     shares — the sequence would give it a share of the bar, which \
                      says nothing about how long a beat is. Write the whole sequence \
                      in note values, where a group is a tuplet and marks itself `;t`"
                         .to_string());
@@ -678,19 +680,44 @@ impl Lowerer {
         name == PLAY_ALL
     }
 
-    /// Gather plays that run together into a single handle.
+    /// Gather sections that run together into a single handle.
     ///
-    /// There is nothing to schedule here. Each argument was lowered before this
-    /// was reached, and every one of them wrote its binding at the current
-    /// `play_start` — they are already concurrent. What is missing is a name for
-    /// the group, and that is what this returns: one `Play` that ends when the
-    /// last of them does, so `.then` can follow the whole section rather than
-    /// having to pick one of its parts to chain from.
-    pub fn play_all(&mut self, args: &[Value]) -> Result<Value, String> {
-        if args.is_empty() {
+    /// There is nothing to *schedule* here. Every argument is lowered at the
+    /// current `play_start`, so by the time this counts them they are already
+    /// concurrent. What is missing is a name for the group, and that is what
+    /// this returns: one `Play` that ends when the last of them does, so
+    /// `.then` can follow the whole section rather than having to pick one of
+    /// its parts to chain from.
+    ///
+    /// A section is written the same two ways here as in `seq` and `.then` — a
+    /// `fn` named, or a play written out — which is why the arguments arrive
+    /// raw. A named one writes nothing when it is evaluated, so it is inlined
+    /// where it stands; the start it is inlined at is simply the one the group
+    /// already sits at, since gathering plays is the one arrangement move that
+    /// puts nothing anywhere new.
+    pub fn play_all(&mut self, args: &[Arg], piped: Option<Value>) -> Result<Value, String> {
+        if args.iter().any(|a| a.name.is_some()) {
+            return Err(format!("{PLAY_ALL}: named arguments only work on a user `fn`"));
+        }
+
+        let mut parts: Vec<Value> = Vec::with_capacity(args.len() + 1);
+        if piped.is_some() {
+            parts.push(self.piped_section(PLAY_ALL, piped.as_ref())?);
+        }
+        for arg in args {
+            // Lowered in written order, so a `rand` in one of these sections
+            // draws where it reads as drawing.
+            let part = match self.expr(&arg.value)? {
+                Value::Function(def) => self.inline_named(PLAY_ALL, def)?,
+                v => v,
+            };
+            parts.push(part);
+        }
+
+        if parts.is_empty() {
             return Err(format!(
-                "{PLAY_ALL} expects at least one play: \
-                 {PLAY_ALL}(playn(verse, lead, 4), play_once(hits, bass))"));
+                "{PLAY_ALL} expects at least one section: \
+                 {PLAY_ALL}(verse, play_once(hits, bass))"));
         }
 
         // The floor is where the section itself opened: a group is never over
@@ -698,11 +725,12 @@ impl Lowerer {
         let mut ends_at = Some(self.play_start);
         let mut first = usize::MAX;
         let mut last = 0usize;
-        for (i, arg) in args.iter().enumerate() {
-            let Value::Play { ends_at: end, first: f, last: l, .. } = arg else {
+        for (i, part) in parts.iter().enumerate() {
+            let Value::Play { ends_at: end, first: f, last: l, .. } = part else {
                 return Err(format!(
-                    "{PLAY_ALL}: argument {} is not a play — every argument must be a \
-                     `play`, `play_once`, `playn`, or another `{PLAY_ALL}`", i + 1));
+                    "{PLAY_ALL}: argument {} is not a section — every argument must be \
+                     either a `fn` written by name, such as `chorus`, or a play written \
+                     out, such as `playn(pat, inst, 4)`", i + 1));
             };
             ends_at = later_end(ends_at, *end);
             // Contiguous, because the arguments were lowered left to right and

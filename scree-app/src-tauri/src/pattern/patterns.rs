@@ -24,10 +24,10 @@ pub const RESERVED: [(&str, &str); 2] = [
 ///
 /// A lane is read by position: the nth note of the binding takes the nth value,
 /// wrapping when it runs out. So the two lengths are free of each other — three
-/// cutoffs against four notes is a real 3-against-4, rotating a step each cycle
+/// cutoffs against four notes is a real 3-against-4, rotating a step each bar
 /// and coming back into phase after three, and twenty cutoffs against two notes
-/// walks all twenty over ten cycles. Reading a lane by *time* instead would
-/// squeeze it into the one cycle it shares with the pattern, where the extra
+/// walks all twenty over ten bars. Reading a lane by *time* instead would
+/// squeeze it into the one bar it shares with the pattern, where the extra
 /// values are duplicated or skipped and nothing ever moves.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Lane {
@@ -42,20 +42,20 @@ pub struct Binding {
     /// Structure, and the instrument's first parameter.
     pub pattern: Pattern,
     pub lanes: Vec<Lane>,
-    /// Cycles to wait after the origin's downbeat before this binding starts.
+    /// Bars to wait after the origin's downbeat before this binding starts.
     /// Zero for everything `play` writes directly; `.then` sets it so what
     /// follows begins where the previous one stopped.
     pub start: f64,
-    /// How long this binding sounds for, in cycles, counted from the eval that
+    /// How long this binding sounds for, in bars, counted from the eval that
     /// published it. `None` is `play`: it loops for as long as it is playing.
-    /// `play_once` and `playn` set it, and it is measured in cycles rather than
+    /// `play_once` and `playn` set it, and it is measured in bars rather than
     /// repeats because `rate` has already been folded into the pattern.
-    pub cycles: Option<f64>,
-    /// How often the whole window comes back around, in cycles. `None` is
+    pub bars: Option<f64>,
+    /// How often the whole window comes back around, in bars. `None` is
     /// every binding written before `wthen` existed: the window opens once.
     ///
-    /// A repeating binding sounds during `[start, start + cycles)` and again
-    /// every `repeat` cycles after that, forever. It is what makes a choice
+    /// A repeating binding sounds during `[start, start + bars)` and again
+    /// every `repeat` bars after that, forever. It is what makes a choice
     /// worth rerolling — without somewhere to come back to, a branch would be
     /// picked once and that would be the end of it.
     pub repeat: Option<f64>,
@@ -150,11 +150,11 @@ fn unit_hash(seed: u64, group: u64, n: u64) -> f64 {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Patterns {
     pub bindings: Vec<Binding>,
-    /// Cycle time when this set was published — what a bounded binding counts
-    /// its cycles from, so a one-shot fires at the eval that wrote it rather
+    /// Bar time when this set was published — what a bounded binding counts
+    /// its bars from, so a one-shot fires at the eval that wrote it rather
     /// than at wherever the free-running clock happens to be.
     ///
-    /// Safe to hold as a bare number because the only thing that moves cycle
+    /// Safe to hold as a bare number because the only thing that moves bar
     /// time under it is `Clock::reset`, and both callers of that either
     /// republish immediately after (an eval from silence) or clear the
     /// bindings entirely (stop).
@@ -164,17 +164,33 @@ pub struct Patterns {
     pub choices: Vec<ChoiceGroup>,
 }
 
-/// A stretch of time a binding may sound in, and the cycle its own clock
+/// A stretch of time a binding may sound in, and the bar its own clock
 /// started at.
 ///
 /// The two are not the same number and cannot be recovered from each other: a
 /// window is clipped to the span being queried, so it usually begins in the
 /// middle of the thing it belongs to, while the anchor is where that thing
-/// began however long ago. Only a rate curve reads the anchor — everything
-/// else is periodic and cannot tell.
+/// began however long ago. The anchor is both where a rate curve is measured
+/// from and where the pattern's own grid is laid from — a section starts at
+/// its first step, not at whichever step the bar line happens to be passing.
+///
+/// `grid` is the anchor for everything the arrangement placed, and zero for a
+/// plain `play` — see [`joins_in_progress`].
 struct Window {
     span: Span,
     anchor: f64,
+    grid: f64,
+}
+
+/// True when a binding joins whatever is already playing rather than being
+/// placed by an arrangement: a plain `play`, with nothing before it and no end.
+///
+/// Such a binding keeps the performance's own grid — bar zero, the one every
+/// pattern was laid on before sections existed — so a re-eval does not re-phase
+/// a loop that is already running. Everything else is a section, and a section
+/// begins where it begins.
+fn joins_in_progress(b: &Binding) -> bool {
+    b.start == 0.0 && b.bars.is_none()
 }
 
 /// An event with its instrument attached — what the scheduler consumes.
@@ -212,12 +228,22 @@ impl Patterns {
                 .map(|l| (l.name.as_str(), l.pattern.values()))
                 .collect();
 
-            windows.into_iter().flat_map(|Window { span, anchor }| {
+            windows.into_iter().flat_map(|Window { span, anchor, grid }| {
+            // Queried in the binding's own time, where its first step sits at
+            // zero, and mapped back at the end. A fixed rate reads no anchor —
+            // it cannot, since `phase` is the same shape wherever it is asked
+            // from — so shifting the question is the only way to tell a
+            // periodic pattern that it began somewhere other than bar zero.
+            // Without it a pass that does not divide the offset opens partway
+            // through itself: seventeen eighths placed at bar 8 would start on
+            // its fourteenth note and wrap round to its first.
+            let span = Span::new(span.begin - grid, span.end - grid);
+            let anchor = anchor - grid;
             b.pattern.query_from(span, anchor).into_iter().map(|mut event| {
-                // Which note this is, counted from the origin — the lane's
-                // position, not a time to look up. Counted against the same
-                // clock it was played on, or a rate curve would number the
-                // notes differently than it placed them.
+                // Which note this is, counted from where the binding opened —
+                // the lane's position, not a time to look up. Counted against
+                // the same clock it was played on, or a rate curve would number
+                // the notes differently than it placed them.
                 let nth = b.pattern.onsets_before_from(event.begin, anchor);
                 let mut args = Vec::with_capacity(lanes.len());
                 for (name, values) in &lanes {
@@ -237,7 +263,14 @@ impl Patterns {
                 // Read at the onset against the same anchor the note was
                 // placed from, so a curve tells a voice the speed it is
                 // actually being played at rather than the one it started at.
+                // Asked in the shifted time the note was placed in: a curve
+                // reads the difference and a fixed rate reads neither, so the
+                // shift cancels either way.
                 let rate = b.rate.at(event.begin, anchor);
+                // Back onto the transport's clock, the only one the scheduler
+                // knows about.
+                event.begin += grid;
+                event.end += grid;
                 BoundEvent { instrument: b.instrument.clone(), event, args, rate }
             }).collect::<Vec<_>>()
             }).collect::<Vec<_>>()
@@ -259,11 +292,15 @@ impl Patterns {
         // than sitting at its end rate forever after the first pass.
         let opens = self.origin.ceil() + b.start;
 
+        // A plain `play` was never placed anywhere, so it has no beginning of
+        // its own to lay a grid from and keeps the transport's.
+        let grid = if joins_in_progress(b) { 0.0 } else { opens };
+
         // The one window everything that does not repeat gets: opening once,
         // and starting its clock there.
         let once = || {
-            self.window(b.start, b.cycles, span)
-                .map(|span| Window { span, anchor: opens })
+            self.window(b.start, b.bars, span)
+                .map(|span| Window { span, anchor: opens, grid })
                 .into_iter()
                 .collect()
         };
@@ -276,14 +313,14 @@ impl Patterns {
         };
         // A repetition is only meaningful against a window that closes: an
         // open-ended one already covers every later repetition of itself.
-        let (Some(cycles), true) = (b.cycles, period.is_finite() && period > 0.0) else {
+        let (Some(bars), true) = (b.bars, period.is_finite() && period > 0.0) else {
             return once();
         };
 
         // Which repetitions can overlap the span at all. The window is
-        // `cycles` long, so one starting up to `cycles` before the span may
+        // `bars` long, so one starting up to `bars` before the span may
         // still reach into it.
-        let first = ((span.begin - opens - cycles) / period).floor().max(0.0);
+        let first = ((span.begin - opens - bars) / period).floor().max(0.0);
         let last = ((span.end - opens) / period).floor();
         if !first.is_finite() || !last.is_finite() || last < first {
             return Vec::new();
@@ -308,9 +345,15 @@ impl Patterns {
             if sounds {
                 let repeats_at = opens + n * period;
                 let begin = span.begin.max(repeats_at);
-                let end = span.end.min(repeats_at + cycles);
+                let end = span.end.min(repeats_at + bars);
                 if end > begin {
-                    out.push(Window { span: Span::new(begin, end), anchor: repeats_at });
+                    // Each repetition is its own section: the curve runs again
+                    // and the pattern starts again, both from here.
+                    out.push(Window {
+                        span: Span::new(begin, end),
+                        anchor: repeats_at,
+                        grid: repeats_at,
+                    });
                 }
             }
             n += 1.0;
@@ -318,24 +361,26 @@ impl Patterns {
         out
     }
 
-    /// The part of `span` a binding bounded to `cycles` may still sound in, or
+    /// The part of `span` a binding bounded to `bars` may still sound in, or
     /// `None` if none of it is.
     ///
-    /// The window opens at the first whole cycle at or after the origin, so a
+    /// The window opens at the first whole bar at or after the origin, so a
     /// one-shot dropped into a running performance lands on a downbeat and is
     /// heard from its first step rather than joining halfway through. Playing
-    /// from silence puts the origin a lead-in *before* cycle 0, which rounds up
+    /// from silence puts the origin a lead-in *before* bar 0, which rounds up
     /// to 0 — the one-shot starts at once.
-    fn window(&self, start: f64, cycles: Option<f64>, span: Span) -> Option<Span> {
+    fn window(&self, start: f64, bars: Option<f64>, span: Span) -> Option<Span> {
         // Plain `play` with nothing before it joins the performance already in
-        // progress, so a re-eval mid-cycle does not gap until the next downbeat.
-        if start == 0.0 && cycles.is_none() {
+        // progress, so a re-eval mid-bar does not gap until the next downbeat.
+        // The same binding keeps the performance's grid, for the same reason —
+        // see `joins_in_progress`.
+        if start == 0.0 && bars.is_none() {
             return Some(span);
         }
 
         let opens = self.origin.ceil() + start;
         let begin = span.begin.max(opens);
-        let end = match cycles {
+        let end = match bars {
             None => span.end,
             // Also catches NaN, which would otherwise open a window nothing
             // closes.
@@ -359,13 +404,13 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0), None]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
+                    bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
                 Binding {
                     instrument: "hat".into(),
                     pattern: Pattern::steps([Some(1.0), Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
+                    bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
             ],
             ..Default::default()
         };
@@ -387,7 +432,7 @@ mod tests {
 
     fn bound(pattern: Pattern, lanes: Vec<Lane>) -> Vec<super::BoundEvent> {
         Patterns {
-            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+            bindings: vec![Binding { instrument: "i".into(), pattern, lanes, start: 0.0, bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         }
         .query(Span::new(0.0, 1.0))
@@ -422,8 +467,8 @@ mod tests {
     }
 
     /// The case the whole positional reading exists for: a lane longer than the
-    /// pattern is not squeezed into the cycle it shares with it. Two notes and
-    /// six cutoffs take three cycles to come back around, and every value is
+    /// pattern is not squeezed into the bar it shares with it. Two notes and
+    /// six cutoffs take three bars to come back around, and every value is
     /// heard on the way.
     #[test]
     fn a_long_lane_walks_across_cycles() {
@@ -433,7 +478,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: vec![lane("cut", (1..=6).map(|i| Some(i as f64 * 100.0)).collect())],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -443,15 +488,15 @@ mod tests {
             .collect();
 
         assert_eq!(cuts, vec![
-            100.0, 200.0,   // cycle 0
-            300.0, 400.0,   // cycle 1
-            500.0, 600.0,   // cycle 2
-            100.0, 200.0,   // cycle 3 — back in phase
+            100.0, 200.0,   // bar 0
+            300.0, 400.0,   // bar 1
+            500.0, 600.0,   // bar 2
+            100.0, 200.0,   // bar 3 — back in phase
         ]);
     }
 
     /// Lengths with a common factor rotate rather than repeat: three against
-    /// four is a step further along each cycle, in phase again after three.
+    /// four is a step further along each bar, in phase again after three.
     #[test]
     fn uneven_lengths_rotate_against_each_other() {
         let pats = Patterns {
@@ -460,19 +505,19 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0)]),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
-        let cycle = |c: i32| -> Vec<f64> {
+        let bar = |c: i32| -> Vec<f64> {
             pats.query(Span::new(c as f64, c as f64 + 1.0))
                 .iter().map(|e| e.args[0].1).collect()
         };
 
-        assert_eq!(cycle(0), vec![10.0, 20.0, 30.0, 10.0]);
-        assert_eq!(cycle(1), vec![20.0, 30.0, 10.0, 20.0]);
-        assert_eq!(cycle(2), vec![30.0, 10.0, 20.0, 30.0]);
-        assert_eq!(cycle(3), vec![10.0, 20.0, 30.0, 10.0]);
+        assert_eq!(bar(0), vec![10.0, 20.0, 30.0, 10.0]);
+        assert_eq!(bar(1), vec![20.0, 30.0, 10.0, 20.0]);
+        assert_eq!(bar(2), vec![30.0, 10.0, 20.0, 30.0]);
+        assert_eq!(bar(3), vec![10.0, 20.0, 30.0, 10.0]);
     }
 
     /// A lane counts notes, not time, so the speed the notes go at does not
@@ -485,11 +530,11 @@ mod tests {
                 pattern: Pattern::fast(2.0, Pattern::steps([Some(1.0), Some(2.0)])),
                 lanes: vec![lane("cut", vec![Some(10.0), Some(20.0), Some(30.0)])],
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
-        // Twice as fast is four notes a cycle, still taking the lane in order.
+        // Twice as fast is four notes a bar, still taking the lane in order.
         let cuts: Vec<f64> = pats.query(Span::new(0.0, 1.0))
             .iter().map(|e| e.args[0].1).collect();
         assert_eq!(cuts, vec![10.0, 20.0, 30.0, 10.0]);
@@ -572,14 +617,14 @@ mod tests {
 
     // ---- bounded bindings ----
 
-    fn bounded(cycles: Option<f64>, origin: f64, span: Span) -> Vec<f64> {
+    fn bounded(bars: Option<f64>, origin: f64, span: Span) -> Vec<f64> {
         Patterns {
             bindings: vec![Binding {
                 instrument: "i".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin, choices: Vec::new() }
         .query(span)
         .iter()
@@ -594,7 +639,7 @@ mod tests {
     }
 
     /// `play_once` from silence: the reset puts the origin a lead-in before
-    /// cycle 0, and the pattern plays exactly one cycle from there.
+    /// bar 0, and the pattern plays exactly one bar from there.
     #[test]
     fn one_cycle_plays_then_stops() {
         assert_eq!(bounded(Some(1.0), -0.05, Span::new(0.0, 1.0)), vec![0.0, 0.5]);
@@ -654,13 +699,13 @@ mod tests {
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) },
+                    bars: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) },
                 Binding {
                     instrument: "loop".into(),
                     pattern: Pattern::steps([Some(1.0)]),
                     lanes: Vec::new(),
                     start: 0.0,
-                    cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
+                    bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) },
             ],
             origin: 0.0, choices: Vec::new() };
 
@@ -684,14 +729,14 @@ mod tests {
 
     // ---- sequenced bindings ----
 
-    fn started(start: f64, cycles: Option<f64>, span: Span) -> Vec<f64> {
+    fn started(start: f64, bars: Option<f64>, span: Span) -> Vec<f64> {
         Patterns {
             bindings: vec![Binding {
                 instrument: "i".into(),
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start,
-                cycles, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin: 0.0, choices: Vec::new() }
         .query(span)
         .iter()
@@ -740,9 +785,9 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0)]),
                 lanes: Vec::new(),
                 start: 2.0,
-                cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             origin: 3.2, choices: Vec::new() };
-        // Origin 3.2 rounds up to 4, plus two cycles of waiting.
+        // Origin 3.2 rounds up to 4, plus two bars of waiting.
         let onsets: Vec<f64> = pats
             .query(Span::new(3.2, 9.0))
             .iter()
@@ -754,7 +799,7 @@ mod tests {
     // ---- rate curves ----
 
     /// A binding of one note per pass, accelerating from 1x to 3x over four
-    /// cycles, placed `start` cycles after an origin.
+    /// bars, placed `start` bars after an origin.
     fn accelerating(start: f64, origin: f64, repeat: Option<f64>) -> Patterns {
         use crate::pattern::rate::Rate;
         Patterns {
@@ -763,7 +808,7 @@ mod tests {
                 pattern: Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)])),
                 lanes: Vec::new(),
                 start,
-                cycles: Some(4.0),
+                bars: Some(4.0),
                 repeat,
                 choice: None,
                 // The same curve the pattern was folded with, which is what
@@ -791,7 +836,7 @@ mod tests {
         let at_origin = onsets_of(&accelerating(0.0, 0.0, None), Span::new(0.0, 8.0));
         let later = onsets_of(&accelerating(3.0, 0.0, None), Span::new(0.0, 12.0));
 
-        assert_eq!(at_origin.len(), 8, "eight passes in four cycles: {at_origin:?}");
+        assert_eq!(at_origin.len(), 8, "eight passes in four bars: {at_origin:?}");
         assert_eq!(later.len(), at_origin.len());
         for (early, late) in at_origin.iter().zip(&later) {
             assert!((early + 3.0 - late).abs() < 1e-9, "{at_origin:?} vs {later:?}");
@@ -800,14 +845,14 @@ mod tests {
 
     /// The origin is rounded up to a downbeat before anything is placed, and
     /// the curve has to start from the same figure the window opens at — a
-    /// half-cycle disagreement between the two would have the section opening
+    /// half-bar disagreement between the two would have the section opening
     /// mid-accelerando.
     #[test]
     fn a_curve_starts_from_the_downbeat_the_window_opens_on() {
         let ons = onsets_of(&accelerating(0.0, 4.3, None), Span::new(0.0, 20.0));
         assert_eq!(ons.len(), 8);
         assert_eq!(ons[0], 5.0, "the first note is on the downbeat: {ons:?}");
-        // Its gap is the widest of them, and still short of the whole cycle 1x
+        // Its gap is the widest of them, and still short of the whole bar 1x
         // would give: the rate is already climbing across that first note, so
         // the opening rate is where the curve starts rather than a speed any
         // one gap is held at.
@@ -832,9 +877,91 @@ mod tests {
         }
     }
 
+    // ---- a section's own grid ----
+
+    /// A section whose pass does not divide the bar it was placed at: five
+    /// steps over two and a half bars, opening at bar 1. A whole pass long, so
+    /// it should be all five steps and no more.
+    fn offset_section(start: f64) -> Patterns {
+        Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::fast(
+                    Rate::Fixed(1.0 / 2.5),
+                    Pattern::steps([Some(1.0), Some(2.0), Some(3.0), Some(4.0), Some(5.0)]),
+                ),
+                lanes: vec![lane("cut", (1..=5).map(|i| Some(i as f64 * 10.0)).collect())],
+                start,
+                bars: Some(2.5),
+                repeat: None,
+                choice: None,
+                rate: Rate::Fixed(1.0),
+            }],
+            origin: 0.0,
+            choices: Vec::new(),
+        }
+    }
+
+    /// The whole point of a section: `play_once` plays *the pattern*, from its
+    /// first step. Laid on the transport's grid instead, a pass that does not
+    /// divide the offset opens partway through itself — five steps placed a bar
+    /// in would sound its third, fourth, fifth, and only then its first two.
+    #[test]
+    fn a_section_starts_at_its_own_first_step() {
+        let placed = offset_section(1.0);
+        let evs = placed.query(Span::new(0.0, 8.0));
+        let values: Vec<f64> = evs.iter().map(|e| e.event.value).collect();
+        assert_eq!(values, vec![1.0, 2.0, 3.0, 4.0, 5.0], "one pass, in order");
+        assert_eq!(evs[0].event.begin, 1.0, "and it begins where the section does");
+    }
+
+    /// And its lane with it, which is the audible half: a volume ramp under a
+    /// section is a ramp, not a ramp starting three quarters of the way up.
+    #[test]
+    fn a_lane_starts_at_its_first_value_wherever_the_section_sits() {
+        for start in [0.0, 1.0, 3.0, 8.0] {
+            let cuts: Vec<f64> = offset_section(start)
+                .query(Span::new(0.0, 16.0))
+                .iter()
+                .map(|e| e.args[0].1)
+                .collect();
+            assert_eq!(cuts, vec![10.0, 20.0, 30.0, 40.0, 50.0], "placed at bar {start}");
+        }
+    }
+
+    /// A plain `play` is the exception, and stays one: it was never placed, so
+    /// it keeps the transport's grid and a re-eval does not re-phase a loop
+    /// that is already rotating against the bar. Two thirds of a bar to a pass,
+    /// queried across a later bar: the onsets sit where the grid puts them
+    /// whatever origin the eval wrote.
+    #[test]
+    fn a_plain_play_keeps_the_performances_grid() {
+        let running = |origin: f64| Patterns {
+            bindings: vec![Binding {
+                instrument: "i".into(),
+                pattern: Pattern::fast(1.5, Pattern::steps([Some(1.0), Some(2.0)])),
+                lanes: Vec::new(),
+                start: 0.0,
+                bars: None,
+                repeat: None,
+                choice: None,
+                rate: Rate::Fixed(1.0),
+            }],
+            origin,
+            choices: Vec::new(),
+        };
+
+        let fresh = onsets_of(&running(0.0), Span::new(6.0, 8.0));
+        assert_eq!(fresh.len(), 6, "three onsets a bar: {fresh:?}");
+        for origin in [3.2, 4.0, 5.7] {
+            assert_eq!(onsets_of(&running(origin), Span::new(6.0, 8.0)), fresh,
+                       "re-evaluated at {origin}");
+        }
+    }
+
     /// A lane is read by position, and the position has to be counted on the
     /// clock the note was placed on. Counted from the origin, a section three
-    /// cycles in would start partway down its own lane.
+    /// bars in would start partway down its own lane.
     #[test]
     fn a_lane_under_a_curve_starts_at_its_first_value() {
         let mut pats = accelerating(3.0, 0.0, None);
@@ -866,7 +993,7 @@ mod tests {
         assert!(*rates.last().unwrap() < 3.0, "and never past its end: {rates:?}");
         // The rate at a note is read off the same curve its placement was, so
         // the gap after it is bracketed by the two ends of that gap: a pass of
-        // a one-note pattern would take 1/rate cycles at a steady speed, and
+        // a one-note pattern would take 1/rate bars at a steady speed, and
         // the speed here is climbing the whole way across it.
         let begins: Vec<f64> = events.iter().map(|e| e.event.begin).collect();
         for (i, gap) in begins.windows(2).map(|w| w[1] - w[0]).enumerate() {
@@ -886,20 +1013,20 @@ mod tests {
         pats.bindings[0].rate = Rate::Fixed(2.0);
 
         let rates: Vec<f64> = pats.query(Span::new(0.0, 4.0)).iter().map(|e| e.rate).collect();
-        assert_eq!(rates.len(), 8, "two passes a cycle over four cycles");
+        assert_eq!(rates.len(), 8, "two passes a bar over four bars");
         assert!(rates.iter().all(|r| *r == 2.0), "{rates:?}");
     }
 
     // ---- repeating windows and choice ----
 
-    /// One arm of a two-armed choice, sounding once per cycle.
+    /// One arm of a two-armed choice, sounding once per bar.
     fn arm(instrument: &str, group: usize, index: usize, period: f64) -> Binding {
         Binding {
             instrument: instrument.into(),
             pattern: Pattern::steps([Some(1.0)]),
             lanes: Vec::new(),
             start: 0.0,
-            cycles: Some(1.0),
+            bars: Some(1.0),
             repeat: Some(period),
             choice: Some(ChoiceRef { group, arm: index }),
             rate: Rate::Fixed(1.0),
@@ -914,12 +1041,12 @@ mod tests {
         }
     }
 
-    /// Which instrument sounded in each of the first `n` cycles.
+    /// Which instrument sounded in each of the first `n` bars.
     fn drawn(pats: &Patterns, n: i64) -> Vec<String> {
         (0..n)
             .map(|i| {
                 let evs = pats.query(Span::new(i as f64, i as f64 + 1.0));
-                assert_eq!(evs.len(), 1, "exactly one arm sounds in cycle {i}");
+                assert_eq!(evs.len(), 1, "exactly one arm sounds in bar {i}");
                 evs[0].instrument.clone()
             })
             .collect()
@@ -949,14 +1076,14 @@ mod tests {
     /// Why the draw is a hash and not a running RNG.
     ///
     /// The scheduler queries an overlapping lookahead window every pass, so the
-    /// same cycle is asked about several times. A stateful generator would
+    /// same bar is asked about several times. A stateful generator would
     /// answer differently each time and the note would flicker; this asks the
     /// same span three ways and insists all three agree.
     #[test]
     fn the_same_repetition_draws_the_same_arm_however_it_is_queried() {
         let pats = two_armed(0x9E3779B9, vec![1.0, 1.0]);
 
-        // One sweep, cycle by cycle.
+        // One sweep, bar by bar.
         let once = drawn(&pats, 24);
 
         // The whole span in a single query.
@@ -967,16 +1094,16 @@ mod tests {
             .collect();
         whole.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
         let whole: Vec<String> = whole.into_iter().map(|(_, i)| i).collect();
-        assert_eq!(once, whole, "one big query disagreed with cycle-by-cycle");
+        assert_eq!(once, whole, "one big query disagreed with bar-by-bar");
 
         // Overlapping windows that straddle every boundary, as the lookahead
         // does at speed.
-        for cycle in 0..23 {
-            let straddle = pats.query(Span::new(cycle as f64 + 0.5, cycle as f64 + 1.5));
-            assert_eq!(straddle.len(), 1, "cycle {cycle} boundary");
+        for bar in 0..23 {
+            let straddle = pats.query(Span::new(bar as f64 + 0.5, bar as f64 + 1.5));
+            assert_eq!(straddle.len(), 1, "bar {bar} boundary");
             assert_eq!(
-                straddle[0].instrument, once[cycle + 1],
-                "a window straddling cycle {cycle} drew a different arm"
+                straddle[0].instrument, once[bar + 1],
+                "a window straddling bar {bar} drew a different arm"
             );
         }
     }
@@ -1026,8 +1153,8 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                // Sounds for one cycle in every four.
-                cycles: Some(1.0),
+                // Sounds for one bar in every four.
+                bars: Some(1.0),
                 repeat: Some(4.0),
                 choice: None,
                 rate: Rate::Fixed(1.0),
@@ -1052,7 +1179,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0)]),
                 lanes: Vec::new(),
                 start: 3.0,
-                cycles: Some(1.0),
+                bars: Some(1.0),
                 repeat: Some(2.0),
                 choice: None,
                 rate: Rate::Fixed(1.0),

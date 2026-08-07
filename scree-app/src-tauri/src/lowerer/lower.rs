@@ -7,15 +7,16 @@ use crate::scree_graph::ugen_nodes::{NodeId, NodeInput, NodeKind, UGenNode};
 use crate::parser::parser::ScreeItem;
 use crate::pattern::patterns::{Binding, ChoiceGroup};
 use crate::samples::Samples;
+use crate::scheduler::clock::Meter;
 #[cfg(test)]
-use crate::scheduler::clock::{BEATS_PER_CYCLE, DEFAULT_CPS};
+use crate::scheduler::clock::{DEFAULT_CPS, DEFAULT_QUARTERS_PER_BAR};
 
 pub struct Lowerer {
     pub env: Env,
     pub graph: ScreeGraph,
     pub depth: usize,
     pub bindings: Vec<Binding>,
-    /// Cycles after the origin that the next `play` should start at.
+    /// Bars after the origin that the next `play` should start at.
     ///
     /// Zero at the top level; `.then` raises it while inlining the function it
     /// was handed, which is the whole of "start when the last one finished".
@@ -31,6 +32,13 @@ pub struct Lowerer {
     /// One entry per `wthen`, `rthen` or `maybe`, which its arms' bindings
     /// refer to by index. Empty for a program that never chooses.
     pub choices: Vec<ChoiceGroup>,
+    /// The time signature this program is being lowered against.
+    ///
+    /// Two things need it, and both are conversions *out of* beats: a pattern
+    /// written in note values has to know how many beats fill a bar before it
+    /// can say what fraction of one it is, and `bpm` answers in bars per
+    /// second. Everything else here already counts bars and never asks.
+    pub meter: Meter,
 }
 
 /// One eval produces two artifacts: the persistent graph, which is crossfaded
@@ -59,14 +67,24 @@ pub fn fresh_rng() -> SmallRng {
 /// would say otherwise.
 #[cfg(test)]
 pub fn lower(items: &Vec<ScreeItem>) -> Result<Lowered, String> {
-    lower_inner(items, None, DEFAULT_BEAT_SECS, Samples::default())
+    lower_inner(items, None, DEFAULT_BEAT_SECS, Meter::default(), Samples::default())
 }
 
 /// The beat every caller that has no transport to ask gets: the default
 /// tempo's, so `qvs` is bound to something musical in a test rather than left
 /// out and reported as an unbound name.
 #[cfg(test)]
-pub const DEFAULT_BEAT_SECS: f64 = 1.0 / (DEFAULT_CPS * BEATS_PER_CYCLE);
+pub const DEFAULT_BEAT_SECS: f64 = 1.0 / (DEFAULT_CPS * DEFAULT_QUARTERS_PER_BAR);
+
+/// Lower a program in a given time signature, at the default tempo.
+///
+/// Only tests reach this, and only the ones about rhythm: the signature is
+/// what a bar is, so a test that a three-beat pass fills a 3/4 bar has no
+/// other way to say which bar it means.
+#[cfg(test)]
+pub fn lower_in_meter(items: &Vec<ScreeItem>, meter: Meter) -> Result<Lowered, String> {
+    lower_inner(items, None, DEFAULT_BEAT_SECS, meter, Samples::default())
+}
 
 /// Lower a program with buffers but no transport, at the default tempo.
 ///
@@ -75,7 +93,7 @@ pub const DEFAULT_BEAT_SECS: f64 = 1.0 / (DEFAULT_CPS * BEATS_PER_CYCLE);
 /// app goes through `lower_at_tempo`.
 #[cfg(test)]
 pub fn lower_with_samples(items: &Vec<ScreeItem>, samples: Samples) -> Result<Lowered, String> {
-    lower_inner(items, None, DEFAULT_BEAT_SECS, samples)
+    lower_inner(items, None, DEFAULT_BEAT_SECS, Meter::default(), samples)
 }
 
 /// Lower a program against the tempo the transport is running at, so `qvs` and
@@ -93,8 +111,9 @@ pub fn lower_at_tempo(
     items: &Vec<ScreeItem>,
     samples: Samples,
     beat_secs: f64,
+    meter: Meter,
 ) -> Result<Lowered, String> {
-    lower_inner(items, None, beat_secs, samples)
+    lower_inner(items, None, beat_secs, meter, samples)
 }
 
 /// Lower a single scheduler voice.
@@ -114,15 +133,17 @@ pub fn lower_voice(
     items: &Vec<ScreeItem>,
     dur: f64,
     beat_secs: f64,
+    meter: Meter,
     samples: Samples,
 ) -> Result<Lowered, String> {
-    lower_inner(items, Some(dur), beat_secs, samples)
+    lower_inner(items, Some(dur), beat_secs, meter, samples)
 }
 
 fn lower_inner(
     items: &Vec<ScreeItem>,
     dur: Option<f64>,
     beat_secs: f64,
+    meter: Meter,
     samples: Samples,
 ) -> Result<Lowered, String> {
     let mut lw = Lowerer {
@@ -134,6 +155,7 @@ fn lower_inner(
         rng: fresh_rng(),
         samples,
         choices: Vec::new(),
+        meter,
     };
 
     if let Some(dur) = dur {

@@ -223,9 +223,14 @@ fn walk(e: &Expr, found: &mut Vec<String>) {
             walk(tail, found);
         }
 
-        Expr::For { iter, body, .. } => {
+        Expr::For { iter, body, length, .. } => {
             walk(iter, found);
             walk(body, found);
+            // The same rule as a list element's `;`: a `load` is as findable in
+            // the length as in the step it measures.
+            if let Some(length) = length {
+                walk(length, found);
+            }
         }
 
         Expr::If { cond, then, otherwise } => {

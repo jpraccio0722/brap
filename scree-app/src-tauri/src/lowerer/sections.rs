@@ -227,17 +227,17 @@ impl Lowerer {
         &mut self,
         who: &str,
         offset: f64,
-        body: impl FnOnce(&mut Self) -> Result<(), String>,
+        body: impl FnOnce(&mut Self) -> Result<Option<Value>, String>,
     ) -> Result<Section, String> {
         if !offset.is_finite() {
-            return Err(format!("{who}: cannot start a section at cycle {offset}"));
+            return Err(format!("{who}: cannot start a section at bar {offset}"));
         }
         let outer = self.play_start;
         let first = self.bindings.len();
         self.play_start = offset;
         let result = body(self);
         self.play_start = outer;
-        result?;
+        let value = result?;
 
         // The floor is the offset itself: a section is never over before it
         // began, however little it turned out to write. A binding that never
@@ -245,7 +245,16 @@ impl Lowerer {
         // refused rather than scheduled at a time that will not arrive.
         let mut ends_at = Some(offset);
         for binding in &self.bindings[first..] {
-            ends_at = later_end(ends_at, binding.cycles.map(|c| binding.start + c));
+            ends_at = later_end(ends_at, binding.bars.map(|c| binding.start + c));
+        }
+        // A section may end later than its last note, and only it knows: that
+        // is the whole of `.quantize`, whose padding is a rest nothing was
+        // written into. Read off the section's own handle rather than the notes
+        // it left behind, or naming a section as a `fn` would quietly shorten
+        // it to its last note — and a `.loop` around it would come back early
+        // by exactly the rest that was asked for.
+        if let Some(Value::Play { ends_at: declared, .. }) = value {
+            ends_at = later_end(ends_at, declared);
         }
         Ok(Section::rooted(offset, ends_at, first, self.bindings.len()))
     }
@@ -259,6 +268,39 @@ impl Lowerer {
         offset: f64,
     ) -> Result<Section, String> {
         self.at_offset(who, offset, |me| me.inline_body(who, def, args))
+    }
+
+    /// Inline a section named here, leaving the start where it already is.
+    ///
+    /// Everything else in this module places a section *somewhere else*, so it
+    /// moves `play_start` first. `play_all` is the one combinator that moves
+    /// nothing — its parts open where the group does — and this is `place`
+    /// with that difference and no other, so the two spellings of a section
+    /// stay interchangeable there too. It answers with the handle rather than
+    /// a `Section`, which stays private to the combinators that chain.
+    pub(super) fn inline_named(&mut self, who: &str, def: Rc<FunctionDef>)
+        -> Result<Value, String>
+    {
+        let start = self.play_start;
+        Ok(self.inline(who, def, Vec::new(), start)?.value())
+    }
+
+    /// A section that arrived by pipe rather than being written as an argument.
+    ///
+    /// The same rule `seq` follows, for the same reason: whatever is on the
+    /// left settled before this call was reached, so a play written there
+    /// already sounds where it was written and there is nothing left to gather
+    /// — only a name still names something this call can run.
+    pub(super) fn piped_section(&mut self, who: &str, v: Option<&Value>)
+        -> Result<Value, String>
+    {
+        let Some(Value::Function(def)) = v else {
+            return Err(format!(
+                "{who}: a section piped in from the left must be a `fn` written by name — \
+                 `intro.{who}(bassline)`. Written out, it settled before this call could \
+                 gather it, so write it among the arguments instead."));
+        };
+        self.inline_named(who, def.clone())
     }
 
     /// Place the section written as argument `i`, at `offset`.
@@ -310,10 +352,14 @@ impl Lowerer {
             // `chain_first` as well as `first`: a chain hung off an older play,
             // `a.then(playn(...))`, writes its new notes after `a` rather than
             // here, and is reaching back just as plainly.
-            Value::Play { first, chain_first, .. }
-                if first >= mark && chain_first >= mark => Ok(()),
+            //
+            // Handed back rather than dropped, for the same reason a `fn`
+            // body's is: `.then(playn(...).quantize(4))` asked for a rest at
+            // the end, and only the handle knows about it.
+            v @ Value::Play { first, chain_first, .. }
+                if first >= mark && chain_first >= mark => Ok(Some(v)),
             Value::Play { starts_at, .. } => Err(format!(
-                "{who}: {what} is a play that has already been placed — it sounds at cycle \
+                "{who}: {what} is a play that has already been placed — it sounds at bar \
                  {starts_at}, where it was written, and a section is lowered where it is \
                  placed rather than moved there afterwards. Wrap it in a `fn` and name that \
                  here, or write the play out at this call.")),
@@ -340,7 +386,7 @@ impl Lowerer {
         who: &str,
         def: Rc<FunctionDef>,
         args: Vec<Value>,
-    ) -> Result<(), String> {
+    ) -> Result<Option<Value>, String> {
         let wanted = args.len();
         if def.params.len() != wanted {
             return Err(match wanted {
@@ -352,7 +398,10 @@ impl Lowerer {
                     def.params.len()),
             });
         }
-        self.apply(who, def, args).map(|_| ())
+        // The body's own value, kept rather than dropped: a `fn` ending in
+        // `.quantize` or `.take` has said something about where the section
+        // ends that its bindings do not record.
+        self.apply(who, def, args).map(Some)
     }
 
     /// The receiver of a chained combinator, when its arguments were settled on
@@ -433,9 +482,9 @@ impl Lowerer {
     /// alone, because a cut is a ceiling and not a length.
     fn cut_at(&mut self, s: &Section, cut: f64) {
         for b in &mut self.bindings[s.first..s.last] {
-            let ends = b.cycles.map(|c| b.start + c);
+            let ends = b.bars.map(|c| b.start + c);
             if ends.is_none_or(|e| e > cut) {
-                b.cycles = Some((cut - b.start).max(0.0));
+                b.bars = Some((cut - b.start).max(0.0));
             }
         }
     }
@@ -457,7 +506,7 @@ impl Lowerer {
         Ok(self.place(THEN, "the section", p, 1, at)?.after(&s).value())
     }
 
-    /// `.then_after(n, f)` — `n` cycles of silence, then `f`.
+    /// `.then_after(n, f)` — `n` bars of silence, then `f`.
     fn then_after(&mut self, p: &Params) -> Result<Value, String> {
         let s = self.receiver_param(THEN_AFTER, p, 0)?;
         if p.count() != 3 {
@@ -474,11 +523,11 @@ impl Lowerer {
         Ok(self.place(THEN_AFTER, "the section", p, 2, at)?.after(&s).value())
     }
 
-    /// `.overlap(n, f)` — start `f` `n` cycles *before* this section ends.
+    /// `.overlap(n, f)` — start `f` `n` bars *before* this section ends.
     ///
     /// The whole of a crossfade, and the reason it is a combinator rather than
     /// a negative gap: the two sections really do sound together for `n`
-    /// cycles, and the chain carries on from whichever of them ends later.
+    /// bars, and the chain carries on from whichever of them ends later.
     fn overlap(&mut self, p: &Params) -> Result<Value, String> {
         let s = self.receiver_param(OVERLAP, p, 0)?;
         if p.count() != 3 {
@@ -529,18 +578,18 @@ impl Lowerer {
         .value())
     }
 
-    /// `at(n, f)` — place a section at cycle `n`, counted from the origin.
+    /// `at(n, f)` — place a section at bar `n`, counted from the origin.
     ///
     /// The escape hatch from chaining: an arrangement you already know the
     /// shape of is often clearer written down than derived one `.then` at a
     /// time.
     fn at(&mut self, p: &Params) -> Result<Value, String> {
         if p.count() != 2 {
-            return Err(format!("{AT} expects a cycle and a section: {AT}(8, chorus)"));
+            return Err(format!("{AT} expects a bar and a section: {AT}(8, chorus)"));
         }
-        let when = self.constant_param(AT, "the cycle", p, 0)?;
+        let when = self.constant_param(AT, "the bar", p, 0)?;
         if when < 0.0 {
-            return Err(format!("{AT}: a cycle cannot be negative, got {when}"));
+            return Err(format!("{AT}: a bar cannot be negative, got {when}"));
         }
         Ok(self.place(AT, "the section", p, 1, when)?.value())
     }
@@ -650,7 +699,7 @@ impl Lowerer {
         // how an endless part is given a length; a choice already repeats on a
         // period of its own, and two repetitions of one binding is one too many.
         for b in &self.bindings[range.clone()] {
-            if b.cycles.is_none() {
+            if b.bars.is_none() {
                 return Err(format!(
                     "{LOOP}: something in this chain never finishes, so a second pass would \
                      play over the first. Bound it with `play_once`, `playn`, `.{TAKE}(n)` or \
@@ -776,13 +825,13 @@ impl Lowerer {
             }
         };
 
-        // A fill is one pass, and a pass is only a cycle when the pattern is
+        // A fill is one pass, and a pass is only a bar when the pattern is
         // written in shares — see `to_pattern_timed`.
-        let (mut pattern, pass_cycles) = to_pattern_timed(args.get(1).expect("checked above"))?;
+        let (mut pattern, pass_bars) = to_pattern_timed(args.get(1).expect("checked above"), self.meter)?;
         if rate != 1.0 {
             pattern = crate::pattern::pattern::Pattern::fast(rate, pattern);
         }
-        let span = pass_cycles / rate;
+        let span = pass_bars / rate;
 
         // Everything but the pattern is inherited: the fill is the same voice
         // and the same lanes, playing something else for one pass.
@@ -792,7 +841,7 @@ impl Lowerer {
             pattern,
             lanes: source.lanes.clone(),
             start: at,
-            cycles: Some(span),
+            bars: Some(span),
             repeat: None,
             choice: None,
             // A fill's own speed, not the one it is filling for: the pattern
@@ -814,10 +863,10 @@ impl Lowerer {
     // ---- bounding a section ----
 
     /// `.quantize(n?)` — round where the chain has reached up to a multiple of
-    /// `n` cycles, without touching what is already playing.
+    /// `n` bars, without touching what is already playing.
     ///
     /// The cure for a section whose length is not a whole number. `rate`
-    /// divides into the count — `playn(pat, inst, 3, 2)` is 1.5 cycles — and
+    /// divides into the count — `playn(pat, inst, 3, 2)` is 1.5 bars — and
     /// without this every `.then` after such a section is permanently off the
     /// downbeat, with nothing in the language able to recover.
     pub fn quantize(&mut self, args: &[Value]) -> Result<Value, String> {
@@ -845,7 +894,7 @@ impl Lowerer {
         .value())
     }
 
-    /// `.take(n)` — this section, cut to `n` cycles.
+    /// `.take(n)` — this section, cut to `n` bars.
     ///
     /// What gives a plain `play` an end. Until now an unbounded binding could
     /// never be chained from at all; `playn` only fixes that for a single
@@ -853,7 +902,7 @@ impl Lowerer {
     pub fn take(&mut self, args: &[Value]) -> Result<Value, String> {
         let s = self.receiver(TAKE, args)?;
         if args.len() != 2 {
-            return Err(format!("{TAKE} expects a length in cycles: `.{TAKE}(8)`"));
+            return Err(format!("{TAKE} expects a length in bars: `.{TAKE}(8)`"));
         }
         let n = self.constant(TAKE, "the length", args.get(1))?;
         if !(n > 0.0) {
@@ -879,7 +928,7 @@ impl Lowerer {
         }
         let cut = self.bindings[s.first..s.last]
             .iter()
-            .filter_map(|b| b.cycles.map(|c| b.start + c))
+            .filter_map(|b| b.bars.map(|c| b.start + c))
             .fold(None::<f64>, |acc, e| Some(acc.map_or(e, |a| a.max(e))));
         let Some(cut) = cut else {
             return Err(format!(

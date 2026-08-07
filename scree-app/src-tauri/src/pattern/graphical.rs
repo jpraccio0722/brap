@@ -37,7 +37,7 @@ fn unit_length() -> f64 {
 
 /// One step: what it is, and how many grid cells it covers.
 ///
-/// `length` is in cells rather than cycles, which is what makes the grid and
+/// `length` is in cells rather than bars, which is what makes the grid and
 /// the language agree without either doing arithmetic: a note drawn four cells
 /// wide is written `;4`, and the cells in a row always sum to the resolution
 /// the row was drawn at.

@@ -226,22 +226,30 @@ let pos = ramp(1 / stereo.secs)
 
 ## Rhythm in note values
 
-A list divides its cycle by *ratio*: `[220;2, 330, 440]` is a half and two
+Two words do all the work here, and they are not the same word:
+
+- A **bar** is the grid. It is four beats in 4/4, three in 3/4, and it is what
+  `take`, `at`, `then_after` and `quantize` count. The transport's own
+  signature says how long it is.
+- A **pass** is one trip through a pattern. A bare list is one pass and fills
+  the bar exactly, in any signature.
+
+A list divides its bar by *ratio*: `[220;2, 330, 440]` is a half and two
 quarters, and `[220;8, 330;4, 440;4]` is the same rhythm, because only the
 proportions matter. That is how every pattern here works, and it stays that way.
 
 Written note values are the other way of saying it. `w` is a whole note, `h` a
-half, `q` a quarter, `e` an eighth and `s` a sixteenth, and a sequence written in
-them is as long as they add up to rather than always one cycle:
+half, `q` a quarter, `e` an eighth and `s` a sixteenth, and a pass written in
+them is as long as they add up to rather than always one bar:
 
 ```rust
-play([c4;q, e4, g4], lead)      // a 3/4 bar — three beats, so 3/4 of a cycle
-play([c4;q, e4, g4, c5], lead)  // four quarters, which is exactly one cycle
+play([c4;q, e4, g4], lead)      // three beats
+play([c4;q, e4, g4, c5], lead)  // four quarters — one bar, in 4/4
 ```
 
-A value carries to the steps after it, so a bar says what it is once. A bare `q`
-is a hit of that length — a written value carries no pitch, which is what `\`
-already means — so `[q, q, q]` is three quarter-note hits.
+A value carries to the steps after it, so a pass says what it is once. A bare
+`q` is a hit of that length — a written value carries no pitch, which is what
+`\` already means — so `[q, q, q]` is three quarter-note hits.
 
 **Dots and ties.** `q.dot` is a dotted quarter, and `dot` takes a count for the
 rest: `q.dot(2)` is the doubly-dotted quarter, a quarter and an eighth and a
@@ -255,9 +263,39 @@ play([c4;q.dot, e4;e], lead)     // a dotted quarter and an eighth: two beats
 play([c4;h + e, e4;e], lead)     // the same length, spelled as a tie
 ```
 
-One cycle is four beats, the same four `bpm` counts. A bar that does not come to
-four therefore runs against the cycle rather than with it, which is exactly what
-makes `[c4;q, e4, g4]` polymeter against a four-square drum part.
+### The signature, and playing against it
+
+The beat is always the quarter note — the one `bpm` counts. How many of them
+make a bar is the project's **time signature**, set beside the tempo in the
+title bar and remembered in `scree-project.json`. In 4/4 a bar is four beats;
+in 3/4 it is three.
+
+That is what decides whether a pass fills its bar or runs against it:
+
+```rust
+// In 4/4: three beats against a four-beat bar.
+play([c4;q, e4, g4], lead)
+```
+
+This pass is three quarters of a bar, so it comes round a beat early and its
+downbeat walks — beat 1, then 4, then 3, then 2, back to 1 after three bars.
+That is polymeter, and it is exactly what makes the line play against a
+four-square drum part.
+
+Set the project to 3/4 and the same line fills the bar, once per bar, with no
+walking at all — because the bar moved to meet it. Neither reading is a
+special case: a pass fills the bar when its values add up to one, and rotates
+when they do not.
+
+Two things the signature deliberately does **not** move. The **quarter note**:
+120 bpm is 120 bpm in any meter, so switching to 3/4 shortens the bar rather
+than speeding the music up. And **`w`**, the whole note, which is four beats
+wherever it is written — in 3/4 that is more than a bar, which is as it should
+be.
+
+6/8 and 3/4 are the same length here — six eighths, three quarters — and Scree
+does not tell them apart, because what separates them is where the accents
+fall and that is yours to write.
 
 That same beat is available inside an instrument as a number, for writing a
 sweep or an envelope in note values rather than in seconds — see [Syncing to the
@@ -302,9 +340,35 @@ share of whatever else is in the brackets, the other a length regardless of them
 favours. The same goes for a lane: a lane is read by note, so a `;` there is how
 many notes the value covers, and a length of *time* is not a position.
 
-Drawn patterns are ratios, since the grid is cells. A row written in note values
-is passed over by the panel rather than redrawn as the wrong rhythm — keep those
-in a file of your own.
+Drawn patterns are ratios, since the grid is cells — so a drawn row is one pass
+filling the bar whatever the signature is, and the grid rules itself into that
+many beats. A row written in note values is passed over by the panel rather
+than redrawn as the wrong rhythm — keep those in a file of your own.
+
+### A sequence a `for` builds
+
+A `for` whose body is values collects them into a list, and the body may end in
+a `;` saying how long one step of that list is:
+
+```rust
+play(for i in 0..=4 { f4;e }, lead)          // five eighths on the one note
+play(for i in 0..=7 { 60 + i;s }, lead)      // a rising run of sixteenths
+```
+
+That is the only way a *generated* sequence reaches note values. Every other
+list — `rands`, `walki`, a range — is elements and nothing else, so it can only
+ever be read as shares; the `;` is written where a step is written, and a `for`
+collecting steps is the one place besides a list literal that there is one.
+
+The length is read inside the loop, so it can be computed from what the step was
+made of:
+
+```rust
+play(for i in 1..=3 { 220 * i;i }, lead)     // shares 1, 2 and 3 of the bar
+```
+
+A loop that turns out to be audio or plays rather than a sequence has no steps
+to measure, and a `;` on one of those is refused.
 
 
 ## Function Reference
@@ -363,11 +427,11 @@ it.
 
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `accel` | `accel(from, to, cycles)` | A rate that moves, written where a `play` takes a number: `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four cycles and holding there. A straight line in rate, so the pattern covers the area under it — from 1x to 3x over four cycles is eight passes in those four cycles, not four. Measured from the section's own first note, and run afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero. See [Speeding up and slowing down](#speeding-up-and-slowing-down). |
-| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the cycle evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — see [Rhythm in note values](#rhythm-in-note-values). Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
-| `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next cycle, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
-| `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two cycles. |
-| `play_all` | `play_all(play, ...)` | Treat several plays that run at once as one section. Every argument must be a `play`, `play_once`, `playn` or another `play_all`; they start together and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. |
+| `accel` | `accel(from, to, bars)` | A rate that moves, written where a `play` takes a number: `playn(riff, lead, 8, accel(1, 2, 4))` runs eight passes, speeding up to double over the first four bars and holding there. A straight line in rate, so the pattern covers the area under it — from 1x to 3x over four bars is eight passes in those four bars, not four. Measured from the section's own first note, and run afresh each time a `wthen` window comes round again. `to` below `from` is a ritardando. Both rates must be above zero. See [Speeding up and slowing down](#speeding-up-and-slowing-down). |
+| `play` | `play(pattern, instrument, rate?)` | Schedule a pattern on an instrument, forever. The instrument must name a user `fn`. `rate` defaults to 1, and may be an `accel` rather than a number. A list divides the bar evenly unless a step is given a length with `;` — ``[220;2, 330, 440, `;4]`` is a quarter, two eighths and a half of silence — and lengths are relative, so only their ratio matters. A long step is one sustained note, not several. A step may instead be given a written note value — see [Rhythm in note values](#rhythm-in-note-values). Any further parameter is patterned by name — `play(bass, cut: [400, 2000])` — sampled at each note's onset, and lanes may be any length. In a lane a `;` is how many notes the value covers, so it has to be a whole number there. Two names are reserved and reach the note rather than the instrument: `legato:` scales its length, and `pan:` places it across the stereo field. |
+| `play_once` | `play_once(pattern, instrument, rate?)` | `play`, stopping after one pass. Started while something is already playing, it begins on the next bar, so the one-shot lands on a downbeat. Re-evaluating fires it again. |
+| `playn` | `playn(pattern, instrument, times, rate?)` | `play`, stopping after `times` passes. `rate` follows the count and still defaults to 1 — at rate 2, four passes take two bars. |
+| `play_all` | `play_all(section, ...)` | Treat several sections that run at once as one. Each is a no-parameter `fn` named or a play written out, the same two spellings `seq` and `then` take — the difference is that these start together rather than one after another, and the group finishes when the last does. A plain `play` among them never finishes, so nothing may follow. A section piped in from the left must be named, as in `seq`. |
 | `then` | `then(play, section)` | Sequence one section after another: `playn(verse, lead, 4).then(chorus)`. The left side must finish, so plain `play` will not do. `section` is a no-parameter `fn` named here or a play written out, and either way its own `play` calls start where this one stops; it is lowered at eval time, not called from the audio thread. A play bound to a `let` is not a section — it already sounded where it was written. |
 | `dur` | `dur` | The current note's length in seconds. A binding rather than a function, and bound only inside a voice — pass it to `env`. |
 | `qvs` | `qvs` | The quarter note in seconds — 0.5 at the default 120 bpm. A binding rather than a function. See [Syncing to the beat](#syncing-to-the-beat). |
@@ -392,7 +456,7 @@ seconds. Dots and triplets are the arithmetic they always were — `qvs * 1.5` i
 a dotted quarter's worth of delay, `qvh * 3` a quarter triplet.
 
 **Inside an instrument the beat is the one that instrument is being played on.**
-A `play` at rate 2 packs two passes into a cycle, and its voices are told a beat
+A `play` at rate 2 packs two passes into a bar, and its voices are told a beat
 half as long to match — so one instrument follows whatever speed it is put at,
 and two patterns can run the same instrument at two speeds:
 
@@ -436,10 +500,19 @@ playn(riff, lead, 4).then(chorus)                  // named
 playn(riff, lead, 4).then(playn(riff2, lead, 4))   // written out
 ```
 
+Every combinator that takes a section takes both spellings, `play_all`
+included — `play_all(verse, bassline)` and `play_all(verse(), bassline())` are
+the same group, so nothing needs parentheses in one position and not another:
+
+```rust
+seq(intro, play_all(verse, bassline))
+```
+
 These are the same thing, not two mechanisms. A section argument is the one
 place in the language whose expression is *not* evaluated on the way into the
 call: it is lowered where the section is placed, with the start already moved
-there. So a play written out never sounds at the origin and then gets dragged
+there — and for `play_all`, which moves nothing, that start is simply the one
+the group already sits at. So a play written out never sounds at the origin and then gets dragged
 forward — it is written where it belongs in the first place, exactly as the
 body of a named `fn` is. Write it out when a two-bar variation is not worth a
 name; name it when the name says something, or when the same section is used
@@ -454,7 +527,7 @@ playn(intro, bass, 2).then(verse)  // refused: `verse` was already placed
 ```
 
 `let` does not defer anything. A `play` sounds where it is written, so by the
-time the name holds a value the notes are on the timeline at cycle 0, and there
+time the name holds a value the notes are on the timeline at bar 0, and there
 is nothing left for `then` to place — moving them afterwards is exactly the
 fixup the mechanism above avoids. What a named play *is* good for is the other
 side of the call: it is a handle, so `verse.then(chorus)` chains from it. To
@@ -464,6 +537,16 @@ lead, 4)` — and nothing about the call site changes.
 A section captures nothing, because closures do not exist here; whatever `play`
 calls it contains are written relative to where the section was placed, so
 nesting composes and the offsets add up as the code reads.
+
+**A placed section starts at the top of its pattern**, wherever on the timeline
+it lands. That matters when the pass does not divide the bar: seventeen eighths
+is 2⅛ bars, and a section of them dropped eight bars in would otherwise open on
+its fourteenth note and wrap round to its first — and its lanes with it, so a
+volume ramp would start three quarters of the way up. The polymeter above is a
+property of a *looping* `play`, which was never placed anywhere and so keeps the
+transport's own grid: re-evaluating does not re-phase a line that is already
+rotating against the bar. Anything an arrangement puts somewhere begins where it
+begins.
 
 Five of them take only a named `fn`: `then_each`, `wthen`, `rthen`,
 `shuffle_then` and `maybe`. Each of those has to *run* its section rather than
@@ -512,17 +595,17 @@ play itself.
 
 | Name | Signature | Notes |
 | --- | --- | --- |
-| `then_after` | `then_after(play, cycles, section)` | `then`, with `cycles` of silence in between. The gap cannot be negative — `overlap` is how a section starts early. |
-| `overlap` | `overlap(play, cycles, section)` | `then`, but the section starts `cycles` *before* this one ends, so the two really do sound together over the join. Never earlier than the receiver's own start. The chain carries on from whichever ends later. |
-| `with` | `with(play, section)` | Run a section alongside this one, from where it **began**. `play_all` gathers plays that are already concurrent; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. |
-| `at` | `at(cycle, section)` | Place a section at an absolute cycle from the origin. The escape hatch from chaining, for an arrangement whose shape you already know. |
+| `then_after` | `then_after(play, bars, section)` | `then`, with `bars` of silence in between. The gap cannot be negative — `overlap` is how a section starts early. |
+| `overlap` | `overlap(play, bars, section)` | `then`, but the section starts `bars` *before* this one ends, so the two really do sound together over the join. Never earlier than the receiver's own start. The chain carries on from whichever ends later. |
+| `with` | `with(play, section)` | Run a section alongside this one, from where it **began**. `play_all` opens its sections together as a group; this makes one concurrent with a section already placed, so an arrangement reads in the order it happens. |
+| `at` | `at(bar, section)` | Place a section at an absolute bar from the origin. Bars are counted from 0, so `at(8, …)` is the ninth bar — it is a distance from the start, the same number the `then_after`s before it would have added up to. The escape hatch from chaining, for an arrangement whose shape you already know. |
 | `seq` | `seq(section, ...)` | Sections one after another without the nesting: `seq(intro, verse, chorus, verse)`. A section piped in from the left — `intro.seq(verse)` — must be a named `fn`, since it settled before `seq` could place it. |
 | `then_n` | `then_n(play, section, times)` | A section `times` times, back to back. Lowered afresh each pass — whether the section is named or written out — so a `rand` inside it is a different number every time round, the same rule a voice follows. |
 | `loop` | `loop(play, times)` | Everything chained so far, `times` times through. The counterpart to `then_n`: that one names a `fn` and runs it *after* this section, this one takes no section at all, because the section it repeats is the chain it is written on. The whole chain must finish. The passes are copies, so a `rand` in the chain was already spent and every pass is the same music — `then_n` is the one that draws afresh. |
 | `then_each` | `then_each(play, list, body)` | One pass per element, with the element passed in: `.then_each([1, 2, 4], faster)` calls `faster(1)`, `faster(2)`, `faster(4)`. `body` takes exactly one parameter, so it is always a named `fn`. Arrangement by list — every list function already builds the shape of a piece, and this is what spends one. |
 | `then_fill` | `then_fill(play, pattern, rate?)` | One pass of a pattern on this section's **own** instrument. No `fn` and no second `play`: a fill is played by whoever just played, so the instrument and every lane are inherited and only the pattern is new. Needs a single `play` on the left — a group has no one instrument to fill for. |
-| `quantize` | `quantize(play, grid?)` | Round where the chain has reached up to a multiple of `grid` cycles (default 1), without shortening what is already playing. |
-| `take` | `take(play, cycles)` | This section, cut to `cycles`. What gives a plain `play` an end. A part that already stops sooner is left alone — a cut is a ceiling, not a length. |
+| `quantize` | `quantize(play, grid?)` | Round where the chain has reached up to a multiple of `grid` bars (default 1), without shortening what is already playing. |
+| `take` | `take(play, bars)` | This section, cut to `bars`. What gives a plain `play` an end. A part that already stops sooner is left alone — a cut is a ceiling, not a length. |
 | `stop` | `stop(play)` | Cut everything still open in this section at the moment its last **counted** part finishes. Needs at least one `play_once` or `playn` among them, or there is no moment to stop at. |
 | `wthen` | `wthen(play, sections, weights)` | Choose between sections, afresh each time round. Weights are relative and need not sum to 1. The arms are named `fn`s, not plays written out: an arm has to still be runnable when the choice is made. The same holds for `rthen`, `maybe` and `shuffle_then`. |
 | `rthen` | `rthen(play, sections)` | `wthen` with every section equally likely. |
@@ -533,8 +616,8 @@ play itself.
 
 `rate` divides into the count — or an `accel` integrates into it — so a
 section's length need not be a whole number.
-`playn(pat, inst, 3, 2)` is three passes at double speed — 1.5 cycles — and
-every `.then` after it inherits that half-cycle offset for good:
+`playn(pat, inst, 3, 2)` is three passes at double speed — 1.5 bars — and
+every `.then` after it inherits that half-bar offset for good:
 
 ```rust
 playn(pat, inst, 3, 2).then(chorus)              // chorus starts at 1.5
@@ -542,12 +625,25 @@ playn(pat, inst, 3, 2).quantize().then(chorus)   // chorus starts at 2
 ```
 
 Quantizing moves where the *next* section starts. It does not shorten what is
-already playing, so the three passes still run their full 1.5 cycles and the
+already playing, so the three passes still run their full 1.5 bars and the
 chorus opens over the tail of them.
+
+The rest it rounds to is **part of the section**, which is what makes it worth
+naming one:
+
+```rust
+fn slot() = play_once(phrase, lead).quantize(4)   // the phrase, in a four-bar slot
+slot().then(slot).loop(2)                         // four slots, on the grid
+```
+
+`.loop` repeats the rest along with the notes, so a section padded out to its
+slot comes back around at the slot line rather than at its last note. `take`
+says a length the same way — `.take(8)` on a six-bar section is six bars of
+music and two of silence, since a cut is a ceiling and never lengthens a part.
 
 #### Speeding up and slowing down
 
-A rate need not be one speed. `accel(from, to, cycles)` is a straight line in
+A rate need not be one speed. `accel(from, to, bars)` is a straight line in
 rate, and goes wherever a rate number goes:
 
 ```rust
@@ -556,14 +652,14 @@ play(hats, hat, accel(4, 1, 16))        // a long settle, then 1x forever
 ```
 
 It is a line in *rate*, so what the pattern covers is the area under it. From 1x
-to 3x over four cycles averages 2x, which is eight passes in those four cycles —
+to 3x over four bars averages 2x, which is eight passes in those four bars —
 not four, and not six. That is also how a counted section still has a length:
-`playn(riff, lead, 8, accel(1, 3, 4))` is exactly four cycles long, and `.then`
-places what follows at cycle 4 like any other section.
+`playn(riff, lead, 8, accel(1, 3, 4))` is exactly four bars long, and `.then`
+places what follows at bar 4 like any other section.
 
 The curve is measured from the section's **own** first note, not from the start
 of the performance, so it means the same thing wherever the section sits — and a
-`wthen` arm accelerates again every time it is drawn. After `cycles` it holds at
+`wthen` arm accelerates again every time it is drawn. After `bars` it holds at
 `to` rather than climbing on, which is what makes it safe on a plain `play` that
 never ends.
 
@@ -586,7 +682,7 @@ Everything else here settles while the program is lowered. `wthen`, `rthen` and
 point is that it changes. So these are the one place the scheduler is told
 something new.
 
-Every arm is written to the timeline, all starting at the same cycle and all
+Every arm is written to the timeline, all starting at the same bar and all
 marked as arms of one choice. Which arm actually sounds is decided as the music
 reaches it. That has three consequences worth knowing:
 
@@ -609,7 +705,7 @@ pins an arrangement exactly as it pins `choice` and `scramble`.
 ```rust
 playn(riff, lead, 2)
   .wthen([verse, chorus], [0.7, 0.3])  // a new draw every time round
-  .take(32)                            // ...for 32 cycles
+  .take(32)                            // ...for 32 bars
   .then(outro)
 ```
 
@@ -671,7 +767,7 @@ The last three re-roll on every eval, and draw from the same generator as
 | `db` | `db(decibels) -> number` | Decibels to linear amplitude. `0.db` is 1, `(-6).db` is about 0.5. |
 | `amp` | `amp(amplitude) -> number` | The inverse. `1.amp` is 0. Amplitude must be above zero. |
 | `cents` | `cents(hz, cents) -> number` | Detune a frequency by hundredths of a semitone. `440.cents(1200)` is 880. |
-| `bpm` | `bpm(beats) -> number` | Beats per minute to cycles per second, **taking one cycle as four beats**. `120.bpm` is 0.5 — exactly `DEFAULT_CPS`. |
+| `bpm` | `bpm(beats) -> number` | Beats per minute to bars per second. The beat is the quarter note; how many make a bar is the project's signature, so `120.bpm` is 0.5 in 4/4 — exactly `DEFAULT_CPS` — and 0.667 in 3/4, where the bar is shorter. |
 | `oct` | `oct(note, octaves) -> number` | Transpose by whole octaves. `60.oct(-1)` is 48. |
 | `semi` | `semi(note, semitones) -> number` | Transpose by semitones. `60.semi(7)` is 67. |
 | `scale` | `scale(note, scale) -> number` | Snap to the **nearest** tone of a scale given as semitone offsets within an octave. `61.scale([0,2,4,5,7,9,11])` is 60. Neighbouring octaves are candidates, so 59 against `[0,4,7]` rises to 60 rather than falling a seventh. Ties snap down. |
@@ -725,7 +821,7 @@ fn snare(n) = noise() * perc(0.001, 0.1) * rand(0.7, 1)   // a new draw per note
 | `soft_saw` | `(frequency)` | Soft saw wavetable oscillator. Contains all partials but falls off like a triangle wave. |
 | `hammond` | `(frequency)` | Hammond organ wavetable oscillator. Emphasizes the first three partials. |
 | `organ` | `(frequency)` | Organ wavetable oscillator. Emphasizes octave partials. |
-| `ramp` | `(frequency)` | Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of the cycle, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end. |
+| `ramp` | `(frequency)` | Rising ramp from 0 to 1 at the given repetition frequency, starting at 0. Not bandlimited — useful as a phasor, not as audio. Its zero is the start of its own period, which is what lets it drive `sample`: `sample(b, ramp(1 / b.secs))` reads a buffer once, end to end. |
 | `poly_saw` | `(frequency)` | PolyBLEP saw wave. Fast and fairly bandlimited. |
 | `poly_square` | `(frequency)` | PolyBLEP square wave. Fast and fairly bandlimited. |
 | `poly_pulse` | `(frequency, width)` | PolyBLEP pulse wave. Fast and fairly bandlimited; `width` in 0..=1 is the duty cycle. |

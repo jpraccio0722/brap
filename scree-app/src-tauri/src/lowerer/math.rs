@@ -84,7 +84,7 @@ impl Lowerer {
             "db" => 10.0f64.powf(x / 20.0),
             "amp" => 20.0 * positive(func, "the amplitude", x)?.log10(),
             "cents" => positive(func, "the frequency", x)? * (arg(1)? / CENTS_PER_OCTAVE).exp2(),
-            "bpm" => cps_from_bpm(positive(func, "the tempo", x)?),
+            "bpm" => cps_from_bpm(positive(func, "the tempo", x)?, self.meter),
 
             // --- pitch arithmetic ---
             "oct" => x + SEMITONES_PER_OCTAVE * arg(1)?,
@@ -163,6 +163,7 @@ const MAJOR: &str = "[0, 2, 4, 5, 7, 9, 11]";
 mod tests {
     use super::*;
     use crate::scree_graph::ugen_nodes::NodeInput;
+    use crate::scheduler::clock::Meter;
     use crate::lang::MATH_BUILTINS;
     use crate::lowerer::lower::lower;
     use crate::parser::parser::parse;
@@ -246,6 +247,27 @@ mod tests {
         assert!(close(num("120.bpm"), 0.5));
         assert!(close(num("60.bpm"), 0.25));
         assert!(close(num("135.bpm"), 0.5625));
+    }
+
+    /// `bpm` answers in *bars* per second, so the signature reaches it: the
+    /// same 120 bpm is half a bar a second in 4/4 and two thirds of one in
+    /// 3/4, because the bar got shorter and the beat did not.
+    #[test]
+    fn bpm_answers_in_bars_and_so_follows_the_signature() {
+        fn num_in(src: &str, meter: Meter) -> f64 {
+            let items = parse(format!("sin({src})\n")).expect("parse failed");
+            let g = crate::lowerer::lower::lower_in_meter(&items, meter)
+                .expect("lower failed")
+                .graph;
+            match g.nodes[0].inputs[0] {
+                NodeInput::Const(v) => v,
+                _ => panic!("expected a folded constant"),
+            }
+        }
+
+        assert!(close(num_in("120.bpm", Meter { top: 4, bottom: 4 }), 0.5));
+        assert!(close(num_in("120.bpm", Meter { top: 3, bottom: 4 }), 2.0 / 3.0));
+        assert!(close(num_in("120.bpm", Meter { top: 6, bottom: 8 }), 2.0 / 3.0));
     }
 
     // --- pitch arithmetic ---

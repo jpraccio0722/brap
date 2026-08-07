@@ -1,6 +1,6 @@
 //! Patterns: pure descriptions of what happens when.
 //!
-//! Time is measured in *cycles* (one full repetition). A pattern has no cursor
+//! Time is measured in *bars* (one full repetition). A pattern has no cursor
 //! and no state — you ask what falls inside a span and it tells you. That is
 //! what makes swapping one mid-performance trivial.
 
@@ -12,7 +12,7 @@ use crate::pattern::rate::Rate;
 /// between two steps of a pattern anyone can hear.
 const ONSET_EPSILON: f64 = 1e-9;
 
-/// A half-open span of cycle-time: `[begin, end)`.
+/// A half-open span of bar-time: `[begin, end)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Span { pub begin: f64, pub end: f64 }
 
@@ -42,25 +42,25 @@ pub enum Step {
     Rest,
     /// Sound, carrying the argument handed to the instrument.
     Value(f64),
-    /// A whole pattern squeezed into this slot — one cycle of it, compressed.
+    /// A whole pattern squeezed into this slot — one bar of it, compressed.
     Group(Box<Pattern>),
 }
 
 /// The length every slot has unless a `;` gave it another one. A sequence of
-/// these divides its cycle evenly, which is what patterns did before lengths
+/// these divides its bar evenly, which is what patterns did before lengths
 /// existed and what the great majority of them still want.
 pub const UNIT: f64 = 1.0;
 
 /// One slot in a sequence: what happens, and how much of the sequence it takes.
 ///
 /// Lengths are *relative*, not absolute — the sequence always fills exactly one
-/// cycle and the slots divide it in proportion. So `[a;2, b, c]` is a half and
+/// bar and the slots divide it in proportion. So `[a;2, b, c]` is a half and
 /// two quarters, and the same shape written `[a;4, b;2, c;2]` is the same
 /// rhythm. That is what makes an absent length mean "one": a sequence with no
 /// lengths at all is every slot at [`UNIT`], which divides evenly.
 ///
 /// A length is one slot, not several. `[c4;3, e4]` holds c4 for three quarters
-/// of the cycle as a single sustained note — it does not strike it three times.
+/// of the bar as a single sustained note — it does not strike it three times.
 /// That distinction is the whole reason lengths live here rather than being
 /// desugared into repeated steps on the way in.
 #[derive(Clone, Debug, PartialEq)]
@@ -89,10 +89,10 @@ impl Slot {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Pattern {
     Silence,
-    /// Slots dividing one cycle in proportion to their lengths.
+    /// Slots dividing one bar in proportion to their lengths.
     Steps(Vec<Slot>),
     Stack(Vec<Pattern>),
-    /// Compress into `1/rate` of the time, repeating to fill the cycle. A
+    /// Compress into `1/rate` of the time, repeating to fill the bar. A
     /// [`Rate`] rather than a number because the speed may itself be a shape —
     /// see `pattern::rate`, which owns the arithmetic either way.
     Fast(Rate, Box<Pattern>),
@@ -125,7 +125,7 @@ impl Pattern {
     /// Every event whose *onset* falls in `span`. Onsets match half-open, so
     /// adjacent spans never double-trigger or drop a note.
     ///
-    /// Anchored at cycle zero — the whole grid patterns are laid on. Only a
+    /// Anchored at bar zero — the whole grid patterns are laid on. Only a
     /// varying rate can tell the difference; see [`query_from`](Pattern::query_from).
     pub fn query(&self, span: Span) -> Vec<Event> {
         self.query_from(span, 0.0)
@@ -133,9 +133,9 @@ impl Pattern {
 
     /// `query`, told where the pattern's own clock started.
     ///
-    /// The anchor is the cycle a rate curve is measured from: the moment the
+    /// The anchor is the bar a rate curve is measured from: the moment the
     /// binding's window opens, which is what makes `accel(1, 2, 8)` mean eight
-    /// cycles from this section's first note rather than eight from the start
+    /// bars from this section's first note rather than eight from the start
     /// of the performance. A fixed rate ignores it, so everything written
     /// before rate curves existed is queried exactly as it was — the reasoning
     /// is on [`Rate`] itself.
@@ -150,19 +150,19 @@ impl Pattern {
 
             Pattern::Steps(steps) => {
                 if steps.is_empty() || span.end <= span.begin { return Vec::new(); }
-                // The lengths are relative, so the cycle is divided by their
+                // The lengths are relative, so the bar is divided by their
                 // total. `Slot::sized` has already refused anything that could
                 // make this zero or non-finite.
                 let total: f64 = steps.iter().map(|s| s.length).sum();
                 if !(total > 0.0) || !total.is_finite() { return Vec::new(); }
                 let mut out = Vec::new();
-                for cycle in span.begin.floor() as i64 ..= span.end.ceil() as i64 {
+                for bar in span.begin.floor() as i64 ..= span.end.ceil() as i64 {
                     // Walked rather than indexed: where a slot starts depends
                     // on the lengths of the ones before it, not on its position.
                     let mut offset = 0.0;
                     for Slot { step, length } in steps.iter() {
                         let step_dur = length / total;
-                        let slot = cycle as f64 + offset / total;
+                        let slot = bar as f64 + offset / total;
                         offset += length;
                         match step {
                             Step::Rest => {}
@@ -177,9 +177,9 @@ impl Pattern {
                                 }
                             }
 
-                            // Exactly one cycle of the inner pattern fills the
+                            // Exactly one bar of the inner pattern fills the
                             // slot. Map the query span into slot-local time,
-                            // clamped to that single cycle, then map back.
+                            // clamped to that single bar, then map back.
                             Step::Group(inner) => {
                                 let local_begin =
                                     ((span.begin - slot) / step_dur).max(0.0);
@@ -239,15 +239,15 @@ impl Pattern {
     /// nth value of the lane, so a lane has to be told which note this is
     /// rather than what time it is. Counting rather than sampling is also what
     /// makes the two lengths independent — twenty cutoffs against two notes
-    /// walks the whole list over ten cycles instead of reading the same two
+    /// walks the whole list over ten bars instead of reading the same two
     /// entries forever.
     ///
     /// Exact rather than `at * events_per_cycle`, because `Fast` may put a
-    /// non-whole number of onsets in a cycle: each layer is counted in its own
-    /// time, and only `Steps` — which is periodic in one cycle by construction —
+    /// non-whole number of onsets in a bar: each layer is counted in its own
+    /// time, and only `Steps` — which is periodic in one bar by construction —
     /// multiplies out. A rate that varies makes that the only workable answer
-    /// rather than merely the exact one: there is no note-per-cycle figure to
-    /// multiply when every cycle holds a different number of them.
+    /// rather than merely the exact one: there is no note-per-bar figure to
+    /// multiply when every bar holds a different number of them.
     pub fn onsets_before(&self, at: f64) -> usize {
         self.onsets_before_from(at, 0.0)
     }
@@ -257,7 +257,7 @@ impl Pattern {
     /// has to match it — a lane reads by position, so a note counted against a
     /// different clock than the one that played it takes the wrong value.
     ///
-    /// `Steps` counts a cycle of itself and multiplies, which rests on a cycle
+    /// `Steps` counts a bar of itself and multiplies, which rests on a bar
     /// being like every other. That holds because a rate curve always wraps a
     /// whole pattern — it is `play`'s argument — so it sits above this, never
     /// inside the periodic part.
@@ -272,9 +272,9 @@ impl Pattern {
                 if steps.is_empty() {
                     return 0;
                 }
-                // One cycle's worth of onsets, then multiplied by whole cycles:
-                // `Steps` repeats exactly, so cycle n holds the same set as
-                // cycle 0 shifted by n.
+                // One bar's worth of onsets, then multiplied by whole bars:
+                // `Steps` repeats exactly, so bar n holds the same set as
+                // bar 0 shifted by n.
                 let in_cycle: Vec<f64> =
                     self.query(Span::new(0.0, 1.0)).into_iter().map(|e| e.begin).collect();
                 if in_cycle.is_empty() {
@@ -366,20 +366,20 @@ impl Pattern {
                 if steps.is_empty() { return None; }
                 let total: f64 = steps.iter().map(|s| s.length).sum();
                 if !(total > 0.0) || !total.is_finite() { return None; }
-                // Where in the cycle, rescaled to the lengths' own units so it
+                // Where in the bar, rescaled to the lengths' own units so it
                 // can be walked against them.
                 let pos = at.rem_euclid(1.0) * total;
 
                 let mut offset = 0.0;
                 for Slot { step, length } in steps {
                     // The last slot takes anything rem_euclid rounded up to the
-                    // very end of the cycle, which no earlier slot will claim.
+                    // very end of the bar, which no earlier slot will claim.
                     let last = offset + length >= total;
                     if pos < offset + length || last {
                         return match step {
                             Step::Rest => None,
                             Step::Value(v) => Some(*v),
-                            // Slot-local time: one cycle of the inner pattern
+                            // Slot-local time: one bar of the inner pattern
                             // fills the slot, exactly as `query` treats a group.
                             Step::Group(inner) => inner.sample((pos - offset) / length),
                         };
@@ -482,21 +482,21 @@ mod tests {
     }
 
     /// A rate curve puts the notes closer and closer together, and covers
-    /// exactly the pattern its integral says: from 1x to 3x over four cycles is
-    /// eight notes of a one-per-cycle pattern in those four cycles.
+    /// exactly the pattern its integral says: from 1x to 3x over four bars is
+    /// eight notes of a one-per-bar pattern in those four bars.
     #[test]
     fn an_accelerating_pattern_closes_its_gaps() {
         let p = Pattern::fast(Rate::accel(1.0, 3.0, 4.0), Pattern::steps([Some(1.0)]));
         let ons = onsets(&p.query(Span::new(0.0, 4.0)));
 
-        assert_eq!(ons.len(), 8, "eight passes fit in the four cycles: {ons:?}");
+        assert_eq!(ons.len(), 8, "eight passes fit in the four bars: {ons:?}");
         assert_eq!(ons[0], 0.0);
         let gaps: Vec<f64> = ons.windows(2).map(|w| w[1] - w[0]).collect();
         for pair in gaps.windows(2) {
             assert!(pair[1] < pair[0], "gaps should keep shrinking: {gaps:?}");
         }
         // The eighth note is the last that fits: a ninth would land past the
-        // four cycles the curve takes to cover eight.
+        // four bars the curve takes to cover eight.
         assert!(*ons.last().unwrap() < 4.0);
     }
 
@@ -597,8 +597,8 @@ mod tests {
         assert_eq!(p.sample(0.99), Some(4.0));
     }
 
-    /// A lane is sampled at absolute cycle time, so it has to repeat like the
-    /// pattern it accompanies rather than run out after cycle 0.
+    /// A lane is sampled at absolute bar time, so it has to repeat like the
+    /// pattern it accompanies rather than run out after bar 0.
     #[test]
     fn sample_repeats_every_cycle() {
         let p = Pattern::steps([Some(1.0), Some(2.0)]);
@@ -618,8 +618,8 @@ mod tests {
         let sampled: Vec<Option<f64>> = onsets.iter().map(|t| lane.sample(*t)).collect();
 
         assert_eq!(sampled, vec![
-            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // cycle 0
-            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // cycle 1
+            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // bar 0
+            Some(10.0), Some(10.0), Some(20.0), Some(30.0),   // bar 1
         ]);
     }
 
@@ -677,7 +677,7 @@ mod tests {
 /// These are about division alone — that a length moves the onsets and the
 /// durations of a sequence, and that its absence leaves both exactly where they
 /// were. What a length is allowed to *be*, and what it means once a lane rather
-/// than a cycle is reading it, is checked where those decisions are made.
+/// than a bar is reading it, is checked where those decisions are made.
 #[cfg(test)]
 mod length_tests {
     use super::*;
@@ -705,7 +705,7 @@ mod length_tests {
         assert_eq!(plain.query(Span::new(0.0, 1.0)), ones.query(Span::new(0.0, 1.0)));
     }
 
-    /// A length takes its share of the cycle, and pushes everything after it
+    /// A length takes its share of the bar, and pushes everything after it
     /// along — the onsets move, which is what makes this rhythm and not sustain.
     #[test]
     fn a_length_takes_its_share_of_the_cycle() {
@@ -750,7 +750,7 @@ mod length_tests {
         assert_eq!(evs[0].duration(), 0.75);
     }
 
-    /// Lengths repeat with the cycle like everything else in a sequence.
+    /// Lengths repeat with the bar like everything else in a sequence.
     #[test]
     fn lengths_hold_across_cycles() {
         let p = sized([(1.0, 3.0), (2.0, 1.0)]);
@@ -781,7 +781,7 @@ mod length_tests {
         assert_eq!(p.sample(0.5), Some(1.0), "still inside the long first slot");
         assert_eq!(p.sample(0.74), Some(1.0));
         assert_eq!(p.sample(0.8), Some(2.0));
-        // And it repeats, so the same questions answer the same way next cycle.
+        // And it repeats, so the same questions answer the same way next bar.
         assert_eq!(p.sample(1.5), Some(1.0));
     }
 
@@ -823,6 +823,6 @@ mod length_tests {
         let p = sized([(1.0, 3.0), (2.0, 1.0)]);
         assert_eq!(p.onsets_before(0.5), 1, "only the first slot has begun");
         assert_eq!(p.onsets_before(0.75), 1);
-        assert_eq!(p.onsets_before(1.0), 2, "both, by the end of the cycle");
+        assert_eq!(p.onsets_before(1.0), 2, "both, by the end of the bar");
     }
 }

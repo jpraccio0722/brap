@@ -13,6 +13,9 @@ interface TransportPanelProps {
   patternsPath: string | null;
   /** False when no folder is open, so there is nowhere to save patterns to. */
   hasProject: boolean;
+  /** Beats in a bar, from the project's time signature — passed through to the
+   *  grids, which rule a bar into that many. */
+  beatsPerBar: number;
 }
 
 /**
@@ -36,6 +39,7 @@ export function TransportPanel({
   onPatternsChange,
   patternsPath,
   hasProject,
+  beatsPerBar,
 }: TransportPanelProps) {
   return (
     <PatternPanel
@@ -45,6 +49,7 @@ export function TransportPanel({
       onOpenFile={onOpenFile}
       path={patternsPath}
       hasProject={hasProject}
+      beatsPerBar={beatsPerBar}
     />
   );
 }

@@ -1,7 +1,7 @@
 import { isAccidental, resolution, ROLL_HIGH, ROLL_LOW, type GraphicalPattern } from "./patterns";
 
 /**
- * A pattern at a glance: blocks laid out along one cycle, sized by how long
+ * A pattern at a glance: blocks laid out along one bar, sized by how long
  * each note actually is.
  *
  * This is a picture, not an editor — it exists so the right panel can show
@@ -18,9 +18,11 @@ const MIN_WIDTH_PCT = 1.5;
 
 interface PatternMiniProps {
   pattern: GraphicalPattern;
+  /** Beats in a bar, so the guide lines match the project's signature. */
+  beatsPerBar: number;
 }
 
-export function PatternMini({ pattern }: PatternMiniProps) {
+export function PatternMini({ pattern, beatsPerBar }: PatternMiniProps) {
   const cells = resolution(pattern);
   const drums = pattern.mode === "drums";
 
@@ -66,11 +68,13 @@ export function PatternMini({ pattern }: PatternMiniProps) {
       className="relative w-full overflow-hidden rounded border border-neutral-800 bg-neutral-950"
     >
       {/* Beat lines, so the eye has something to place the blocks against.
-          Four to a cycle, because a cycle is a bar of four. */}
-      {[1, 2, 3].map((n) => (
+          As many as the signature says are in a bar — three in 3/4, six in
+          6/8 — since a strip drawn in four would claim a bar this project
+          does not have. */}
+      {Array.from({ length: Math.max(beatsPerBar - 1, 0) }, (_, i) => i + 1).map((n) => (
         <div
           key={n}
-          style={{ left: `${(n / 4) * 100}%` }}
+          style={{ left: `${(n / beatsPerBar) * 100}%` }}
           className="absolute inset-y-0 w-px bg-neutral-800/70"
         />
       ))}

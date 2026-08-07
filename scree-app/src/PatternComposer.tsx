@@ -19,7 +19,7 @@ import {
 /**
  * The pattern composer: a piano roll and a drum row, drawn rather than typed.
  *
- * A cycle is one bar, and the grid divides it into cells. A note is drawn by
+ * The grid is one bar, divided into cells. A note is drawn by
  * dragging across the cells it should cover, and how many cells it covers *is*
  * its rhythm — that width becomes the `;` the language reads, so what is drawn
  * and what is played are the same thing with no translation in between.
@@ -49,9 +49,17 @@ interface PatternComposerProps {
   /** Why the name cannot be used, or null. Checked by the caller, which is the
    *  only place that knows what the other patterns are called. */
   error: string | null;
+  /** Beats in a bar, from the project's time signature. The cells are shares
+   *  of a bar either way — this is which of them get the heavier line. */
+  beatsPerBar: number;
 }
 
-export function PatternComposer({ pattern, onChange, error }: PatternComposerProps) {
+export function PatternComposer({
+  pattern,
+  onChange,
+  error,
+  beatsPerBar,
+}: PatternComposerProps) {
   const cells = resolution(pattern);
   const drums = pattern.mode === "drums";
   const grid = toCells(pattern.steps);
@@ -260,16 +268,27 @@ export function PatternComposer({ pattern, onChange, error }: PatternComposerPro
               />
             ))}
 
-            {/* Cell lines, with the beat every quarter of the cycle picked out
-                so the bar is readable at any resolution. */}
+            {/* Cell lines. */}
             {Array.from({ length: cells + 1 }, (_, i) => (
               <div
                 key={i}
                 style={{ left: i * CELL_W }}
-                className={
-                  "absolute inset-y-0 w-px " +
-                  (i % (cells / 4) === 0 ? "bg-neutral-700" : "bg-neutral-900")
-                }
+                className="absolute inset-y-0 w-px bg-neutral-900"
+              />
+            ))}
+
+            {/* And the beats over them, so the bar is readable at any
+                resolution. Placed at their true fraction of the bar rather
+                than every nth cell, because the two need not divide: the grids
+                on offer are powers of two and a bar of three beats divides
+                none of them. A beat line between two cells is honest — it is
+                where the beat is — and a beat line only ever drawn where a
+                cell happened to fall would be silently wrong in 3/4. */}
+            {Array.from({ length: Math.max(beatsPerBar - 1, 0) }, (_, i) => i + 1).map((n) => (
+              <div
+                key={`beat-${n}`}
+                style={{ left: (n / beatsPerBar) * cells * CELL_W }}
+                className="absolute inset-y-0 w-px bg-neutral-700"
               />
             ))}
 

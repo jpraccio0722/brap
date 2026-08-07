@@ -85,7 +85,11 @@ pub enum Expr {
     Cmp { op: CmpOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Chain { lhs: Box<Expr>, rhs: Box<Expr> },
     Div   { lhs: Box<Expr>, rhs: Box<Expr> },
-    For { var: Ident, iter: Box<Expr>, body: Box<Expr> },
+    /// `for i in 0..=3 { f4;e }`. The `length` is the `;` its body ended with:
+    /// what one step of the sequence being collected is worth. It is kept here
+    /// rather than on the body because it describes the element the loop makes
+    /// of that body, and nothing about the body itself.
+    For { var: Ident, iter: Box<Expr>, body: Box<Expr>, length: Option<Box<Expr>> },
     If  { cond: Box<Expr>, then: Box<Expr>, otherwise: Option<Box<Expr>> },
     Index { base: Box<Expr>, index: Box<Expr> },
     Let { name: Ident, value: Box<Expr>, body: Box<Expr> },
@@ -214,25 +218,37 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
 }
 
 /// `{ let a = f * 2\n sin(a) }` — statements, then the expression the block is
-/// worth.
+/// worth, and the `;` length that expression carried if it had one.
+///
+/// The length is lifted out here rather than left on the tail because only the
+/// block's *value* can have one: a `;` says how long a step lasts, and a
+/// statement in the middle of a block is not a step. Every caller but `for`
+/// goes through `block`, which refuses it — a `for` collecting a sequence is
+/// the one place there is a step for it to describe.
 ///
 /// Takes the expression parser rather than calling `expr` itself so the copy
 /// inside `expr` can recurse through the recursive handle, while a function
 /// body — which is not inside an expression yet — can build its own.
-fn block<'a, I, E>(expr: E) -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
+fn sized_block<'a, I, E>(expr: E)
+    -> impl Parser<'a, I, (Expr, Option<Expr>), extra::Err<Rich<'a, Token>>> + Clone
 where
     I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
     E: Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone,
 {
     let sep = just(Token::Term).repeated().at_least(1);
 
+    // The length is read onto every statement and refused below on all but the
+    // last, so a `;` in the middle of a block is a message rather than a parse
+    // error pointing at the token after it.
     let stmt = choice((
-        expr.clone().map(Statement::Expr),
+        expr.clone()
+            .then(just(Token::Semi).ignore_then(expr.clone()).or_not())
+            .map(|(e, length)| (Statement::Expr(e), length)),
         just(Token::Let)
             .ignore_then(ident())
             .then_ignore(just(Token::Assign))
             .then(expr)
-            .map(|(name, value)| Statement::Let { name, value: Box::new(value) }),
+            .map(|(name, value)| (Statement::Let { name, value: Box::new(value) }, None)),
     ));
 
     stmt.separated_by(sep)
@@ -240,10 +256,33 @@ where
         .allow_trailing()
         .collect::<Vec<_>>()
         .delimited_by(just(Token::BraceOpen), just(Token::BraceClose))
-        .try_map(|mut stmts, span| match stmts.pop() {
-            Some(Statement::Expr(tail)) => Ok(Expr::Block { stmts, tail: Box::new(tail) }),
-            _ => Err(Rich::custom(span, "a block must end in an expression")),
+        .try_map(|mut stmts, span| {
+            let Some((Statement::Expr(tail), length)) = stmts.pop() else {
+                return Err(Rich::custom(span, "a block must end in an expression"));
+            };
+            if stmts.iter().any(|(_, length)| length.is_some()) {
+                return Err(Rich::custom(span, "a `;` length belongs to the value a block \
+                                              answers with, which is its last line"));
+            }
+            let stmts = stmts.into_iter().map(|(stmt, _)| stmt).collect();
+            Ok((Expr::Block { stmts, tail: Box::new(tail) }, length))
         })
+}
+
+/// A block in every position but a `for` body, where a `;` length has nothing
+/// to attach to.
+fn block<'a, I, E>(expr: E) -> impl Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone
+where
+    I: ValueInput<'a, Token = Token, Span = SimpleSpan>,
+    E: Parser<'a, I, Expr, extra::Err<Rich<'a, Token>>> + Clone,
+{
+    sized_block(expr).try_map(|(block, length), span| match length {
+        None => Ok(block),
+        Some(_) => Err(Rich::custom(span, "a `;` length is how long a step of a sequence \
+                                          lasts, and this block is not building one — only \
+                                          a list and a `for` that collects into one have a \
+                                          step for it to describe")),
+    })
 }
 
 /// Read a program, or say what stopped it.
@@ -488,9 +527,12 @@ where I: ValueInput<'a, Token = Token, Span = SimpleSpan> {
             .ignore_then(ident())
             .then_ignore(just(Token::In))
             .then(expr.clone())
-            .then(block.clone())
-            .map(|((var, iter), body)| Expr::For {
-                var, iter: Box::new(iter), body: Box::new(body)
+            .then(sized_block(expr.clone()))
+            .map(|((var, iter), (body, length))| Expr::For {
+                var,
+                iter: Box::new(iter),
+                body: Box::new(body),
+                length: length.map(Box::new),
             });
         
         let if_expr = recursive(|if_expr| {
@@ -1011,6 +1053,40 @@ mod tests {
             panic!("expected a call, got {items:?}");
         };
         assert_eq!(args[1].value, Expr::Var(id("drums::kick")));
+    }
+
+    /// `for i in 0..=3 { f4;e }` — the `;` a `for` body ends with is lifted off
+    /// the block and onto the loop, because it belongs to the element the loop
+    /// makes rather than to the expression the body is.
+    #[test]
+    fn a_for_body_may_carry_a_length() {
+        let items = parse("for i in 0..=3 { f4;e }\n".to_string()).expect("should parse");
+        let Some(ScreeItem::Expr(Expr::For { body, length, .. })) = items.first() else {
+            panic!("expected a for, got {items:?}");
+        };
+        assert_eq!(
+            **body,
+            Expr::Block { stmts: Vec::new(), tail: var("f4") },
+            "the length should be off the block, not inside it");
+        assert_eq!(length.as_deref(), Some(&Expr::Var(id("e"))));
+    }
+
+    /// Everywhere else a block can be written, there is no step for a length to
+    /// be the length of.
+    #[test]
+    fn a_length_on_an_ordinary_block_is_refused() {
+        let err = parse("fn tone(f) { sin(f);q }\n".to_string())
+            .expect_err("a `;` in a function body should not parse");
+        assert!(err.message.contains("not building one"), "got: {}", err.message);
+    }
+
+    /// Only the value a block answers with is a step. A `;` further up is a
+    /// length given to something that is never read as one.
+    #[test]
+    fn a_length_on_a_statement_is_refused() {
+        let err = parse("for i in 1..=2 {\n  i;q\n  i\n}\n".to_string())
+            .expect_err("a `;` on a statement should not parse");
+        assert!(err.message.contains("its last line"), "got: {}", err.message);
     }
 
     /// A block that ends in a `let` fails with the parser's own words, which

@@ -21,7 +21,7 @@ use crate::scheduler::voice::{Instruments, build_voice};
 const LOOKAHEAD_SECS: f64 = 0.2;
 /// How often the thread wakes. Must be well under LOOKAHEAD_SECS, and well
 /// under the clock's `START_LEAD_SECS` — a pass a tick behind an eval still has
-/// to find cycle 0 ahead of it.
+/// to find bar 0 ahead of it.
 pub(crate) const TICK: Duration = Duration::from_millis(25);
 /// Per-voice fades, clamped against short notes before pushing.
 const FADE_IN_SECS: f64 = 0.005;
@@ -78,7 +78,7 @@ impl SchedulerState {
     /// Halt playback and say why.
     ///
     /// A pattern that cannot be turned into a voice fails on every event of
-    /// every cycle, for as long as it is bound: logging and carrying on means
+    /// every bar, for as long as it is bound: logging and carrying on means
     /// an error nobody sees, scrolling past in a console, while the music
     /// silently drops the notes it names. So the bindings go — which is what
     /// `stop_audio` does to end a performance — the pushed voices are cut by
@@ -118,10 +118,10 @@ struct Live {
     end_secs: f64,
 }
 
-/// How far the scheduler has pushed, in cycles, tagged with the clock epoch it
+/// How far the scheduler has pushed, in bars, tagged with the clock epoch it
 /// was measured against.
 ///
-/// The tag is what makes it safe to trust: a reset moves cycle time backwards,
+/// The tag is what makes it safe to trust: a reset moves bar time backwards,
 /// and a mark from before it would sit beyond every horizon this loop can
 /// reach, stalling the music forever. Comparing sizes instead of epochs cannot
 /// tell that apart from a tempo drop, where the horizon legitimately falls
@@ -130,7 +130,7 @@ struct Live {
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Mark {
     epoch: u64,
-    cycles: f64,
+    bars: f64,
 }
 
 fn run(mut seq: Sequencer, clock: Clock, state: SchedulerState) {
@@ -186,19 +186,19 @@ fn schedule_pass(
     live: &mut Vec<Live>,
 ) -> Option<Mark> {
     let epoch = clock.epoch();
-    let now_cycles = clock.now_cycles();
-    let horizon = clock.cycles_at(clock.now_secs() + LOOKAHEAD_SECS);
+    let now_bars = clock.now_bars();
+    let horizon = clock.bars_at(clock.now_secs() + LOOKAHEAD_SECS);
 
     let from = match scheduled_through {
         // Never schedule into the past: if this thread stalled, skip the
         // missed events rather than firing a burst of late ones.
-        Some(mark) if mark.epoch == epoch => mark.cycles.max(now_cycles),
-        // A mark from before a reset. Cycle time has moved backwards under it,
+        Some(mark) if mark.epoch == epoch => mark.bars.max(now_bars),
+        // A mark from before a reset. Bar time has moved backwards under it,
         // so it says nothing about what has been pushed: start from the
-        // present, which is where the reset put cycle 0.
-        Some(_) | None => now_cycles,
+        // present, which is where the reset put bar 0.
+        Some(_) | None => now_bars,
     };
-    let next = Some(Mark { epoch, cycles: from.max(horizon) });
+    let next = Some(Mark { epoch, bars: from.max(horizon) });
 
     if horizon <= from {
         return next;
@@ -210,7 +210,7 @@ fn schedule_pass(
             // resets the clock and publishes its bindings a moment later, and
             // a watermark out at the horizon would swallow their first steps.
             if p.is_empty() {
-                return Some(Mark { epoch, cycles: from });
+                return Some(Mark { epoch, bars: from });
             }
             p.query(Span::new(from, horizon))
         }
@@ -252,7 +252,7 @@ fn schedule_pass(
 
         match build_voice(
             &instruments, &bound.instrument, bound.event.value, &bound.args, dur_secs,
-            beat_secs,
+            beat_secs, clock.meter(),
         ) {
             // An instrument that will not build is a broken program, and it
             // will not build for the next event either — the same failure once
@@ -371,8 +371,8 @@ mod tests {
         assert!(push_voice(&mut seq, 0.0, 1.0, mono).is_none());
     }
 
-    /// The scheduler's own timing math: an event at cycle 1 with cps 0.5
-    /// starts at 2 seconds and lasts one second at 2 steps per cycle.
+    /// The scheduler's own timing math: an event at bar 1 with cps 0.5
+    /// starts at 2 seconds and lasts one second at 2 steps per bar.
     #[test]
     fn event_times_convert_to_seconds() {
         let clock = Clock::with_cps(44100.0, 0.5);
@@ -382,7 +382,7 @@ mod tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
 
@@ -416,7 +416,7 @@ mod pass_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
@@ -451,10 +451,10 @@ mod pass_tests {
         seq.set_sample_rate(44100.0);
 
         let mark = pass(&mut seq, &clock, &state, None);
-        // cps 1.0, 0.2s lookahead -> horizon is cycle 0.2.
-        assert!((mark.unwrap().cycles - 0.2).abs() < 1e-9, "watermark: {mark:?}");
+        // cps 1.0, 0.2s lookahead -> horizon is bar 0.2.
+        assert!((mark.unwrap().bars - 0.2).abs() < 1e-9, "watermark: {mark:?}");
 
-        // Only the step at cycle 0.0 falls inside [0, 0.2).
+        // Only the step at bar 0.0 falls inside [0, 0.2).
         assert!(peak_over(&mut seq, 4410) > 0.5, "the first step should sound");
     }
 
@@ -489,7 +489,7 @@ mod pass_tests {
     /// the transport's quarter divided by the speed the pattern runs at, so the
     /// same instrument sweeps twice as fast under a `play` at rate 2.
     ///
-    /// At cps 1 a cycle is a second and the quarter a quarter of one, which is
+    /// At cps 1 a bar is a second and the quarter a quarter of one, which is
     /// 4 Hz; times the 32 written here that is 128 Hz at rate 1 and 256 at
     /// rate 2. Counted in zero crossings over a tenth of a second, the same way
     /// the lane path is checked above.
@@ -561,7 +561,7 @@ mod pass_tests {
         for pair in gaps.windows(2) {
             assert!(pair[1] < pair[0], "intervals should close up: {gaps:?}");
         }
-        assert!(*onsets.last().unwrap() < 4.0, "all of it inside its own four cycles");
+        assert!(*onsets.last().unwrap() < 4.0, "all of it inside its own four bars");
 
         // And they are real voices, not merely times: the first one sounds.
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
@@ -765,7 +765,7 @@ mod pass_tests {
         *state.patterns.lock().unwrap() =
             Patterns { bindings: lowered.bindings, ..Default::default() };
 
-        // One step a cycle at cps 1.0: a legato of 0.2 holds it for 0.2 s.
+        // One step a bar at cps 1.0: a legato of 0.2 holds it for 0.2 s.
         let clock = Clock::with_cps(44100.0, 1.0);
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
         seq.set_sample_rate(44100.0);
@@ -858,8 +858,8 @@ mod pass_tests {
 
         assert_eq!(live.len(), pushed, "no voice should have been pushed twice");
         assert_eq!(
-            after.unwrap().cycles,
-            mark.unwrap().cycles,
+            after.unwrap().bars,
+            mark.unwrap().bars,
             "the watermark must survive a tempo change",
         );
     }
@@ -872,10 +872,10 @@ mod pass_tests {
         let state = state_with_kick(vec![Some(220.0)]);
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
 
-        // Watermark claims we only got as far as cycle 0, ten cycles ago.
-        let stale = Mark { epoch: clock.epoch(), cycles: 0.0 };
+        // Watermark claims we only got as far as bar 0, ten bars ago.
+        let stale = Mark { epoch: clock.epoch(), bars: 0.0 };
         let mark = pass(&mut seq, &clock, &state, Some(stale)).unwrap();
-        assert!(mark.cycles >= 10.0, "should jump to the present, got {mark:?}");
+        assert!(mark.bars >= 10.0, "should jump to the present, got {mark:?}");
     }
 
     /// An empty pattern set is cheap and silent, which is the state before the
@@ -911,7 +911,7 @@ mod pass_tests {
                 pattern: Pattern::steps(vec![Some(50.0), Some(50.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
@@ -978,7 +978,7 @@ mod pass_tests {
                 pattern: Pattern::steps(vec![Some(1.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
@@ -1028,7 +1028,7 @@ mod pass_tests {
         schedule_pass(&mut seq, &clock, &state, None, &mut live);
         assert_eq!(live.len(), 1, "the pass should have pushed one voice");
 
-        // The voice lasts a full cycle; interrupt it 50ms in.
+        // The voice lasts a full bar; interrupt it 50ms in.
         assert!(peak_over(&mut seq, 2205) > 0.5, "voice should be sounding");
 
         silence(&mut seq, &mut live);
@@ -1086,7 +1086,7 @@ mod pass_tests {
         seq.set_sample_rate(44100.0);
         let mut live = Vec::new();
 
-        // Each step is a quarter cycle, so voice n runs [n/4, (n+1)/4).
+        // Each step is a quarter bar, so voice n runs [n/4, (n+1)/4).
         let mut mark = None;
         for _ in 0..4 {
             mark = schedule_pass(&mut seq, &clock, &state, mark, &mut live);
@@ -1121,15 +1121,15 @@ mod start_position_tests {
                 pattern: Pattern::steps(steps),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+                bars: None, repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
             ..Default::default()
         };
         s
     }
 
     fn steps_over(state: &SchedulerState, clock: &Clock, secs: f64) -> Vec<f64> {
-        let from = clock.now_cycles();
-        let horizon = clock.cycles_at(clock.now_secs() + secs);
+        let from = clock.now_bars();
+        let horizon = clock.bars_at(clock.now_secs() + secs);
         state
             .patterns
             .lock()
@@ -1145,7 +1145,7 @@ mod start_position_tests {
     #[test]
     fn without_a_reset_a_pattern_starts_mid_cycle() {
         let clock = Clock::with_cps(44100.0, 0.5);
-        clock.advance(44100 * 5); // 2.5 cycles in
+        clock.advance(44100 * 5); // 2.5 bars in
         let state = state_with(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
 
         assert_eq!(steps_over(&state, &clock, 2.0), vec![3.0, 4.0, 1.0, 2.0]);
@@ -1163,7 +1163,7 @@ mod start_position_tests {
     }
 
     /// The reported bug: the scheduler reads the clock a tick after the eval
-    /// that reset it, so with cycle 0 pinned to the eval's "now" the first step
+    /// that reset it, so with bar 0 pinned to the eval's "now" the first step
     /// was already behind the window and the pattern was heard from its second.
     #[test]
     fn a_pattern_starts_at_step_one_even_a_tick_after_the_eval() {
@@ -1197,8 +1197,8 @@ mod start_position_tests {
         clock.reset();
         let mark = schedule_pass(&mut seq, &clock, &empty, None, &mut Vec::new());
         assert!(
-            mark.unwrap().cycles <= 0.0,
-            "an empty pass must not claim past cycle 0, got {mark:?}",
+            mark.unwrap().bars <= 0.0,
+            "an empty pass must not claim past bar 0, got {mark:?}",
         );
 
         // Now the bindings arrive and the next pass runs against that mark.
@@ -1209,9 +1209,9 @@ mod start_position_tests {
     }
 
     /// A one-shot published from silence, as `run_code` publishes one: the
-    /// reset leaves the origin a lead-in *short* of cycle 0, and that is the
+    /// reset leaves the origin a lead-in *short* of bar 0, and that is the
     /// number the patterns are handed. The binding has to sound its whole first
-    /// cycle from there and nothing after it.
+    /// bar from there and nothing after it.
     #[test]
     fn a_one_shot_sounds_its_first_cycle_and_then_stops() {
         let clock = Clock::with_cps(44100.0, 0.5);
@@ -1227,10 +1227,10 @@ mod start_position_tests {
                 pattern: Pattern::steps([Some(1.0), Some(2.0)]),
                 lanes: Vec::new(),
                 start: 0.0,
-                cycles: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
-            origin: clock.now_cycles(), choices: Vec::new() };
+                bars: Some(1.0), repeat: None, choice: None, rate: Rate::Fixed(1.0) }],
+            origin: clock.now_bars(), choices: Vec::new() };
 
-        // One cycle is two seconds at this tempo.
+        // One bar is two seconds at this tempo.
         assert_eq!(steps_over(&s, &clock, 2.0), vec![1.0, 2.0]);
         clock.advance(44100 * 4);
         assert!(steps_over(&s, &clock, 8.0).is_empty(), "the one-shot should be over");
@@ -1259,7 +1259,7 @@ mod start_position_tests {
     #[test]
     fn a_watermark_from_before_a_reset_is_discarded() {
         let clock = Clock::with_cps(44100.0, 0.5);
-        clock.advance(44100 * 60); // a minute in: cycle 30
+        clock.advance(44100 * 60); // a minute in: bar 30
         let state = state_with(vec![Some(1.0)]);
 
         let mut seq = Sequencer::new(0, 2, ReplayMode::None);
@@ -1268,13 +1268,13 @@ mod start_position_tests {
 
         // The scheduler has been running, so it holds a large watermark.
         let stale = schedule_pass(&mut seq, &clock, &state, None, &mut live);
-        assert!(stale.unwrap().cycles > 29.0, "watermark should be far along");
+        assert!(stale.unwrap().bars > 29.0, "watermark should be far along");
 
         clock.reset();
         let after = schedule_pass(&mut seq, &clock, &state, stale, &mut live)
             .expect("the pass must still claim a watermark");
         assert!(
-            after.cycles < 1.0,
+            after.bars < 1.0,
             "the watermark must restart near zero, got {after:?}"
         );
 
@@ -1299,7 +1299,7 @@ mod start_position_tests {
     fn a_re_eval_without_a_reset_keeps_the_beat() {
         let clock = Clock::with_cps(44100.0, 0.5);
         clock.reset();
-        clock.advance(44100 * 3); // 1.5 cycles into the performance
+        clock.advance(44100 * 3); // 1.5 bars into the performance
         let state = state_with(vec![Some(1.0), Some(2.0), Some(3.0), Some(4.0)]);
 
         // No reset: an edit mid-performance picks up where the groove is.

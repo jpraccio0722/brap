@@ -63,7 +63,7 @@ impl Lowerer {
             Expr::Div { lhs, rhs } =>
                 self.binop(NodeKind::Div, |a, b| a / b, lhs, rhs),
 
-            Expr::For { var, iter, body } => {
+            Expr::For { var, iter, body, length } => {
                 let items = match self.expr(iter)? {
                     Value::List(items) => items,
                     _ => return Err(format!(
@@ -77,9 +77,33 @@ impl Lowerer {
                 for item in items.iter() {
                     self.env.push_scope();
                     self.env.define(&var.0, item.value.clone());
-                    let iteration = self.expr(body);
+                    // The length is read inside the loop's scope, like the body
+                    // it belongs to, so a step may be as long as the element it
+                    // was built from: `for i in 1..=4 { f4;i }` is four notes
+                    // each longer than the last.
+                    let iteration = self.expr(body).and_then(|value| match length {
+                        None => Ok(Item::plain(value)),
+                        Some(e) => self.length(e).map(|l| Item { value, length: Some(l) }),
+                    });
                     self.env.pop_scope();
                     out.push(iteration?);
+                }
+
+                // A `;` describes a step of a sequence, so it means something
+                // only where the loop is collecting one. The two other things a
+                // loop can be are settled below by what the body produced, and
+                // neither of them has steps: voices are summed and plays are
+                // scheduled, and a length would be silently dropped by both.
+                if length.is_some() {
+                    if let Some(what) = out.iter().find_map(|item| match item.value {
+                        Value::Play { .. } => Some("plays"),
+                        Value::Signal(_) => Some("audio"),
+                        _ => None,
+                    }) {
+                        return Err(format!(
+                            "for {}: a `;` length is how long a step lasts, and this loop \
+                             answers with {what} rather than a sequence of steps", var.0));
+                    }
                 }
 
                 // What the body produced decides what the loop is. A loop over
@@ -87,14 +111,14 @@ impl Lowerer {
                 // over values is a list being built, so it collects. Deciding
                 // from the values rather than from a keyword is what lets one
                 // `for` be both without either having to be spelled specially.
-                if out.iter().any(|v| matches!(v, Value::Play { .. })) {
+                if out.iter().any(|item| matches!(item.value, Value::Play { .. })) {
                     // Plays are neither summed nor collected: they all happen,
                     // and the loop as a whole finishes when the last does.
                     let mut ends_at = Some(self.play_start);
                     let mut first = usize::MAX;
                     let mut last = 0usize;
-                    for v in &out {
-                        let Value::Play { ends_at: end, first: f, last: l, .. } = v else {
+                    for item in &out {
+                        let Value::Play { ends_at: end, first: f, last: l, .. } = &item.value else {
                             return Err(format!(
                                 "for {}: a loop cannot mix plays with other values", var.0));
                         };
@@ -118,21 +142,22 @@ impl Lowerer {
                     });
                 }
 
-                if out.iter().any(|v| matches!(v, Value::Signal(_))) {
+                if out.iter().any(|item| matches!(item.value, Value::Signal(_))) {
                     // Any signal at all makes the loop audio: a number among
                     // them is a constant to be added, which is what `combine`
                     // already does.
                     let mut acc: Option<Value> = None;
-                    for v in out {
+                    for item in out {
                         acc = Some(match acc {
-                            None => v,
-                            Some(prev) => self.combine(NodeKind::Add, |a, b| a + b, prev, v)?,
+                            None => item.value,
+                            Some(prev) =>
+                                self.combine(NodeKind::Add, |a, b| a + b, prev, item.value)?,
                         });
                     }
                     return Ok(acc.expect("non-empty list yields at least one value"));
                 }
 
-                Ok(Value::List(Item::all(out)))
+                Ok(Value::List(Rc::new(out)))
             }
 
             Expr::If { cond, then, otherwise } => {
@@ -182,20 +207,7 @@ impl Lowerer {
                     let value = self.expr(&item.value)?;
                     let length = match &item.length {
                         None => None,
-                        Some(e) => Some(match self.expr(e)? {
-                            Value::Number(n) => {
-                                if !n.is_finite() || n <= 0.0 {
-                                    return Err(format!(
-                                        "a `;` length must be a positive number, got {n}"));
-                                }
-                                Length::Ratio(n)
-                            }
-                            Value::Duration(b) => Length::Beats(b),
-                            Value::Tuplet => Length::Tuplet,
-                            _ => return Err(
-                                "a `;` length needs a compile-time number or a written \
-                                 note value, got a signal".to_string()),
-                        }),
+                        Some(e) => Some(self.length(e)?),
                     };
                     vals.push(Item { value, length });
                 }
@@ -310,6 +322,26 @@ impl Lowerer {
                 let inputs = vec![self.as_input(l)?, self.as_input(r)?];
                 Ok(Value::Signal(self.push_node(kind, inputs)))
             }
+        }
+    }
+
+    /// What a `;` gave the step in front of it.
+    ///
+    /// One reading for both places a length can be written — an element of a
+    /// list, and the body of a `for` collecting one — so `[f4;e]` and
+    /// `for i in 0..=0 { f4;e }` cannot drift apart in what `e` means there.
+    fn length(&mut self, e: &Expr) -> Result<Length, String> {
+        match self.expr(e)? {
+            Value::Number(n) => {
+                if !n.is_finite() || n <= 0.0 {
+                    return Err(format!("a `;` length must be a positive number, got {n}"));
+                }
+                Ok(Length::Ratio(n))
+            }
+            Value::Duration(b) => Ok(Length::Beats(b)),
+            Value::Tuplet => Ok(Length::Tuplet),
+            _ => Err("a `;` length needs a compile-time number or a written note value, \
+                      got a signal".to_string()),
         }
     }
 

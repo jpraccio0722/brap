@@ -362,6 +362,7 @@ mod tests {
             // Nothing here reads a buffer.
             samples: Default::default(),
             choices: Vec::new(),
+            meter: Default::default(),
         }
     }
 
@@ -778,6 +779,7 @@ play(riff, bass, cut: rands(4, 400, 2000))
         for name in ["lead", "bass", "snare"] {
             crate::scheduler::voice::build_voice(
                 &ins, name, 60.0, &[], 0.5, crate::lowerer::lower::DEFAULT_BEAT_SECS,
+                Default::default(),
             )
                 .unwrap_or_else(|e| panic!("{name} should build a voice: {e}"));
         }
