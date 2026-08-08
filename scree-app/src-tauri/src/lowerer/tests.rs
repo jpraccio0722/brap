@@ -2306,6 +2306,232 @@ fn a_second_channel_can_be_asked_for() {
     assert_eq!(read.inputs[2], Const(1.0));
 }
 
+// ---- slice ----
+
+/// Where the read head sits at each of `times`, in position units.
+///
+/// The buffer these tests share is a ramp from -1 to 1, so what a graph renders
+/// says where in the buffer it read — undo that mapping and a rendered sample
+/// *is* a position. Everything below is about which positions are read and
+/// when, which is the only thing `slice` decides.
+fn read_positions(src: &str, times: &[f64]) -> Vec<f32> {
+    use fundsp::prelude64::AudioUnit;
+
+    let lowered = sampled(src).expect("should lower");
+    let mut net = crate::scree_graph::realizer::realize(&lowered.graph).expect("should realize");
+    net.set_sample_rate(44100.0);
+
+    let last = (times.last().expect("a time") * 44100.0) as usize + 1;
+    let rendered: Vec<f32> = (0..last).map(|_| net.get_mono()).collect();
+    times
+        .iter()
+        .map(|t| (rendered[((t * 44100.0) as usize).min(last - 1)] + 1.0) / 2.0)
+        .collect()
+}
+
+/// A slice is a `Line` feeding a `Sample`, and nothing else — no new node kind,
+/// and no state anywhere. The buffer is two seconds, so a quarter of it is half
+/// a second, and that half-second is the whole feature: it is the number a
+/// hand-written phasor has to be told and can therefore be told wrong.
+#[test]
+fn a_slice_is_a_line_into_the_ordinary_reader() {
+    let g = sampled("slice(load(\"break.wav\"), 0.25, 0.5)\n").expect("should lower").graph;
+
+    assert_eq!(g.nodes.len(), 2, "a slice is two nodes: {:?}", g.nodes);
+    assert_eq!(g.nodes[0], node(NodeKind::Line, vec![Const(0.25), Const(0.5), Const(0.5)]));
+    assert_eq!(
+        g.nodes[1],
+        node(NodeKind::Sample, vec![Node(NodeId(0)), Const(0.0), Const(0.0)]),
+    );
+}
+
+/// The reason the builtin exists: the portion is read at the speed the buffer
+/// was recorded at, so a quarter of a two-second break takes half a second.
+#[test]
+fn a_slice_reads_its_portion_at_the_buffers_own_speed() {
+    let at = read_positions(
+        "slice(load(\"break.wav\"), 0.25, 0.5)\n", &[0.0, 0.25, 0.5, 0.75]);
+
+    assert!((at[0] - 0.25).abs() < 0.01, "should start at 0.25, got {}", at[0]);
+    assert!((at[1] - 0.375).abs() < 0.01, "halfway at 0.375, got {}", at[1]);
+    assert!((at[2] - 0.5).abs() < 0.01, "arrives at 0.5, got {}", at[2]);
+    assert!((at[3] - 0.5).abs() < 0.01, "and holds there, got {}", at[3]);
+}
+
+/// The thing the hand-written form kept getting wrong, pinned as a difference:
+/// scaling a `ramp`'s position without scaling its frequency reads the right
+/// portion at a quarter of the speed.
+#[test]
+fn a_slice_is_not_the_naive_scaled_phasor() {
+    let sliced = read_positions("slice(load(\"break.wav\"), 0, 0.25)\n", &[0.5]);
+    let naive = read_positions(
+        "sample(load(\"break.wav\"), ramp(1 / load(\"break.wav\").secs) * 0.25)\n", &[0.5]);
+
+    assert!((sliced[0] - 0.25).abs() < 0.01, "the slice is done, got {}", sliced[0]);
+    assert!((naive[0] - 0.0625).abs() < 0.01, "the naive one crawls, got {}", naive[0]);
+}
+
+/// And it really is only sugar: the spelling it replaces renders the same
+/// samples, so nothing was added to the audio path.
+#[test]
+fn a_slice_is_the_hand_written_form_exactly() {
+    let times = [0.0, 0.1, 0.3, 0.49, 0.6];
+    assert_eq!(
+        read_positions("slice(load(\"break.wav\"), 0.25, 0.5)\n", &times),
+        read_positions(
+            "let b = load(\"break.wav\")\nsample(b, line(0.25, 0.5, 0.25 * b.secs))\n",
+            &times,
+        ),
+    );
+
+    // And with a rate, which is the same line with the same end points and a
+    // shorter one of them — both spellings are written out in the reference.
+    assert_eq!(
+        read_positions("slice(load(\"break.wav\"), 0.25, 0.5, 2)\n", &times),
+        read_positions(
+            "let b = load(\"break.wav\")\nsample(b, line(0.25, 0.5, 0.25 * b.secs / 2))\n",
+            &times,
+        ),
+    );
+}
+
+/// Backwards costs nothing and needs no flag: the ends are simply the other way
+/// round, and the portion still takes as long as it lasts.
+#[test]
+fn a_slice_written_backwards_plays_backwards() {
+    let at = read_positions(
+        "slice(load(\"break.wav\"), 0.5, 0.25)\n", &[0.0, 0.25, 0.5]);
+
+    assert!((at[0] - 0.5).abs() < 0.01, "should start at 0.5, got {}", at[0]);
+    assert!((at[1] - 0.375).abs() < 0.01, "and fall, got {}", at[1]);
+    assert!((at[2] - 0.25).abs() < 0.01, "landing on 0.25, got {}", at[2]);
+}
+
+#[test]
+fn a_slice_can_be_asked_for_a_second_channel() {
+    let g = sampled("slice(load(\"break.wav\"), 0, 1, 1, 1)\n").expect("should lower").graph;
+    let read = g.nodes.iter().find(|n| n.kind == NodeKind::Sample).unwrap();
+    assert_eq!(read.inputs[2], Const(1.0));
+}
+
+/// The rate is spent on the line's length and nowhere else: the same portion,
+/// covered in half the time, is that portion at double speed. The buffer is two
+/// seconds, so a quarter of it is half a second at rate 1.
+#[test]
+fn a_rate_shortens_the_line_rather_than_moving_its_ends() {
+    let duration = |src: &str| {
+        let g = sampled(src).expect("should lower").graph;
+        let line = g.nodes.iter().find(|n| n.kind == NodeKind::Line).expect("a Line");
+        assert_eq!(line.inputs[0], Const(0.25), "the ends must not move");
+        assert_eq!(line.inputs[1], Const(0.5));
+        match line.inputs[2] {
+            Const(d) => d,
+            _ => panic!("the duration should be a constant"),
+        }
+    };
+
+    assert_eq!(duration("slice(load(\"break.wav\"), 0.25, 0.5)\n"), 0.5);
+    assert_eq!(duration("slice(load(\"break.wav\"), 0.25, 0.5, 2)\n"), 0.25);
+    assert_eq!(duration("slice(load(\"break.wav\"), 0.25, 0.5, 0.5)\n"), 1.0);
+}
+
+/// And it really is a speed: at rate 2 the reader is through the portion in
+/// half the time it took at rate 1.
+#[test]
+fn a_rate_reads_the_portion_faster() {
+    let at = read_positions(
+        "slice(load(\"break.wav\"), 0.25, 0.5, 2)\n", &[0.0, 0.125, 0.25, 0.5]);
+
+    assert!((at[0] - 0.25).abs() < 0.01, "should start at 0.25, got {}", at[0]);
+    assert!((at[1] - 0.375).abs() < 0.01, "halfway by 0.125 s, got {}", at[1]);
+    assert!((at[2] - 0.5).abs() < 0.01, "and done by 0.25 s, got {}", at[2]);
+    assert!((at[3] - 0.5).abs() < 0.01, "then holds, got {}", at[3]);
+}
+
+/// A rate applies to a reversed slice the same way — it is the speed of the
+/// read, not the direction of it.
+#[test]
+fn a_rate_applies_to_a_backwards_slice_too() {
+    let at = read_positions(
+        "slice(load(\"break.wav\"), 0.5, 0.25, 2)\n", &[0.0, 0.125, 0.25]);
+
+    assert!((at[0] - 0.5).abs() < 0.01, "should start at 0.5, got {}", at[0]);
+    assert!((at[1] - 0.375).abs() < 0.01, "halfway by 0.125 s, got {}", at[1]);
+    assert!((at[2] - 0.25).abs() < 0.01, "and done by 0.25 s, got {}", at[2]);
+}
+
+/// At zero the reader would stop rather than slow, which is the DC offset the
+/// whole builtin exists to keep anyone from writing by accident.
+#[test]
+fn a_rate_of_zero_is_refused() {
+    let e = sample_err("slice(load(\"break.wav\"), 0, 0.25, 0)\n");
+    assert!(e.contains("above zero"), "got: {e}");
+}
+
+/// Backwards is the ends the other way round. A negative rate would be a second
+/// spelling of it, and the message has to say which one is the real one.
+#[test]
+fn a_negative_rate_points_at_writing_the_ends_backwards() {
+    let e = sample_err("slice(load(\"break.wav\"), 0, 0.25, -1)\n");
+    assert!(e.contains("above zero"), "got: {e}");
+    assert!(e.contains("0.5, 0.25"), "should show the backwards spelling, got: {e}");
+}
+
+#[test]
+fn a_rate_that_is_a_signal_says_to_use_sample() {
+    let e = sample_err("slice(load(\"break.wav\"), 0, 0.25, ramp(1))\n");
+    assert!(e.contains("compile-time number"), "got: {e}");
+    assert!(e.contains("`sample`"), "should name the alternative, got: {e}");
+}
+
+#[test]
+fn a_slice_takes_no_more_than_five_arguments() {
+    let e = sample_err("slice(load(\"break.wav\"), 0, 0.25, 1, 0, 9)\n");
+    assert!(e.contains("slice(buffer, start, end)"), "got: {e}");
+}
+
+/// A slice is written down in the source at both ends, so an end outside the
+/// buffer is a typo rather than a position that happens to be silent — which is
+/// the one place it may differ from `sample`, where anything at all is fair.
+#[test]
+fn an_end_outside_the_buffer_is_refused() {
+    for src in [
+        "slice(load(\"break.wav\"), 0, 1.5)\n",
+        "slice(load(\"break.wav\"), -0.2, 0.5)\n",
+    ] {
+        let e = sample_err(src);
+        assert!(e.contains("between 0 and 1"), "{src} gave: {e}");
+    }
+}
+
+/// The ends are spent on a line built once, so neither can be modulated. The
+/// message has to point at the name that can be.
+#[test]
+fn an_end_that_is_a_signal_says_to_use_sample() {
+    let e = sample_err("slice(load(\"break.wav\"), 0, ramp(1))\n");
+    assert!(e.contains("compile-time number"), "got: {e}");
+    assert!(e.contains("`sample`"), "should name the alternative, got: {e}");
+}
+
+/// Which end is wrong, rather than that one of them is.
+#[test]
+fn a_refused_end_says_which_one_it_was() {
+    assert!(sample_err("slice(load(\"break.wav\"), 4, 0.5)\n").contains("start"));
+    assert!(sample_err("slice(load(\"break.wav\"), 0.5, 4)\n").contains("end"));
+}
+
+#[test]
+fn a_slice_needs_both_of_its_ends() {
+    let e = sample_err("slice(load(\"break.wav\"), 0.25)\n");
+    assert!(e.contains("slice(buffer, start, end)"), "got: {e}");
+}
+
+#[test]
+fn slicing_something_that_is_not_a_buffer_says_so() {
+    let e = sample_err("slice(220, 0, 1)\n");
+    assert!(e.contains("must be a buffer"), "got: {e}");
+}
+
 // ---- what a buffer is not ----
 
 #[test]
@@ -2380,7 +2606,8 @@ fn the_readme_sampling_examples_compile() {
         let wave = Arc::new(wave);
         crate::samples::Samples::from_pairs([
             ("breaks/amen.wav".to_string(), wave.clone()),
-            ("pad.wav".to_string(), wave),
+            ("pad.wav".to_string(), wave.clone()),
+            ("door.wav".to_string(), wave),
         ])
     }
 
@@ -2392,8 +2619,24 @@ fn the_readme_sampling_examples_compile() {
         "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(4 / amen.secs) * 0.25)\n",
         "let amen = load(\"breaks/amen.wav\")\nsample(amen, 0.5 + ramp(4 / amen.secs) * 0.25)\n",
         "let amen = load(\"breaks/amen.wav\")\nsample(amen, ramp(1 / amen.secs) >> hold(16, 0))\n",
-        // The chopping example, entire.
+        // The `slice` examples, and the equivalence the section claims.
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0, 0.25)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0.5, 0.75)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0.5, 0.25)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0, 1)\n",
+        // The rates, and both equivalences the section claims.
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0, 0.25, 2)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0, 0.25, 0.5)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0.5, 0.25, 2)\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0.25, 0.5)\n\
+         sample(amen, line(0.25, 0.5, 0.25 * amen.secs))\n",
+        "let amen = load(\"breaks/amen.wav\")\nslice(amen, 0.25, 0.5, 2)\n\
+         sample(amen, line(0.25, 0.5, 0.25 * amen.secs / 2))\n",
+        "fn slam() = slice(load(\"door.wav\"), 0, 0.15) * perc(0.001, 0.2)\nplay([\\], slam)\n",
+        // The chopping example, entire, and the `slice` spelling beside it.
         "fn chop(n, at = 0) =\n  sample(load(\"breaks/amen.wav\"), at + ramp(n) * 0.0625) * perc(0.001, 0.2)\n\
+         play([\\, \\, \\, \\, \\, \\, \\, \\], chop, 1,\n     at: [0, 0.25, 0.5, 0.0625, 0.75, 0.5, 0.125, 0.875])\n",
+        "fn chop(n, at = 0) =\n  slice(load(\"breaks/amen.wav\"), at, at + 0.0625) * perc(0.001, 0.2)\n\
          play([\\, \\, \\, \\, \\, \\, \\, \\], chop, 1,\n     at: [0, 0.25, 0.5, 0.0625, 0.75, 0.5, 0.125, 0.875])\n",
         // The stereo one.
         "let stereo = load(\"pad.wav\")\nlet pos = ramp(1 / stereo.secs)\n\

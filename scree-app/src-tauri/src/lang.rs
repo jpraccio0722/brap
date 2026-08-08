@@ -1393,6 +1393,15 @@ pub static SPECIALS: &[ListBuiltin] = &[
         doc: "Read a buffer at a position: 0 is the start, 1 is the end, and anything outside that is silence. `position` is a signal, which is where speed, direction and chopping all come from — `sample(b, ramp(1 / b.secs))` plays it forwards, `1 - ramp(...)` backwards, `ramp(...) * 0.25` reads the first quarter. Cubic interpolation, so it holds up away from its own speed. `channel` defaults to 0 and wraps if the buffer has fewer.",
     },
     ListBuiltin {
+        name: "slice",
+        params: &["buffer", "start", "end", "rate", "channel"],
+        arities: &[3, 4, 5],
+        variadic: false,
+        receives: ValueKind::Buffer,
+        returns: ValueKind::Signal,
+        doc: "Read a portion of a buffer, once: `slice(amen, 0, 0.25)` is the first quarter of the break, at the speed it was recorded at. `start` and `end` are positions like `sample`'s, 0 at the start of the buffer and 1 at the end, and both are compile-time numbers rather than signals. `start` past `end` plays that portion backwards. `rate` defaults to 1 and multiplies the speed — 2 reads the portion in half the time, an octave up, 0.5 in twice, an octave down — and must be above zero, since at zero the reader would stop rather than slow; backwards is the ends the other way round rather than a negative rate. This is `sample` with the phasor written for you — `sample(b, line(start, end, (end - start) * b.secs / rate))` — and it exists because that duration is the part that is easy to get wrong: scaling a `ramp`'s position without scaling its frequency to match reads the right portion at the wrong speed. The read holds on the last sample once it arrives, so an envelope is what ends the note, exactly as with `sample`; a slice ending at 1 goes quiet on its own, since past the buffer is silence. For a position or a speed that moves under a signal — scrubbing, stuttering, anything modulated — use `sample`.",
+    },
+    ListBuiltin {
         name: "secs",
         params: &["buffer"],
         arities: &[1],

@@ -178,7 +178,69 @@ the buffer is, so `1 / amen.secs` is the frequency that reads it exactly once �
 and any multiple of that is a speed. Reading outside 0..1 is silence rather than
 a held edge, so a position that overshoots goes quiet instead of clicking.
 
-Chopping from a pattern is the same arithmetic with the slice as a lane:
+### A portion, once
+
+One thing on that list is easy to write wrong, and it is the most common one:
+**a portion of the buffer, at the buffer's own speed.** `ramp(...) * 0.25` reads
+the first quarter, but the phasor still takes the whole buffer to get there, so
+it reads that quarter at a quarter speed. Reading a portion properly means
+scaling the frequency to match the span — and then saying the span twice, once
+in each.
+
+`slice` is that written for you. Name the two ends and it draws the line between
+them:
+
+```rust
+slice(amen, 0, 0.25)        // the first quarter, once, at its own speed
+slice(amen, 0.5, 0.75)      // the third quarter
+slice(amen, 0.5, 0.25)      // that quarter backwards
+slice(amen, 0, 1)           // the whole break, once, no loop
+```
+
+Both ends are numbers written in the source rather than signals, and both are
+refused outside 0..1 — a slice you can point at is a slice that cannot silently
+read nothing.
+
+A fourth argument is the **rate**, a multiple of that own speed:
+
+```rust
+slice(amen, 0, 0.25, 2)     // the first quarter in half the time, an octave up
+slice(amen, 0, 0.25, 0.5)   // in twice the time, an octave down
+slice(amen, 0.5, 0.25, 2)   // backwards, twice as fast
+```
+
+Reading faster is reading fewer of the buffer's samples per second of output,
+so a rate is a pitch as much as a tempo — there is no way to have one without
+the other here. It has to be above zero: at zero the reader would stop rather
+than slow, which is the silent DC offset the whole builtin exists to avoid.
+Backwards is the ends written the other way round, not a negative rate.
+
+All of it is exactly `sample` with the phasor filled in:
+
+```rust
+slice(amen, 0.25, 0.5)
+sample(amen, line(0.25, 0.5, 0.25 * amen.secs))   // the same graph
+
+slice(amen, 0.25, 0.5, 2)
+sample(amen, line(0.25, 0.5, 0.25 * amen.secs / 2))   // and the same again
+```
+
+Which means the one thing to know about it is `line`'s: it **holds** on the last
+sample of the slice rather than falling silent, so a portion ending anywhere but
+the end of the buffer leaves a DC offset behind it. An envelope is what ends the
+note — the same thing that ends every other voice:
+
+```rust
+fn slam() = slice(load("door.wav"), 0, 0.15) * perc(0.001, 0.2)
+```
+
+A slice ending at `1` needs no such care: past the buffer is already silence.
+
+Reach for `sample` when the position or the speed has to **move** — scrubbing,
+stuttering, anything modulated. Reach for `slice` when you know the ends and the
+rate when you write them, which is most drums.
+
+Chopping from a pattern is the same arithmetic with the portion as a lane:
 
 ```rust
 // Sixteenths of the break, played as a pattern. `at` is where in the buffer
@@ -188,6 +250,15 @@ fn chop(n, at = 0) =
 
 play([\, \, \, \, \, \, \, \], chop, 1,
      at: [0, 0.25, 0.5, 0.0625, 0.75, 0.5, 0.125, 0.875])
+```
+
+A lane value is a number by the time the note is built, so it is a `slice` end
+like any other — which is the same chop with the phasor left to the language,
+and at the break's own speed rather than `n`'s:
+
+```rust
+fn chop(n, at = 0) =
+  slice(load("breaks/amen.wav"), at, at + 0.0625) * perc(0.001, 0.2)
 ```
 
 **An instrument names its own file.** A `fn` sees only other `fn`s — a top-level
@@ -722,6 +793,7 @@ table is the signatures.
 | --- | --- | --- |
 | `load` | `load(path) -> buffer` | Read an audio file into a buffer. The path is relative to the file it is written in, the same way a `use` path is, and must be written out rather than computed — every file is decoded once, before the program runs, so no note ever waits on a disk. Any format symphonia reads: wav, mp3, flac, ogg. Nothing comes out of a buffer until `sample` reads it. |
 | `sample` | `sample(buffer, position, channel?) -> signal` | Read a buffer at a position: 0 is the start, 1 is the end, and anything outside that is silence. `position` is a signal, which is where speed, direction and chopping all come from. Cubic interpolation, so it holds up away from its own speed. `channel` defaults to 0 and wraps if the buffer has fewer; it picks which reader is built, so it must be a compile-time number. |
+| `slice` | `slice(buffer, start, end, rate?, channel?) -> signal` | Read a portion of a buffer, once: `slice(amen, 0, 0.25)` is the first quarter of the break, at the speed it was recorded at. `start` and `end` are positions like `sample`'s, and both are compile-time numbers rather than signals — a slice is refused outside 0..1, where `sample` would read silence. `start` past `end` plays the portion backwards. `rate` defaults to 1 and multiplies the speed — 2 reads the portion in half the time, an octave up — and must be above zero, since at zero the reader would stop rather than slow. It is `sample` with the phasor written for you, `sample(b, line(start, end, (end - start) * b.secs / rate))`, and exists because that duration is the part that is easy to get wrong. The read holds on the last sample once it arrives, so an envelope is what ends the note; a slice ending at 1 goes quiet on its own. Use `sample` when the position or the speed has to move. |
 | `secs` | `secs(buffer) -> number` | How long a buffer is, in seconds. A compile-time number, so it divides into a `ramp` frequency: `ramp(1 / amen.secs)` reads the whole buffer once at its own speed. |
 | `channels` | `channels(buffer) -> number` | How many channels a buffer has — 1 for mono, 2 for a stereo file. |
 
